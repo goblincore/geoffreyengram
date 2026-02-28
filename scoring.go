@@ -7,12 +7,12 @@ import (
 
 // --- Composite scoring ---
 
-// CompositeScore computes the CaviraOSS-inspired blended relevance score.
+// CompositeScore computes the blended relevance score using configurable weights.
 //
-//	composite = (0.6×similarity + 0.2×salience + 0.1×recency + 0.1×linkWeight) × sectorWeight
-func CompositeScore(similarity, salience, daysSinceAccess, linkWeight, sectorWeight float64) float64 {
+//	composite = (w.Similarity×similarity + w.Salience×salience + w.Recency×recency + w.LinkWeight×linkWeight) × sectorWeight
+func CompositeScore(similarity, salience, daysSinceAccess, linkWeight, sectorWeight float64, w ScoringWeights) float64 {
 	recency := math.Exp(-0.02 * daysSinceAccess)
-	raw := 0.6*similarity + 0.2*salience + 0.1*recency + 0.1*linkWeight
+	raw := w.Similarity*similarity + w.Salience*salience + w.Recency*recency + w.LinkWeight*linkWeight
 	return raw * sectorWeight
 }
 

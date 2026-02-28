@@ -10,23 +10,25 @@ import (
 	"time"
 )
 
-// Classifier determines which cognitive sector a memory belongs to.
+// HeuristicClassifier determines which cognitive sector a memory belongs to.
 // Uses a keyword heuristic first (zero-cost), falls back to Gemini for ambiguous content.
-type Classifier struct {
+// Implements SectorClassifier.
+type HeuristicClassifier struct {
 	apiKey string
 	client *http.Client
 }
 
-// NewClassifier creates a sector classifier.
-func NewClassifier(apiKey string) *Classifier {
-	return &Classifier{
+// NewHeuristicClassifier creates a sector classifier.
+// If apiKey is empty, only heuristic classification is used (no LLM fallback).
+func NewHeuristicClassifier(apiKey string) *HeuristicClassifier {
+	return &HeuristicClassifier{
 		apiKey: apiKey,
 		client: &http.Client{Timeout: 5 * time.Second},
 	}
 }
 
 // Classify determines the sector for a piece of memory content.
-func (c *Classifier) Classify(content string) Sector {
+func (c *HeuristicClassifier) Classify(content string) Sector {
 	sector, confidence := c.heuristicClassify(content)
 	if confidence >= 0.6 {
 		return sector
@@ -46,7 +48,7 @@ func (c *Classifier) Classify(content string) Sector {
 
 // heuristicClassify uses keyword matching to classify content into a sector.
 // Returns the best sector and a confidence score (0.0-1.0).
-func (c *Classifier) heuristicClassify(content string) (Sector, float64) {
+func (c *HeuristicClassifier) heuristicClassify(content string) (Sector, float64) {
 	lower := strings.ToLower(content)
 
 	scores := map[Sector]float64{
@@ -137,7 +139,7 @@ func (c *Classifier) heuristicClassify(content string) (Sector, float64) {
 }
 
 // geminiClassify uses Gemini to classify content when heuristics are ambiguous.
-func (c *Classifier) geminiClassify(content string) (Sector, error) {
+func (c *HeuristicClassifier) geminiClassify(content string) (Sector, error) {
 	url := "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=" + c.apiKey
 
 	prompt := `Classify this memory into exactly one sector. Reply with ONLY the sector name, nothing else.

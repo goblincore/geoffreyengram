@@ -2,6 +2,7 @@ package engram
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,16 +10,17 @@ import (
 	"time"
 )
 
-// Embedder generates vector embeddings via the Gemini API.
-type Embedder struct {
+// GeminiEmbedder generates vector embeddings via the Gemini API.
+// Implements EmbeddingProvider.
+type GeminiEmbedder struct {
 	apiKey    string
 	dimension int
 	client    *http.Client
 }
 
-// NewEmbedder creates an embedding client for gemini-embedding-001.
-func NewEmbedder(apiKey string, dimension int) *Embedder {
-	return &Embedder{
+// NewGeminiEmbedder creates an embedding provider for gemini-embedding-001.
+func NewGeminiEmbedder(apiKey string, dimension int) *GeminiEmbedder {
+	return &GeminiEmbedder{
 		apiKey:    apiKey,
 		dimension: dimension,
 		client:    &http.Client{Timeout: 5 * time.Second},
@@ -27,7 +29,7 @@ func NewEmbedder(apiKey string, dimension int) *Embedder {
 
 // Embed generates a vector for the given text.
 // taskType should be "RETRIEVAL_QUERY" for search queries or "RETRIEVAL_DOCUMENT" for stored memories.
-func (e *Embedder) Embed(text, taskType string) ([]float32, error) {
+func (e *GeminiEmbedder) Embed(ctx context.Context, text, taskType string) ([]float32, error) {
 	if e.apiKey == "" {
 		return nil, fmt.Errorf("no API key")
 	}
@@ -47,7 +49,7 @@ func (e *Embedder) Embed(text, taskType string) ([]float32, error) {
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("new request: %w", err)
 	}
@@ -79,6 +81,11 @@ func (e *Embedder) Embed(text, taskType string) ([]float32, error) {
 		vec[i] = float32(v)
 	}
 	return vec, nil
+}
+
+// Dimension returns the configured embedding dimension.
+func (e *GeminiEmbedder) Dimension() int {
+	return e.dimension
 }
 
 // --- Gemini Embed API types ---

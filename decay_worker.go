@@ -19,7 +19,7 @@ func (cm *Engram) startDecayWorker(interval time.Duration) {
 		for {
 			select {
 			case <-ticker.C:
-				updated, deleted, err := cm.store.RunDecaySweep(cm.config.MinDecayScore)
+				updated, deleted, err := cm.store.RunDecaySweep(cm.config.MinDecayScore, cm.config.decayRates)
 				if err != nil {
 					log.Printf("[engram] Decay sweep error: %v", err)
 				} else if updated > 0 || deleted > 0 {

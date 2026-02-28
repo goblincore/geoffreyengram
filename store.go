@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -41,51 +42,72 @@ func NewStore(path string) (*Store, error) {
 }
 
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(`
-		CREATE TABLE IF NOT EXISTS memories (
-			id              INTEGER PRIMARY KEY AUTOINCREMENT,
-			content         TEXT    NOT NULL,
-			sector          TEXT    NOT NULL DEFAULT 'semantic',
-			salience        REAL    NOT NULL DEFAULT 0.5,
-			decay_score     REAL    NOT NULL DEFAULT 0.5,
-			last_accessed_at TEXT   NOT NULL DEFAULT (datetime('now')),
-			access_count    INTEGER NOT NULL DEFAULT 0,
-			created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
-			summary         TEXT    NOT NULL DEFAULT '',
-			user_id         TEXT    NOT NULL
-		);
-		CREATE INDEX IF NOT EXISTS idx_memories_user_id ON memories(user_id);
-		CREATE INDEX IF NOT EXISTS idx_memories_sector  ON memories(sector);
+	// Version tracking
+	s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)`)
 
-		CREATE TABLE IF NOT EXISTS vectors (
-			id              INTEGER PRIMARY KEY AUTOINCREMENT,
-			memory_id       INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-			sector          TEXT    NOT NULL,
-			vector          BLOB    NOT NULL,
-			embedding_model TEXT    NOT NULL DEFAULT 'gemini-embedding-001'
-		);
-		CREATE INDEX IF NOT EXISTS idx_vectors_memory_id ON vectors(memory_id);
+	var version int
+	s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&version)
 
-		CREATE TABLE IF NOT EXISTS waypoints (
-			id          INTEGER PRIMARY KEY AUTOINCREMENT,
-			entity_text TEXT NOT NULL UNIQUE,
-			entity_type TEXT NOT NULL DEFAULT 'unknown'
-		);
-		CREATE INDEX IF NOT EXISTS idx_waypoints_entity ON waypoints(entity_text);
+	if version < 1 {
+		if _, err := s.db.Exec(`
+			CREATE TABLE IF NOT EXISTS memories (
+				id              INTEGER PRIMARY KEY AUTOINCREMENT,
+				content         TEXT    NOT NULL,
+				sector          TEXT    NOT NULL DEFAULT 'semantic',
+				salience        REAL    NOT NULL DEFAULT 0.5,
+				decay_score     REAL    NOT NULL DEFAULT 0.5,
+				last_accessed_at TEXT   NOT NULL DEFAULT (datetime('now')),
+				access_count    INTEGER NOT NULL DEFAULT 0,
+				created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+				summary         TEXT    NOT NULL DEFAULT '',
+				user_id         TEXT    NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_memories_user_id ON memories(user_id);
+			CREATE INDEX IF NOT EXISTS idx_memories_sector  ON memories(sector);
 
-		CREATE TABLE IF NOT EXISTS associations (
-			id          INTEGER PRIMARY KEY AUTOINCREMENT,
-			memory_id   INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-			waypoint_id INTEGER NOT NULL REFERENCES waypoints(id) ON DELETE CASCADE,
-			weight      REAL    NOT NULL DEFAULT 0.5,
-			UNIQUE(memory_id, waypoint_id)
-		);
-		CREATE INDEX IF NOT EXISTS idx_assoc_memory   ON associations(memory_id);
-		CREATE INDEX IF NOT EXISTS idx_assoc_waypoint ON associations(waypoint_id);
+			CREATE TABLE IF NOT EXISTS vectors (
+				id              INTEGER PRIMARY KEY AUTOINCREMENT,
+				memory_id       INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+				sector          TEXT    NOT NULL,
+				vector          BLOB    NOT NULL,
+				embedding_model TEXT    NOT NULL DEFAULT 'gemini-embedding-001'
+			);
+			CREATE INDEX IF NOT EXISTS idx_vectors_memory_id ON vectors(memory_id);
 
-		PRAGMA foreign_keys = ON;
-	`)
-	return err
+			CREATE TABLE IF NOT EXISTS waypoints (
+				id          INTEGER PRIMARY KEY AUTOINCREMENT,
+				entity_text TEXT NOT NULL UNIQUE,
+				entity_type TEXT NOT NULL DEFAULT 'unknown'
+			);
+			CREATE INDEX IF NOT EXISTS idx_waypoints_entity ON waypoints(entity_text);
+
+			CREATE TABLE IF NOT EXISTS associations (
+				id          INTEGER PRIMARY KEY AUTOINCREMENT,
+				memory_id   INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+				waypoint_id INTEGER NOT NULL REFERENCES waypoints(id) ON DELETE CASCADE,
+				weight      REAL    NOT NULL DEFAULT 0.5,
+				UNIQUE(memory_id, waypoint_id)
+			);
+			CREATE INDEX IF NOT EXISTS idx_assoc_memory   ON associations(memory_id);
+			CREATE INDEX IF NOT EXISTS idx_assoc_waypoint ON associations(waypoint_id);
+
+			PRAGMA foreign_keys = ON;
+		`); err != nil {
+			return err
+		}
+		s.db.Exec(`INSERT INTO schema_version (version) VALUES (1)`)
+	}
+
+	if version < 2 {
+		// Phase 3: temporal columns
+		s.db.Exec(`ALTER TABLE memories ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`)
+		s.db.Exec(`ALTER TABLE memories ADD COLUMN parent_id INTEGER NOT NULL DEFAULT 0`)
+		s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id)`)
+		s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at)`)
+		s.db.Exec(`INSERT INTO schema_version (version) VALUES (2)`)
+	}
+
+	return nil
 }
 
 // --- Vector encoding ---
@@ -113,9 +135,9 @@ func DecodeVector(b []byte) []float32 {
 // InsertMemory stores a new memory row and returns its ID.
 func (s *Store) InsertMemory(m Memory) (int64, error) {
 	res, err := s.db.Exec(`
-		INSERT INTO memories (content, sector, salience, decay_score, summary, user_id)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		m.Content, string(m.Sector), m.Salience, m.Salience, m.Summary, m.UserID,
+		INSERT INTO memories (content, sector, salience, decay_score, summary, user_id, session_id, parent_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		m.Content, string(m.Sector), m.Salience, m.Salience, m.Summary, m.UserID, m.SessionID, m.ParentID,
 	)
 	if err != nil {
 		return 0, err
@@ -138,13 +160,37 @@ type memoryWithVector struct {
 	Vector []float32
 }
 
+// scanMemory scans a memory row including temporal columns.
+func scanMemory(rows *sql.Rows, vecBlob *[]byte) (memoryWithVector, error) {
+	var mwv memoryWithVector
+	var lastAccessed, created string
+
+	if err := rows.Scan(
+		&mwv.ID, &mwv.Content, &mwv.Sector, &mwv.Salience, &mwv.DecayScore,
+		&lastAccessed, &mwv.AccessCount, &created, &mwv.Summary, &mwv.UserID,
+		&mwv.SessionID, &mwv.ParentID,
+		vecBlob,
+	); err != nil {
+		return mwv, err
+	}
+
+	mwv.LastAccessedAt, _ = time.Parse("2006-01-02 15:04:05", lastAccessed)
+	mwv.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", created)
+	if *vecBlob != nil {
+		mwv.Vector = DecodeVector(*vecBlob)
+	}
+	return mwv, nil
+}
+
+const memorySelectCols = `m.id, m.content, m.sector, m.salience, m.decay_score,
+	m.last_accessed_at, m.access_count, m.created_at, m.summary, m.user_id,
+	m.session_id, m.parent_id`
+
 // GetMemoriesWithVectors loads all memories (with vectors) for a given user.
 // At NPC scale (~50-500 per user) this is fast enough to score in Go.
 func (s *Store) GetMemoriesWithVectors(userID string) ([]memoryWithVector, error) {
 	rows, err := s.db.Query(`
-		SELECT m.id, m.content, m.sector, m.salience, m.decay_score,
-		       m.last_accessed_at, m.access_count, m.created_at, m.summary, m.user_id,
-		       v.vector
+		SELECT `+memorySelectCols+`, v.vector
 		FROM memories m
 		LEFT JOIN vectors v ON v.memory_id = m.id
 		WHERE m.user_id = ?
@@ -158,26 +204,157 @@ func (s *Store) GetMemoriesWithVectors(userID string) ([]memoryWithVector, error
 
 	var results []memoryWithVector
 	for rows.Next() {
-		var mwv memoryWithVector
-		var lastAccessed, created string
 		var vecBlob []byte
-
-		if err := rows.Scan(
-			&mwv.ID, &mwv.Content, &mwv.Sector, &mwv.Salience, &mwv.DecayScore,
-			&lastAccessed, &mwv.AccessCount, &created, &mwv.Summary, &mwv.UserID,
-			&vecBlob,
-		); err != nil {
+		mwv, err := scanMemory(rows, &vecBlob)
+		if err != nil {
 			return nil, err
-		}
-
-		mwv.LastAccessedAt, _ = time.Parse("2006-01-02 15:04:05", lastAccessed)
-		mwv.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", created)
-		if vecBlob != nil {
-			mwv.Vector = DecodeVector(vecBlob)
 		}
 		results = append(results, mwv)
 	}
 	return results, rows.Err()
+}
+
+// --- Temporal queries ---
+
+// GetSessionMemories returns all memories for a session, ordered by creation time.
+func (s *Store) GetSessionMemories(sessionID string) ([]Memory, error) {
+	rows, err := s.db.Query(`
+		SELECT `+memorySelectCols+`
+		FROM memories m
+		WHERE m.session_id = ?
+		ORDER BY m.created_at ASC`,
+		sessionID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []Memory
+	for rows.Next() {
+		var m Memory
+		var lastAccessed, created string
+		if err := rows.Scan(
+			&m.ID, &m.Content, &m.Sector, &m.Salience, &m.DecayScore,
+			&lastAccessed, &m.AccessCount, &created, &m.Summary, &m.UserID,
+			&m.SessionID, &m.ParentID,
+		); err != nil {
+			return nil, err
+		}
+		m.LastAccessedAt, _ = time.Parse("2006-01-02 15:04:05", lastAccessed)
+		m.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", created)
+		results = append(results, m)
+	}
+	return results, rows.Err()
+}
+
+// GetMemoriesInTimeWindow returns memories for a user within a time range.
+func (s *Store) GetMemoriesInTimeWindow(userID string, after, before time.Time) ([]Memory, error) {
+	rows, err := s.db.Query(`
+		SELECT `+memorySelectCols+`
+		FROM memories m
+		WHERE m.user_id = ? AND m.created_at >= ? AND m.created_at <= ?
+		ORDER BY m.created_at DESC`,
+		userID,
+		after.Format("2006-01-02 15:04:05"),
+		before.Format("2006-01-02 15:04:05"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []Memory
+	for rows.Next() {
+		var m Memory
+		var lastAccessed, created string
+		if err := rows.Scan(
+			&m.ID, &m.Content, &m.Sector, &m.Salience, &m.DecayScore,
+			&lastAccessed, &m.AccessCount, &created, &m.Summary, &m.UserID,
+			&m.SessionID, &m.ParentID,
+		); err != nil {
+			return nil, err
+		}
+		m.LastAccessedAt, _ = time.Parse("2006-01-02 15:04:05", lastAccessed)
+		m.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", created)
+		results = append(results, m)
+	}
+	return results, rows.Err()
+}
+
+// GetRecentMemories returns the N most recent memories for a user, optionally filtered by sectors.
+func (s *Store) GetRecentMemories(userID string, limit int, sectors []Sector) ([]Memory, error) {
+	query := `SELECT ` + memorySelectCols + ` FROM memories m WHERE m.user_id = ?`
+	args := []any{userID}
+
+	if len(sectors) > 0 {
+		placeholders := make([]string, len(sectors))
+		for i, sec := range sectors {
+			placeholders[i] = "?"
+			args = append(args, string(sec))
+		}
+		query += ` AND m.sector IN (` + strings.Join(placeholders, ",") + `)`
+	}
+
+	query += ` ORDER BY m.created_at DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []Memory
+	for rows.Next() {
+		var m Memory
+		var lastAccessed, created string
+		if err := rows.Scan(
+			&m.ID, &m.Content, &m.Sector, &m.Salience, &m.DecayScore,
+			&lastAccessed, &m.AccessCount, &created, &m.Summary, &m.UserID,
+			&m.SessionID, &m.ParentID,
+		); err != nil {
+			return nil, err
+		}
+		m.LastAccessedAt, _ = time.Parse("2006-01-02 15:04:05", lastAccessed)
+		m.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", created)
+		results = append(results, m)
+	}
+	return results, rows.Err()
+}
+
+// GetLastSessionID returns the most recent session_id for a user.
+func (s *Store) GetLastSessionID(userID string) (string, error) {
+	var sessionID string
+	err := s.db.QueryRow(`
+		SELECT session_id FROM memories
+		WHERE user_id = ? AND session_id != ''
+		ORDER BY created_at DESC LIMIT 1`,
+		userID,
+	).Scan(&sessionID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return sessionID, err
+}
+
+// GetActiveUserIDs returns all distinct user IDs with stored memories.
+func (s *Store) GetActiveUserIDs() ([]string, error) {
+	rows, err := s.db.Query(`SELECT DISTINCT user_id FROM memories`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // --- Waypoint CRUD ---
@@ -230,9 +407,7 @@ func (s *Store) GetAssociatedWaypointIDs(memoryID int64) ([]int64, error) {
 // GetMemoriesByWaypoint returns memories linked to a waypoint, excluding a set of IDs.
 func (s *Store) GetMemoriesByWaypoint(waypointID int64, userID string, excludeIDs map[int64]bool) ([]memoryWithVector, error) {
 	rows, err := s.db.Query(`
-		SELECT m.id, m.content, m.sector, m.salience, m.decay_score,
-		       m.last_accessed_at, m.access_count, m.created_at, m.summary, m.user_id,
-		       v.vector, a.weight
+		SELECT `+memorySelectCols+`, v.vector, a.weight
 		FROM associations a
 		JOIN memories m ON m.id = a.memory_id
 		LEFT JOIN vectors v ON v.memory_id = m.id
@@ -254,6 +429,7 @@ func (s *Store) GetMemoriesByWaypoint(waypointID int64, userID string, excludeID
 		if err := rows.Scan(
 			&mwv.ID, &mwv.Content, &mwv.Sector, &mwv.Salience, &mwv.DecayScore,
 			&lastAccessed, &mwv.AccessCount, &created, &mwv.Summary, &mwv.UserID,
+			&mwv.SessionID, &mwv.ParentID,
 			&vecBlob, &linkWeight,
 		); err != nil {
 			return nil, err
@@ -293,7 +469,7 @@ func (s *Store) ReinforceSalience(memoryID int64, boost float64) error {
 
 // RunDecaySweep applies exponential decay to all memories and prunes dead ones.
 // Returns count of memories updated and deleted.
-func (s *Store) RunDecaySweep(minScore float64) (updated int, deleted int, err error) {
+func (s *Store) RunDecaySweep(minScore float64, decayRates map[Sector]float64) (updated int, deleted int, err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, 0, err
@@ -329,7 +505,7 @@ func (s *Store) RunDecaySweep(minScore float64) (updated int, deleted int, err e
 		accessTime, _ := time.Parse("2006-01-02 15:04:05", lastAccessed)
 		days := now.Sub(accessTime).Hours() / 24.0
 
-		lambda := SectorDecayLambda[Sector(sector)]
+		lambda := decayRates[Sector(sector)]
 		if lambda == 0 {
 			lambda = 0.02 // default warm
 		}

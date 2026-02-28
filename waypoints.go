@@ -5,11 +5,22 @@ import (
 	"strings"
 )
 
-// --- Entity extraction ---
+// KnownEntity is a domain-specific entity to match during extraction.
+// For example, a music NPC would add known artists here.
+type KnownEntity struct {
+	Text string
+	Type string // e.g. "music_artist", "game_item", "place"
+}
 
-// ExtractEntities pulls out entities from memory content using simple heuristics.
-// For NPC chat, this covers player names, music artists, quoted strings, and topics.
-func ExtractEntities(content string) []Entity {
+// DefaultEntityExtractor pulls entities from memory content using heuristics.
+// Detects bracket names, quoted strings, capitalized phrases, and caller-provided known entities.
+// Implements EntityExtractor.
+type DefaultEntityExtractor struct {
+	KnownEntities []KnownEntity
+}
+
+// Extract returns entities found in the content.
+func (e *DefaultEntityExtractor) Extract(content string) []Entity {
 	var entities []Entity
 	seen := make(map[string]bool)
 
@@ -35,26 +46,20 @@ func ExtractEntities(content string) []Entity {
 		add(match[1], "topic")
 	}
 
-	// 3. Known music artists (from Lily's personality knowledge)
-	musicArtists := []string{
-		"Denki Groove", "Cornelius", "YMO", "Haruomi Hosono", "Towa Tei",
-		"Aphex Twin", "Boards of Canada", "Nujabes", "DJ Shadow",
-		"Massive Attack", "Portishead", "Curtis Mayfield", "Stevie Wonder",
-		"Kraftwerk",
-	}
-	lower := strings.ToLower(content)
-	for _, artist := range musicArtists {
-		if strings.Contains(lower, strings.ToLower(artist)) {
-			add(artist, "music_artist")
+	// 3. Known entities (domain-specific, provided by caller)
+	if len(e.KnownEntities) > 0 {
+		lower := strings.ToLower(content)
+		for _, known := range e.KnownEntities {
+			if strings.Contains(lower, strings.ToLower(known.Text)) {
+				add(known.Text, known.Type)
+			}
 		}
 	}
 
 	// 4. Capitalized multi-word phrases (potential proper nouns, not at sentence start)
-	// Match sequences like "Nebula Fizz", "Petal Dust Sour"
 	properRe := regexp.MustCompile(`(?:^|[.!?]\s+|\s)([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)`)
 	for _, match := range properRe.FindAllStringSubmatch(content, 5) {
 		text := strings.TrimSpace(match[1])
-		// Skip common phrases that aren't entities
 		if !isCommonPhrase(text) {
 			add(text, "topic")
 		}
