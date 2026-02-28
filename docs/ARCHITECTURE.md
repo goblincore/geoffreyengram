@@ -142,7 +142,7 @@ Memories carry `SessionID` (conversation session identifier) and `ParentID` (pre
 
 ## Architecture
 
-### Form Factor: Go Library (+ MCP Server planned)
+### Form Factor: Go Library + MCP Server
 
 ```go
 import engram "github.com/goblincore/geoffreyengram"
@@ -245,6 +245,63 @@ Three built-in providers implement `EmbeddingProvider`:
 OpenAI supports functional options: `WithOpenAIModel`, `WithOpenAIDimension`, `WithOpenAIBaseURL` (for Azure/proxies).
 Ollama supports: `WithOllamaHost` (default `http://localhost:11434`).
 
+## Comparison Example (`examples/comparison/`)
+
+A runnable validation that cognitive memory actually produces better characters than naive approaches.
+
+### How It Works
+
+A scripted multi-session conversation is played through 3 memory modes simultaneously:
+
+| Mode | Memory Strategy | What it isolates |
+|------|----------------|------------------|
+| **Stateless** | None | Baseline — every session is a first meeting |
+| **Flat RAG** | Embed + cosine top-k (in-memory) | Does cognitive structure matter vs naive retrieval? |
+| **Full Engram** | Sectors, composite scoring, waypoints, decay, reflection | The full system |
+
+Flat RAG and Engram share the same `GeminiEmbedder` so the only variable is the retrieval strategy.
+
+Each scenario follows: **3 history sessions** (building up memories) → **time gap** (engram runs `Reflect()`) → **probe session** (evaluate the greeting). An LLM-as-judge rates each mode's probe response on recall, relevance, personality, insight, and naturalness (1-5).
+
+### Scenarios
+
+Four scenarios test different aspects of cognitive memory:
+
+| Scenario | Character | Primary Sectors | What the probe tests |
+|----------|-----------|----------------|---------------------|
+| `lily` | Bartender Lily at Club Mutant | Emotional, Episodic | Does she remember Alex is a jazz pianist, went to Tokyo, was stressed? Does she show warmth? |
+| `sifu` | Wing Chun instructor Sifu Chen | Procedural, Semantic | Does he remember the skill sequence (stance → punch → block), Kai's elbow problem, and suggest a logical next step? |
+| `nyx` | Archivist Nyx in the Athenaeum | Semantic, Reflective | Does she cross-reference Ashenmoor, Valdris, and Thornwall? Does the waypoint graph link the entities? |
+| `reeves` | Therapist Dr. Reeves | All 5 sectors | Does he recall Morgan's anxiety patterns, partner Sam, coworker Dana, the journaling technique, and meal-skipping stress response? |
+
+### Running
+
+```bash
+# List scenarios
+go run ./examples/comparison/ --list
+
+# Run a specific scenario (~60s, ~40 Gemini API calls)
+GEMINI_API_KEY=... go run ./examples/comparison/ --scenario lily
+
+# Interactive selection
+GEMINI_API_KEY=... go run ./examples/comparison/
+```
+
+### Output
+
+- **Terminal**: Interleaved turn-by-turn comparison, score table, judge explanations
+- **Markdown**: `examples/comparison/results_<name>.md` — each mode's full conversation end-to-end for easy human reading
+
+### Architecture
+
+```
+examples/comparison/
+├── main.go        # Runners (stateless, flat-rag, engram), judge, output, CLI
+└── scenarios.go   # Scenario struct + 4 scenario definitions
+```
+
+The `Scenario` struct encapsulates character prompt, player name, session script, sector weights, retrieval limit, and judge context. Runners are fully generic — adding a new scenario means adding a new entry to `AllScenarios` in `scenarios.go`.
+
 ## Project Structure
 
 ```
@@ -282,6 +339,10 @@ geoffreyengram/
 ├── cmd/
 |   └── engram-mcp/
 |       └── main.go     # MCP stdio server (5 tools)
+├── examples/
+|   └── comparison/
+|       ├── main.go     # Runners, judge, output, CLI
+|       └── scenarios.go # Scenario struct + 4 scenario definitions
 ├── docs/
 |   └── ARCHITECTURE.md # This file
 ├── go.mod
@@ -299,9 +360,11 @@ geoffreyengram/
 - **Phase 4: Reflective Synthesis** — `ReflectionProvider` interface, `Reflect()` method with deduplication (cosine > 0.85), `GeminiReflector` built-in, optional background reflection worker, salience clamping
 - **Additional Providers** — `OpenAIEmbedder` (text-embedding-3-small/large, Azure support), `OllamaEmbedder` (local, no API key), 73 tests passing
 
+- **Phase 5: Examples** — Multi-scenario comparison test (`examples/comparison/`): 4 scenarios (Lily/emotional, Sifu/procedural, Nyx/semantic, Reeves/all-sector) with stateless vs flat-RAG vs engram evaluation, LLM-as-judge scoring, CLI selection
+
 ### Remaining
 
-- **Phase 5: Polish** — LLM-powered sector classification, examples, benchmarks
+- LLM-powered sector classification, benchmarks
 
 ## Who Uses This
 

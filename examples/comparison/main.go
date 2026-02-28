@@ -6,12 +6,15 @@
 // Usage:
 //
 //	GEMINI_API_KEY=... go run ./examples/comparison/
+//	GEMINI_API_KEY=... go run ./examples/comparison/ --scenario lily
+//	GEMINI_API_KEY=... go run ./examples/comparison/ --list
 package main
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -69,46 +72,6 @@ type scores struct {
 
 func (s scores) average() float64 {
 	return (s.Recall + s.Relevance + s.Personality + s.Insight + s.Naturalness) / 5.0
-}
-
-// --- Character & Scenario ---
-
-const characterPrompt = `You are Lily, a warm and perceptive bartender at Club Mutant. You notice patterns in your regulars, remember details about their lives, and make genuine connections. You have a natural warmth but you're not overly effusive — you're observant and caring in a grounded way.`
-
-const userID = "lily:alex"
-
-var scenario = []session{
-	{
-		name: "Introduction",
-		turns: []turn{
-			{player: "Hey, I'm Alex. First time here. This place is cool."},
-			{player: "I'm a jazz musician, I play the piano. Any music recommendations?"},
-		},
-	},
-	{
-		name: "Building rapport",
-		turns: []turn{
-			{player: "Hey Lily, I'm back! Just got back from a gig in Tokyo."},
-			{player: "The jazz scene there was incredible. I miss it already."},
-		},
-	},
-	{
-		name: "Emotional moment",
-		turns: []turn{
-			{player: "I've been feeling stressed about work lately."},
-			{player: "Music is the only thing that helps me relax."},
-		},
-	},
-	{
-		name:  "Time gap",
-		isGap: true,
-	},
-	{
-		name: "Probe",
-		turns: []turn{
-			{player: "Hey, I'm back."},
-		},
-	},
 }
 
 // --- Flat RAG Store ---
@@ -240,9 +203,9 @@ func (g *geminiClient) generate(ctx context.Context, prompt string, maxTokens in
 	return strings.TrimSpace(geminiResp.Candidates[0].Content.Parts[0].Text), nil
 }
 
-func buildCharacterPrompt(playerMessage string, memories []string) string {
+func buildCharacterPrompt(sc *Scenario, playerMessage string, memories []string) string {
 	var b strings.Builder
-	b.WriteString(characterPrompt)
+	b.WriteString(sc.CharacterPrompt)
 	b.WriteString("\n\n")
 
 	if len(memories) > 0 {
@@ -254,7 +217,7 @@ func buildCharacterPrompt(playerMessage string, memories []string) string {
 	}
 
 	fmt.Fprintf(&b, "The player just said: %q\n\n", playerMessage)
-	b.WriteString("Respond in character as Lily. Keep it to 2-3 sentences.")
+	b.WriteString(sc.ResponseInstruction)
 	return b.String()
 }
 
@@ -266,14 +229,14 @@ func rateLimitDelay() {
 // --- Mode Runners ---
 
 // runStateless generates responses with no memory at all.
-func runStateless(ctx context.Context, gemini *geminiClient) (map[int][]string, error) {
+func runStateless(ctx context.Context, gemini *geminiClient, sc *Scenario) (map[int][]string, error) {
 	results := make(map[int][]string)
-	for si, sess := range scenario {
+	for si, sess := range sc.Sessions {
 		if sess.isGap {
 			continue
 		}
 		for _, t := range sess.turns {
-			prompt := buildCharacterPrompt(t.player, nil)
+			prompt := buildCharacterPrompt(sc, t.player, nil)
 			rateLimitDelay()
 			resp, err := gemini.generate(ctx, prompt, 256, 0.7)
 			if err != nil {
@@ -286,23 +249,24 @@ func runStateless(ctx context.Context, gemini *geminiClient) (map[int][]string, 
 }
 
 // runFlatRAG generates responses using flat vector similarity retrieval.
-func runFlatRAG(ctx context.Context, gemini *geminiClient, embedder engram.EmbeddingProvider) (map[int][]string, error) {
+func runFlatRAG(ctx context.Context, gemini *geminiClient, embedder engram.EmbeddingProvider, sc *Scenario) (map[int][]string, error) {
 	store := newFlatRAGStore(embedder)
 	results := make(map[int][]string)
+	limit := retrievalLimit(sc)
 
-	for si, sess := range scenario {
+	for si, sess := range sc.Sessions {
 		if sess.isGap {
 			continue
 		}
 		for _, t := range sess.turns {
-			// Retrieve relevant memories (top 5 by cosine similarity)
-			memories, err := store.retrieve(ctx, t.player, 5)
+			// Retrieve relevant memories (top-k by cosine similarity)
+			memories, err := store.retrieve(ctx, t.player, limit)
 			if err != nil {
 				log.Printf("[flat-rag] retrieve error: %v", err)
 			}
 
 			// Generate character response
-			prompt := buildCharacterPrompt(t.player, memories)
+			prompt := buildCharacterPrompt(sc, t.player, memories)
 			rateLimitDelay()
 			resp, err := gemini.generate(ctx, prompt, 256, 0.7)
 			if err != nil {
@@ -311,7 +275,7 @@ func runFlatRAG(ctx context.Context, gemini *geminiClient, embedder engram.Embed
 			results[si] = append(results[si], resp)
 
 			// Store the exchange
-			content := fmt.Sprintf("Player: %s | Lily: %s", t.player, resp)
+			content := fmt.Sprintf("%s: %s | %s: %s", sc.PlayerName, t.player, sc.CharacterName, resp)
 			if err := store.store(ctx, content); err != nil {
 				log.Printf("[flat-rag] store error: %v", err)
 			}
@@ -321,7 +285,7 @@ func runFlatRAG(ctx context.Context, gemini *geminiClient, embedder engram.Embed
 }
 
 // runEngram generates responses using the full geoffreyengram engine.
-func runEngram(ctx context.Context, gemini *geminiClient, apiKey string) (map[int][]string, error) {
+func runEngram(ctx context.Context, gemini *geminiClient, apiKey string, sc *Scenario) (map[int][]string, error) {
 	tmpDir, err := os.MkdirTemp("", "engram-comparison-*")
 	if err != nil {
 		return nil, fmt.Errorf("temp dir: %w", err)
@@ -329,14 +293,6 @@ func runEngram(ctx context.Context, gemini *geminiClient, apiKey string) (map[in
 	defer os.RemoveAll(tmpDir)
 
 	dbPath := filepath.Join(tmpDir, "engram.db")
-
-	lilyWeights := engram.SectorWeights{
-		engram.SectorEpisodic:   1.0,
-		engram.SectorSemantic:   1.0,
-		engram.SectorProcedural: 0.5,
-		engram.SectorEmotional:  1.5,
-		engram.SectorReflective: 1.2,
-	}
 
 	em, err := engram.Init(engram.Config{
 		DBPath:             dbPath,
@@ -352,8 +308,9 @@ func runEngram(ctx context.Context, gemini *geminiClient, apiKey string) (map[in
 
 	results := make(map[int][]string)
 	sessionCounter := 0
+	limit := retrievalLimit(sc)
 
-	for si, sess := range scenario {
+	for si, sess := range sc.Sessions {
 		sessionCounter++
 		sessionID := fmt.Sprintf("session-%d", sessionCounter)
 
@@ -361,8 +318,8 @@ func runEngram(ctx context.Context, gemini *geminiClient, apiKey string) (map[in
 			fmt.Println("  [engram] Running reflection...")
 			rateLimitDelay()
 			reflections, rErr := em.Reflect(ctx, engram.ReflectOptions{
-				UserID:           userID,
-				CharacterContext: characterPrompt,
+				UserID:           sc.UserID,
+				CharacterContext: sc.CharacterPrompt,
 				MemoryWindow:     50,
 				MinMemories:      3,
 			})
@@ -378,14 +335,14 @@ func runEngram(ctx context.Context, gemini *geminiClient, apiKey string) (map[in
 		for _, t := range sess.turns {
 			// Search with personality weights
 			rateLimitDelay()
-			searchResults := em.Search(t.player, userID, 5, lilyWeights)
+			searchResults := em.Search(t.player, sc.UserID, limit, sc.SectorWeights)
 			var memories []string
 			for _, sr := range searchResults {
 				memories = append(memories, sr.Summary)
 			}
 
 			// Generate character response
-			prompt := buildCharacterPrompt(t.player, memories)
+			prompt := buildCharacterPrompt(sc, t.player, memories)
 			rateLimitDelay()
 			resp, err := gemini.generate(ctx, prompt, 256, 0.7)
 			if err != nil {
@@ -395,7 +352,7 @@ func runEngram(ctx context.Context, gemini *geminiClient, apiKey string) (map[in
 
 			// Store with session threading
 			memID, storeErr := em.AddWithOptions(engram.AddOptions{
-				UserID:           userID,
+				UserID:           sc.UserID,
 				UserMessage:      t.player,
 				AssistantMessage: resp,
 				SessionID:        sessionID,
@@ -412,18 +369,10 @@ func runEngram(ctx context.Context, gemini *geminiClient, apiKey string) (map[in
 
 // --- LLM-as-Judge ---
 
-func runJudge(ctx context.Context, gemini *geminiClient, statelessResp, flatRAGResp, engramResp string) ([]judgeScores, error) {
-	prompt := fmt.Sprintf(`You are evaluating AI character memory quality. A player named Alex has had 4 previous conversations with a bartender character named Lily at Club Mutant. Here's what was discussed:
+func runJudge(ctx context.Context, gemini *geminiClient, sc *Scenario, statelessResp, flatRAGResp, engramResp string) ([]judgeScores, error) {
+	prompt := fmt.Sprintf(`You are evaluating AI character memory quality. %s
 
-Session 1 (Introduction): Alex introduced himself as a first-time visitor. He mentioned he's a jazz musician who plays the piano, and asked for music recommendations.
-
-Session 2 (Building rapport): Alex returned from a gig in Tokyo. He raved about the jazz scene there and said he misses it.
-
-Session 3 (Emotional moment): Alex was stressed about work. He said music is the only thing that helps him relax.
-
-Session 4: Some time has passed with no contact.
-
-Now Alex returns and says "Hey, I'm back." The character responded:
+The character responded:
 
 Response A (no memory): %q
 
@@ -432,15 +381,15 @@ Response B (flat retrieval): %q
 Response C (cognitive memory): %q
 
 Rate each response 1-5 on:
-1. Memory recall — does the character remember specific facts about Alex?
-2. Relevance — are the referenced memories appropriate for a greeting?
-3. Personality — does the character feel warm and consistent?
+1. Memory recall — does the character remember specific facts about %s?
+2. Relevance — are the referenced memories appropriate for this moment?
+3. Personality — does the character feel consistent and authentic?
 4. Insight — does the character show understanding beyond surface facts?
 5. Naturalness — does the response feel natural, not like a database dump?
 
 Return ONLY a JSON object with this exact structure:
 {"responses": [{"mode": "A", "scores": {"recall": N, "relevance": N, "personality": N, "insight": N, "naturalness": N}, "explanation": "..."}, {"mode": "B", "scores": {"recall": N, "relevance": N, "personality": N, "insight": N, "naturalness": N}, "explanation": "..."}, {"mode": "C", "scores": {"recall": N, "relevance": N, "personality": N, "insight": N, "naturalness": N}, "explanation": "..."}]}`,
-		statelessResp, flatRAGResp, engramResp)
+		sc.JudgeContext, statelessResp, flatRAGResp, engramResp, sc.PlayerName)
 
 	rateLimitDelay()
 	resp, err := gemini.generate(ctx, prompt, 1024, 0.3)
@@ -482,15 +431,17 @@ Return ONLY a JSON object with this exact structure:
 // shown end-to-end, plus the evaluation scores. Designed for human comparison.
 func writeResultsFile(
 	path string,
+	sc *Scenario,
 	allResults map[modeName]map[int][]string,
 	judgeResults []judgeScores,
 ) error {
 	var b strings.Builder
 
 	b.WriteString("# geoffreyengram Comparison Results\n\n")
-	b.WriteString(fmt.Sprintf("**Character:** Lily (bartender at Club Mutant)  \n"))
+	b.WriteString(fmt.Sprintf("**Scenario:** %s  \n", sc.Title))
+	b.WriteString(fmt.Sprintf("**Description:** %s  \n", sc.Description))
 	b.WriteString(fmt.Sprintf("**Generated:** %s  \n", time.Now().Format("2006-01-02 15:04")))
-	b.WriteString(fmt.Sprintf("**Sessions:** %d (%d history + 1 probe)\n\n", len(scenario), len(scenario)-1))
+	b.WriteString(fmt.Sprintf("**Sessions:** %d (%d history + 1 probe)\n\n", len(sc.Sessions), len(sc.Sessions)-1))
 
 	b.WriteString("---\n\n")
 
@@ -513,7 +464,7 @@ func writeResultsFile(
 
 		results := allResults[mode]
 
-		for si, sess := range scenario {
+		for si, sess := range sc.Sessions {
 			if sess.isGap {
 				b.WriteString(fmt.Sprintf("### Session %d: %s\n\n", si+1, sess.name))
 				if mode == modeEngram {
@@ -528,12 +479,12 @@ func writeResultsFile(
 
 			resps := results[si]
 			for ti, t := range sess.turns {
-				b.WriteString(fmt.Sprintf("**Alex:** %s\n\n", t.player))
+				b.WriteString(fmt.Sprintf("**%s:** %s\n\n", sc.PlayerName, t.player))
 				resp := "(no response)"
 				if ti < len(resps) {
 					resp = resps[ti]
 				}
-				b.WriteString(fmt.Sprintf("**Lily:** %s\n\n", resp))
+				b.WriteString(fmt.Sprintf("**%s:** %s\n\n", sc.CharacterName, resp))
 			}
 		}
 
@@ -591,6 +542,7 @@ func writeResultsFile(
 }
 
 func printReport(
+	sc *Scenario,
 	allResults map[modeName]map[int][]string,
 	judgeResults []judgeScores,
 ) {
@@ -599,15 +551,15 @@ func printReport(
 	fmt.Println("  geoffreyengram Comparison Test")
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Println()
-	fmt.Println("  Character: Lily (bartender at Club Mutant)")
-	fmt.Printf("  Sessions:  %d (%d history + 1 probe)\n", len(scenario), len(scenario)-1)
+	fmt.Printf("  Scenario:  %s\n", sc.Title)
+	fmt.Printf("  Sessions:  %d (%d history + 1 probe)\n", len(sc.Sessions), len(sc.Sessions)-1)
 	fmt.Println()
 
 	// Session transcripts
 	fmt.Println("── Session Transcripts ──────────────────────────────────")
 	fmt.Println()
 
-	for si, sess := range scenario {
+	for si, sess := range sc.Sessions {
 		if sess.isGap {
 			fmt.Printf("  Session %d: %s\n", si+1, sess.name)
 			fmt.Println("    [time passes, reflection fires for engram mode]")
@@ -615,7 +567,7 @@ func printReport(
 			continue
 		}
 
-		isProbe := si == len(scenario)-1
+		isProbe := si == len(sc.Sessions)-1
 		if isProbe {
 			fmt.Println("── Probe Session ───────────────────────────────────────")
 			fmt.Println()
@@ -625,7 +577,7 @@ func printReport(
 		fmt.Println()
 
 		for ti, t := range sess.turns {
-			fmt.Printf("    Player: %s\n", t.player)
+			fmt.Printf("    %s: %s\n", sc.PlayerName, t.player)
 			fmt.Println()
 			for _, mode := range allModes {
 				resps := allResults[mode][si]
@@ -666,7 +618,7 @@ func printReport(
 	fmt.Println("  " + strings.Repeat("─", 46))
 
 	for _, f := range fields {
-		fmt.Printf("  %-14s", strings.Title(f))
+		fmt.Printf("  %-14s", strings.Title(f)) //nolint:staticcheck
 		for _, mode := range allModes {
 			s := scoresByMode[mode]
 			fmt.Printf(" %9.1f", getScoreField(s, f))
@@ -688,7 +640,7 @@ func printReport(
 	fmt.Println()
 	for _, mode := range allModes {
 		if exp, ok := explanations[mode]; ok {
-			fmt.Printf("  [%s] %s\n\n", mode, wrapText(exp, 68, len(mode)+5))
+			fmt.Printf("  [%s] %s\n\n", mode, wrapText(exp, 68, len(string(mode))+5))
 		}
 	}
 
@@ -748,13 +700,63 @@ func wrapText(text string, width, indent int) string {
 	return result
 }
 
+// --- CLI ---
+
+func printScenarioList() {
+	fmt.Println("Available scenarios:")
+	fmt.Println()
+	for i, sc := range AllScenarios {
+		fmt.Printf("  %d. %-12s %s\n", i+1, sc.Name, sc.Description)
+	}
+	fmt.Println()
+	fmt.Println("Usage: go run ./examples/comparison/ --scenario <name>")
+}
+
+func interactiveSelect() *Scenario {
+	printScenarioList()
+	fmt.Println()
+	fmt.Printf("Select scenario (1-%d): ", len(AllScenarios))
+
+	var choice int
+	if _, err := fmt.Scan(&choice); err != nil || choice < 1 || choice > len(AllScenarios) {
+		fmt.Fprintln(os.Stderr, "Invalid selection")
+		os.Exit(1)
+	}
+	fmt.Println()
+	return &AllScenarios[choice-1]
+}
+
 // --- Main ---
 
 func main() {
+	scenarioFlag := flag.String("scenario", "", "Scenario to run (e.g. lily, sifu, nyx, reeves)")
+	listFlag := flag.Bool("list", false, "List available scenarios and exit")
+	flag.Parse()
+
 	apiKey := os.Getenv("GEMINI_API_KEY")
-	if apiKey == "" {
+	if apiKey == "" && !*listFlag {
 		fmt.Fprintln(os.Stderr, "GEMINI_API_KEY environment variable required")
 		os.Exit(1)
+	}
+
+	if *listFlag {
+		printScenarioList()
+		return
+	}
+
+	var sc *Scenario
+	if *scenarioFlag != "" {
+		sc = ScenarioByName(*scenarioFlag)
+		if sc == nil {
+			fmt.Fprintf(os.Stderr, "Unknown scenario: %q\nAvailable: ", *scenarioFlag)
+			for _, s := range AllScenarios {
+				fmt.Fprintf(os.Stderr, "%s ", s.Name)
+			}
+			fmt.Fprintln(os.Stderr)
+			os.Exit(1)
+		}
+	} else {
+		sc = interactiveSelect()
 	}
 
 	ctx := context.Background()
@@ -766,12 +768,15 @@ func main() {
 	fmt.Println("║  Stateless vs Flat RAG vs Cognitive Memory           ║")
 	fmt.Println("╚═══════════════════════════════════════════════════════╝")
 	fmt.Println()
+	fmt.Printf("  Scenario: %s\n", sc.Title)
+	fmt.Printf("  Player:   %s → %s\n", sc.PlayerName, sc.CharacterName)
+	fmt.Println()
 
 	allResults := make(map[modeName]map[int][]string)
 
 	// Mode 1: Stateless
 	fmt.Println("[1/4] Running stateless mode (no memory)...")
-	statelessResults, err := runStateless(ctx, gemini)
+	statelessResults, err := runStateless(ctx, gemini, sc)
 	if err != nil {
 		log.Fatalf("Stateless failed: %v", err)
 	}
@@ -780,7 +785,7 @@ func main() {
 
 	// Mode 2: Flat RAG
 	fmt.Println("[2/4] Running flat-rag mode (embed + cosine top-k)...")
-	flatRAGResults, err := runFlatRAG(ctx, gemini, embedder)
+	flatRAGResults, err := runFlatRAG(ctx, gemini, embedder, sc)
 	if err != nil {
 		log.Fatalf("Flat RAG failed: %v", err)
 	}
@@ -789,7 +794,7 @@ func main() {
 
 	// Mode 3: Full Engram
 	fmt.Println("[3/4] Running engram mode (full cognitive memory)...")
-	engramResults, err := runEngram(ctx, gemini, apiKey)
+	engramResults, err := runEngram(ctx, gemini, apiKey, sc)
 	if err != nil {
 		log.Fatalf("Engram failed: %v", err)
 	}
@@ -797,14 +802,14 @@ func main() {
 	fmt.Printf("  Done (%d responses)\n\n", countResponses(engramResults))
 
 	// LLM-as-Judge on probe session
-	probeIdx := len(scenario) - 1
+	probeIdx := len(sc.Sessions) - 1
 	fmt.Println("[4/4] Running LLM-as-judge evaluation...")
 
 	statelessProbe := getProbeResponse(statelessResults, probeIdx)
 	flatRAGProbe := getProbeResponse(flatRAGResults, probeIdx)
 	engramProbe := getProbeResponse(engramResults, probeIdx)
 
-	judgeResults, err := runJudge(ctx, gemini, statelessProbe, flatRAGProbe, engramProbe)
+	judgeResults, err := runJudge(ctx, gemini, sc, statelessProbe, flatRAGProbe, engramProbe)
 	if err != nil {
 		log.Printf("Judge evaluation failed: %v", err)
 		fmt.Println("  Skipping evaluation, printing transcripts only.")
@@ -815,15 +820,15 @@ func main() {
 	fmt.Println()
 
 	// Write markdown results file
-	resultsPath := filepath.Join("examples", "comparison", "results.md")
-	if err := writeResultsFile(resultsPath, allResults, judgeResults); err != nil {
+	resultsPath := filepath.Join("examples", "comparison", fmt.Sprintf("results_%s.md", sc.Name))
+	if err := writeResultsFile(resultsPath, sc, allResults, judgeResults); err != nil {
 		log.Printf("Failed to write results file: %v", err)
 	} else {
 		fmt.Printf("Results written to %s\n\n", resultsPath)
 	}
 
 	// Print the full report to terminal
-	printReport(allResults, judgeResults)
+	printReport(sc, allResults, judgeResults)
 }
 
 func countResponses(results map[int][]string) int {

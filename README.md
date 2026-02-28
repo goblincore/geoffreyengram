@@ -214,6 +214,38 @@ Your Game Server / Chatbot / AI Agent
 - **Server-driven (Pattern A):** Your code calls `Search()` and `Add()` explicitly. You control when memory is read/written. Simple, predictable, cheaper.
 - **Agent-driven (Pattern B):** The LLM has `recall`/`remember` as MCP tools and decides when to use them. The character has agency over its own memory. More autonomous, more emergent, more LLM calls.
 
+## Comparison Example
+
+Does cognitive memory actually produce better characters? Run the comparison test to find out.
+
+The example runs a scripted multi-session conversation through 3 memory modes — **stateless** (no memory), **flat RAG** (embed + cosine top-k), and **full engram** (sectors, decay, waypoints, reflection) — then uses LLM-as-judge to score the results.
+
+```bash
+# List available scenarios
+GEMINI_API_KEY=... go run ./examples/comparison/ --list
+
+# Run a specific scenario
+GEMINI_API_KEY=... go run ./examples/comparison/ --scenario lily
+
+# Interactive selection
+GEMINI_API_KEY=... go run ./examples/comparison/
+```
+
+### Scenarios
+
+Each scenario is designed to stress-test a different aspect of cognitive memory:
+
+| Scenario | Character | What it tests |
+|----------|-----------|---------------|
+| `lily` | Bartender at Club Mutant | **Emotional + episodic** — relationship building, warmth after a time gap |
+| `sifu` | Wing Chun instructor | **Procedural** — skill sequences, remembering student-specific struggles |
+| `nyx` | Archivist in a fantasy library | **Semantic** — cross-referencing facts, entity linking across visits |
+| `reeves` | Therapist | **All 5 sectors** — emotional patterns, facts, techniques, reflective synthesis |
+
+Each scenario follows the same structure: 3 history sessions building up memories, a time gap (where engram mode runs reflective synthesis), and a probe session where the character's greeting reveals what it actually remembers.
+
+Results are printed to the terminal and written to `examples/comparison/results_<name>.md` for easy human comparison — each mode's full conversation shown end-to-end.
+
 ## Project Structure
 
 ```
@@ -235,6 +267,8 @@ geoffreyengram/
 ├── *_test.go          # 73 tests across all subsystems
 ├── cmd/
 │   └── engram-mcp/    # MCP stdio server (5 tools)
+├── examples/
+│   └── comparison/    # Multi-scenario comparison test (4 scenarios)
 └── docs/
     └── ARCHITECTURE.md
 ```
@@ -260,7 +294,7 @@ This project was extracted from a production NPC memory system ([Club Mutant](ht
 
 ### Roadmap
 - [ ] LLM-powered sector classification (currently heuristic-only in practice)
-- [ ] Examples (NPC bartender, simple companion)
+- [x] Comparison examples (4 scenarios testing each cognitive sector)
 - [ ] Benchmark suite
 
 ## Why Go
