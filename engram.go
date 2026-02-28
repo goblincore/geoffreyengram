@@ -403,6 +403,12 @@ func (cm *Engram) GetLastSession(userID string) ([]Memory, error) {
 	return cm.store.GetSessionMemories(sessionID)
 }
 
+// ListRecent returns the N most recent memories for a user, optionally filtered by sector.
+// Intended for inspection and debugging tools (e.g., MCP inspect).
+func (cm *Engram) ListRecent(userID string, limit int, sectors []Sector) ([]Memory, error) {
+	return cm.store.GetRecentMemories(userID, limit, sectors)
+}
+
 // Close shuts down workers and closes the database.
 func (cm *Engram) Close() error {
 	if cm.cancelDecay != nil {

@@ -203,26 +203,47 @@ Player says "hi"
   -> Character has agency over its own memory
 ```
 
-### MCP Server Tools (planned)
+### MCP Server (`cmd/engram-mcp`)
+
+A thin stdio MCP server wrapping the library API. Configured via environment variables (`ENGRAM_DB_PATH`, `GEMINI_API_KEY`).
 
 ```
 engram-mcp
 |
-+-- remember    — Store a memory
-|   params: content, user_id, sector_hint?, entities?, session_id?
++-- remember     — Store a memory (wraps AddWithOptions)
+|   params: user_id, user_message, assistant_message, session_id?, parent_id?, sector_hint?, salience?
 |
-+-- recall      — Search memories
-|   params: query, user_id, limit?, time_after?, time_before?, sectors?
++-- recall       — Search memories (wraps SearchWithOptions)
+|   params: query, user_id, limit?, session_id?, sectors[]?, after?, before?
 |
-+-- reflect     — Trigger reflective synthesis
-|   params: user_id, character_context?
++-- reflect      — Trigger reflective synthesis (wraps Reflect)
+|   params: user_id, character_context?, memory_window?, sectors[]?, min_memories?
 |
-+-- forget      — Remove specific memories
-|   params: memory_id | user_id + query
++-- get_session  — Retrieve conversation session (wraps GetSession/GetLastSession)
+|   params: user_id, session_id?
 |
-+-- inspect     — Debug/browse (admin)
-    params: user_id, sector?, limit?
++-- inspect      — Browse recent memories (wraps ListRecent)
+    params: user_id, limit?, sectors[]?
 ```
+
+Built with the official MCP Go SDK (`github.com/modelcontextprotocol/go-sdk`). Install:
+
+```bash
+go install github.com/goblincore/geoffreyengram/cmd/engram-mcp
+```
+
+### Embedding Providers
+
+Three built-in providers implement `EmbeddingProvider`:
+
+| Provider | Constructor | API Key | Default Model | Default Dim |
+|----------|-------------|---------|---------------|-------------|
+| `GeminiEmbedder` | `NewGeminiEmbedder(key, dim)` | Required | gemini-embedding-001 | 768 |
+| `OpenAIEmbedder` | `NewOpenAIEmbedder(key, opts...)` | Required | text-embedding-3-small | 1536 |
+| `OllamaEmbedder` | `NewOllamaEmbedder(model, dim, opts...)` | None | User-specified | User-specified |
+
+OpenAI supports functional options: `WithOpenAIModel`, `WithOpenAIDimension`, `WithOpenAIBaseURL` (for Azure/proxies).
+Ollama supports: `WithOllamaHost` (default `http://localhost:11434`).
 
 ## Project Structure
 
@@ -239,7 +260,9 @@ geoffreyengram/
 ├── scoring.go          # CompositeScore, CosineSimilarity, DecayFactor, DaysSince
 ├── decay_worker.go     # Background decay goroutine (configurable interval)
 ├── classify.go         # HeuristicClassifier (keyword patterns + optional LLM)
-├── embed.go            # GeminiEmbedder (768-dim, implements EmbeddingProvider)
+├── embed.go            # GeminiEmbedder (768-dim)
+├── embed_openai.go     # OpenAIEmbedder (text-embedding-3-small/large)
+├── embed_ollama.go     # OllamaEmbedder (local, no API key)
 ├── waypoints.go        # Waypoint entity graph, DefaultEntityExtractor,
 |                       #   ExpandViaWaypoints (one-hop)
 ├── reflect.go          # Reflect method, ReflectionProvider interface,
@@ -252,8 +275,13 @@ geoffreyengram/
 ├── store_test.go       # SQLite operations, vector encode/decode, decay sweep
 ├── waypoints_test.go   # Entity extraction (brackets, quotes, known entities)
 ├── temporal_test.go    # Session chaining, time-window, GetLastSession
+├── embed_openai_test.go # OpenAI embedder tests (httptest mock)
+├── embed_ollama_test.go # Ollama embedder tests (httptest mock)
 ├── reflect_test.go     # Reflection storage, dedup, salience clamping, parsing
 |
+├── cmd/
+|   └── engram-mcp/
+|       └── main.go     # MCP stdio server (5 tools)
 ├── docs/
 |   └── ARCHITECTURE.md # This file
 ├── go.mod
@@ -266,13 +294,14 @@ geoffreyengram/
 ### Completed
 
 - **Phase 1: Extract & Genericize** — Provider interfaces (`EmbeddingProvider`, `SectorClassifier`, `EntityExtractor`), configurable `ScoringWeights` and `DecayRates`, renamed implementations (`GeminiEmbedder`, `HeuristicClassifier`, `DefaultEntityExtractor`), removed hardcoded domain data, comprehensive test suite
+- **Phase 2: MCP Server** — `cmd/engram-mcp` with 5 tools (`remember`, `recall`, `reflect`, `get_session`, `inspect`), official MCP Go SDK, stdio transport, env-based config
 - **Phase 3: Temporal Enrichment** — `SessionID`/`ParentID` on memories, versioned schema migrations, `AddWithOptions`/`SearchWithOptions` API, time-window and session queries, `GetSession`/`GetLastSession` convenience methods
-- **Phase 4: Reflective Synthesis** — `ReflectionProvider` interface, `Reflect()` method with deduplication (cosine > 0.85), `GeminiReflector` built-in, optional background reflection worker, salience clamping, 58 tests passing
+- **Phase 4: Reflective Synthesis** — `ReflectionProvider` interface, `Reflect()` method with deduplication (cosine > 0.85), `GeminiReflector` built-in, optional background reflection worker, salience clamping
+- **Additional Providers** — `OpenAIEmbedder` (text-embedding-3-small/large, Azure support), `OllamaEmbedder` (local, no API key), 73 tests passing
 
 ### Remaining
 
-- **Phase 2: MCP Server** — `cmd/engram-mcp` using mcp-go SDK
-- **Phase 5: Polish** — Additional embedding providers (OpenAI, Ollama), examples, benchmarks
+- **Phase 5: Polish** — LLM-powered sector classification, examples, benchmarks
 
 ## Who Uses This
 

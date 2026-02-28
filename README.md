@@ -159,16 +159,41 @@ type ReflectionProvider interface {
 }
 ```
 
-Built-in implementations: `GeminiEmbedder`, `HeuristicClassifier`, `DefaultEntityExtractor`, `GeminiReflector`.
+Built-in implementations:
+- **Embedding:** `GeminiEmbedder`, `OpenAIEmbedder`, `OllamaEmbedder`
+- **Classification:** `HeuristicClassifier`
+- **Entity extraction:** `DefaultEntityExtractor`
+- **Reflection:** `GeminiReflector`
 
-### As an MCP Server (planned)
+```go
+// OpenAI embeddings
+embedder := engram.NewOpenAIEmbedder(os.Getenv("OPENAI_API_KEY"),
+    engram.WithOpenAIModel("text-embedding-3-small"),
+    engram.WithOpenAIDimension(768),
+)
+
+// Local Ollama embeddings (no API key needed)
+embedder := engram.NewOllamaEmbedder("nomic-embed-text", 768)
+
+// Azure OpenAI or compatible APIs
+embedder := engram.NewOpenAIEmbedder(apiKey,
+    engram.WithOpenAIBaseURL("https://your-instance.openai.azure.com"),
+)
+```
+
+### As an MCP Server
 
 ```bash
 go install github.com/goblincore/geoffreyengram/cmd/engram-mcp
+
+# Configure via environment
+export ENGRAM_DB_PATH=./data/engram.db
+export GEMINI_API_KEY=your-key
+
 engram-mcp  # starts MCP stdio server
 ```
 
-Tools: `remember`, `recall`, `reflect`, `forget`, `inspect`
+Tools: `remember`, `recall`, `reflect`, `get_session`, `inspect`
 
 ## Architecture
 
@@ -200,13 +225,16 @@ geoffreyengram/
 ├── scoring.go         # Composite scoring, cosine similarity, decay factor
 ├── decay_worker.go    # Background decay goroutine
 ├── classify.go        # HeuristicClassifier (keyword + LLM fallback)
-├── embed.go           # GeminiEmbedder (768-dim)
+├── embed.go           # GeminiEmbedder
+├── embed_openai.go    # OpenAIEmbedder (text-embedding-3-small/large)
+├── embed_ollama.go    # OllamaEmbedder (local, no API key)
 ├── waypoints.go       # Entity graph, DefaultEntityExtractor
 ├── reflect.go         # Reflect method, deduplication, ReflectionProvider interface
 ├── reflect_gemini.go  # GeminiReflector (built-in LLM reflector)
 ├── reflect_worker.go  # Background reflection goroutine
-├── *_test.go          # 58 tests covering scoring, classification, storage,
-│                      #   temporal queries, reflection, entity extraction
+├── *_test.go          # 73 tests across all subsystems
+├── cmd/
+│   └── engram-mcp/    # MCP stdio server (5 tools)
 └── docs/
     └── ARCHITECTURE.md
 ```
@@ -218,6 +246,7 @@ This project was extracted from a production NPC memory system ([Club Mutant](ht
 ### What works now
 - 5-sector cognitive model with automatic heuristic classification
 - Pluggable provider interfaces (embedding, classification, entity extraction, reflection)
+- Embedding providers: Gemini, OpenAI, Ollama (local)
 - Composite scoring with configurable weights (`ScoringWeights`)
 - SQLite persistence with vector storage and versioned migrations
 - Exponential decay with configurable per-sector rates and background worker
@@ -226,12 +255,10 @@ This project was extracted from a production NPC memory system ([Club Mutant](ht
 - Conversation threading (`SessionID`, `ParentID`)
 - Temporal queries (time-window search, session retrieval, last-session lookup)
 - Reflective synthesis engine with deduplication
-- Built-in Gemini provider (embeddings + reflection)
-- 58 tests across all subsystems
+- MCP server with 5 tools (`remember`, `recall`, `reflect`, `get_session`, `inspect`)
+- 73 tests across all subsystems
 
 ### Roadmap
-- [ ] MCP server (`cmd/engram-mcp`)
-- [ ] Additional embedding providers (OpenAI, Ollama)
 - [ ] LLM-powered sector classification (currently heuristic-only in practice)
 - [ ] Examples (NPC bartender, simple companion)
 - [ ] Benchmark suite
