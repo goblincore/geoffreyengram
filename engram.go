@@ -44,7 +44,11 @@ func Init(cfg Config) (*Engram, error) {
 
 	classifier := cfg.Classifier
 	if classifier == nil {
-		classifier = NewHeuristicClassifier(cfg.GeminiAPIKey) // works with empty key (heuristic-only)
+		if cfg.GeminiAPIKey != "" {
+			classifier = NewLLMClassifier(cfg.GeminiAPIKey, store)
+		} else {
+			classifier = NewHeuristicClassifier("") // heuristic-only, no LLM
+		}
 	}
 
 	extractor := cfg.EntityExtractor
@@ -249,6 +253,13 @@ func (cm *Engram) AddWithOptions(opts AddOptions) (int64, error) {
 		}
 	}
 
+	// 7b. Submit for async LLM reclassification (if available and no manual hint)
+	if opts.SectorHint == "" {
+		if lc, ok := cm.classifier.(*LLMClassifier); ok {
+			lc.SubmitForReclassification(memID, content)
+		}
+	}
+
 	// 8. Extract entities and create waypoint associations
 	entities := opts.Entities
 	if entities == nil {
@@ -416,6 +427,9 @@ func (cm *Engram) Close() error {
 	}
 	if cm.cancelReflect != nil {
 		cm.cancelReflect()
+	}
+	if lc, ok := cm.classifier.(*LLMClassifier); ok {
+		lc.Close()
 	}
 	return cm.store.Close()
 }

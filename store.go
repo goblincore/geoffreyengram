@@ -465,6 +465,17 @@ func (s *Store) ReinforceSalience(memoryID int64, boost float64) error {
 	return err
 }
 
+// UpdateMemorySector updates the sector for a memory in both the memories
+// and vectors tables. Used by the async LLM reclassification worker.
+func (s *Store) UpdateMemorySector(memoryID int64, sector Sector) error {
+	_, err := s.db.Exec(`UPDATE memories SET sector = ? WHERE id = ?`, string(sector), memoryID)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`UPDATE vectors SET sector = ? WHERE memory_id = ?`, string(sector), memoryID)
+	return err
+}
+
 // --- Decay sweep ---
 
 // RunDecaySweep applies exponential decay to all memories and prunes dead ones.
