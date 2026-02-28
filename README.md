@@ -256,7 +256,8 @@ geoffreyengram/
 ├── store.go           # SQLite persistence, versioned migrations, temporal queries
 ├── scoring.go         # Composite scoring, cosine similarity, decay factor
 ├── decay_worker.go    # Background decay goroutine
-├── classify.go        # HeuristicClassifier (keyword + LLM fallback)
+├── classify.go        # HeuristicClassifier (keyword-based)
+├── classify_llm.go    # LLMClassifier (heuristic + async LLM reclassification)
 ├── embed.go           # GeminiEmbedder
 ├── embed_openai.go    # OpenAIEmbedder (text-embedding-3-small/large)
 ├── embed_ollama.go    # OllamaEmbedder (local, no API key)
@@ -264,7 +265,7 @@ geoffreyengram/
 ├── reflect.go         # Reflect method, deduplication, ReflectionProvider interface
 ├── reflect_gemini.go  # GeminiReflector (built-in LLM reflector)
 ├── reflect_worker.go  # Background reflection goroutine
-├── *_test.go          # 73 tests across all subsystems
+├── *_test.go          # 81 tests across all subsystems
 ├── cmd/
 │   └── engram-mcp/    # MCP stdio server (5 tools)
 ├── examples/
@@ -290,11 +291,13 @@ This project was extracted from a production NPC memory system ([Club Mutant](ht
 - Temporal queries (time-window search, session retrieval, last-session lookup)
 - Reflective synthesis engine with deduplication
 - MCP server with 5 tools (`remember`, `recall`, `reflect`, `get_session`, `inspect`)
-- 73 tests across all subsystems
+- Async LLM sector reclassification (heuristic + background Gemini refinement)
+- 81 tests across all subsystems
 
 ### Roadmap
-- [ ] LLM-powered sector classification (currently heuristic-only in practice)
+- [x] LLM-powered sector classification (async reclassification via Gemini)
 - [x] Comparison examples (4 scenarios testing each cognitive sector)
+- [ ] Fine-tuned DistilBERT classifier (local ONNX, ~2ms inference, no API calls)
 - [ ] Benchmark suite
 
 ## Why Go

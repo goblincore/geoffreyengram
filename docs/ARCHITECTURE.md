@@ -171,9 +171,10 @@ type EntityExtractor interface {
 
 Provider resolution in `Init()`:
 1. If explicit provider set in Config, use it
-2. If `GeminiAPIKey` set, construct `GeminiEmbedder` + `HeuristicClassifier`
-3. `DefaultEntityExtractor` is always the fallback for entity extraction
-4. `ReflectionProvider` is **never** auto-constructed — always explicit opt-in
+2. If `GeminiAPIKey` set, construct `GeminiEmbedder` + `LLMClassifier` (heuristic sync + async LLM reclassification)
+3. If no API key, fall back to `HeuristicClassifier` (keyword-only, no LLM)
+4. `DefaultEntityExtractor` is always the fallback for entity extraction
+5. `ReflectionProvider` is **never** auto-constructed — always explicit opt-in
 
 ### Storage
 
@@ -244,6 +245,29 @@ Three built-in providers implement `EmbeddingProvider`:
 
 OpenAI supports functional options: `WithOpenAIModel`, `WithOpenAIDimension`, `WithOpenAIBaseURL` (for Azure/proxies).
 Ollama supports: `WithOllamaHost` (default `http://localhost:11434`).
+
+### Sector Classification
+
+Two built-in classifiers implement `SectorClassifier`:
+
+**`HeuristicClassifier`** — keyword-based scoring. Each sector has a list of signal words (e.g., "feel", "happy", "sad" → emotional; "how to", "technique", "step" → procedural). Scores accumulate at +0.3 per hit, highest sector wins. If confidence < 0.6 and an API key is available, falls back to a synchronous Gemini call. Zero-cost for keyword-rich content, but misclassifies natural conversation that lacks signal words.
+
+**`LLMClassifier`** — wraps the heuristic + async LLM reclassification. The write path stays fast:
+
+```
+Add() called
+  → HeuristicClassifier.Classify() → returns sector instantly (0ms)
+  → Memory stored with heuristic sector
+  → SubmitForReclassification(memID, content) → non-blocking send to buffered channel
+  → Background goroutine:
+      → Calls Gemini with sector descriptions + examples
+      → If LLM sector ≠ heuristic sector → UpdateMemorySector() (updates both tables)
+      → If sectors match → no-op
+```
+
+The channel buffer holds 64 pending requests. If full, new requests are silently dropped — the heuristic sector is kept as a reasonable fallback. `Close()` drains remaining requests before shutdown.
+
+This means a memory stored as "semantic" (heuristic default for ambiguous content like "I just got back from Tokyo") gets reclassified to "episodic" ~200-500ms later when the LLM responds — before the next `Search()` call in a typical conversation flow.
 
 ## Comparison Example (`examples/comparison/`)
 
@@ -317,6 +341,7 @@ geoffreyengram/
 ├── scoring.go          # CompositeScore, CosineSimilarity, DecayFactor, DaysSince
 ├── decay_worker.go     # Background decay goroutine (configurable interval)
 ├── classify.go         # HeuristicClassifier (keyword patterns + optional LLM)
+├── classify_llm.go     # LLMClassifier (heuristic sync + async Gemini reclassification)
 ├── embed.go            # GeminiEmbedder (768-dim)
 ├── embed_openai.go     # OpenAIEmbedder (text-embedding-3-small/large)
 ├── embed_ollama.go     # OllamaEmbedder (local, no API key)
@@ -329,6 +354,7 @@ geoffreyengram/
 |
 ├── scoring_test.go     # CompositeScore, CosineSimilarity, DecayFactor tests
 ├── classify_test.go    # Heuristic classification per sector
+├── classify_llm_test.go # LLM classifier async reclassification tests
 ├── store_test.go       # SQLite operations, vector encode/decode, decay sweep
 ├── waypoints_test.go   # Entity extraction (brackets, quotes, known entities)
 ├── temporal_test.go    # Session chaining, time-window, GetLastSession
@@ -358,13 +384,15 @@ geoffreyengram/
 - **Phase 2: MCP Server** — `cmd/engram-mcp` with 5 tools (`remember`, `recall`, `reflect`, `get_session`, `inspect`), official MCP Go SDK, stdio transport, env-based config
 - **Phase 3: Temporal Enrichment** — `SessionID`/`ParentID` on memories, versioned schema migrations, `AddWithOptions`/`SearchWithOptions` API, time-window and session queries, `GetSession`/`GetLastSession` convenience methods
 - **Phase 4: Reflective Synthesis** — `ReflectionProvider` interface, `Reflect()` method with deduplication (cosine > 0.85), `GeminiReflector` built-in, optional background reflection worker, salience clamping
-- **Additional Providers** — `OpenAIEmbedder` (text-embedding-3-small/large, Azure support), `OllamaEmbedder` (local, no API key), 73 tests passing
+- **Additional Providers** — `OpenAIEmbedder` (text-embedding-3-small/large, Azure support), `OllamaEmbedder` (local, no API key)
 
 - **Phase 5: Examples** — Multi-scenario comparison test (`examples/comparison/`): 4 scenarios (Lily/emotional, Sifu/procedural, Nyx/semantic, Reeves/all-sector) with stateless vs flat-RAG vs engram evaluation, LLM-as-judge scoring, CLI selection
+- **Async LLM Classification** — `LLMClassifier` with heuristic sync + Gemini async reclassification, non-blocking buffered channel, `UpdateMemorySector` for post-hoc correction, 81 tests passing
 
 ### Remaining
 
-- LLM-powered sector classification, benchmarks
+- Fine-tuned DistilBERT classifier (local ONNX, ~2ms inference, no API calls)
+- Benchmark suite
 
 ## Who Uses This
 
