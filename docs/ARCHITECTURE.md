@@ -61,6 +61,92 @@ Default weights (configurable via `ScoringWeights`):
 - **Link weight** (0.1) — bonus from waypoint graph connections
 - **Sector weight** — per-character multiplier (bartender: episodic 1.5x, emotional 1.5x)
 
+### Retrieval Pipeline
+
+How embeddings, the waypoint graph, and composite scoring work together during a single `Search()` call:
+
+```
+Player asks: "remember that jazz song?"
+                    |
+                    v
+   ┌────────────────────────────────┐
+   │  1. EMBED THE QUERY            │
+   │  Text -> vector (768 floats)   │
+   │  via EmbeddingProvider          │
+   └───────────────┬────────────────┘
+                   |
+                   v
+   ┌────────────────────────────────┐
+   │  2. COSINE SIMILARITY          │
+   │  Compare query vector against  │
+   │  every stored memory's vector  │
+   │                                │
+   │  "played Midnight Serenade"     -> 0.82 (high — same topic)
+   │  "bar was crowded last night"   -> 0.41 (medium)
+   │  "prefers whiskey neat"         -> 0.15 (low)
+   │                                │
+   │  Sort by similarity, take top 20
+   └───────────────┬────────────────┘
+                   |
+                   v
+   ┌────────────────────────────────┐
+   │  3. WAYPOINT EXPANSION         │
+   │  For each top memory, look up  │
+   │  its entities in the graph     │
+   │                                │
+   │  "played Midnight Serenade"    │
+   │    -> entity: "Midnight Serenade"
+   │         |                      │
+   │         also linked to:        │
+   │         v                      │
+   │  "Serenade reminded her of dad"│
+   │    -> linkWeight = 0.8         │
+   │                                │
+   │  Memories connected through    │
+   │  shared entities get boosted   │
+   └───────────────┬────────────────┘
+                   |
+                   v
+   ┌────────────────────────────────────────────┐
+   │  4. COMPOSITE SCORING                      │
+   │  For every candidate, compute:             │
+   │                                            │
+   │  composite = ( similarity  x 0.6           │
+   │              + salience    x 0.2           │
+   │              + recency     x 0.1           │
+   │              + linkWeight  x 0.1 )         │
+   │              x sectorWeight                │
+   │                                            │
+   │  "played Midnight Serenade" (episodic)     │
+   │   = (0.82x0.6 + 0.7x0.2 + 0.9x0.1 + 0x0.1) x 1.2
+   │   = 0.84                                   │
+   │                                            │
+   │  "Serenade reminded her of dad" (emotional)│
+   │   = (0.35x0.6 + 0.9x0.2 + 0.4x0.1 + 0.8x0.1) x 1.5
+   │   = 0.72  <- surfaced by waypoint boost    │
+   │            + emotional sector weight!       │
+   └───────────────┬────────────────────────────┘
+                   |
+                   v
+   ┌────────────────────────────────┐
+   │  5. RETURN TOP-K               │
+   │  Sort by composite, take top 5 │
+   │  + inject up to 2 high-salience│
+   │    memories if missing         │
+   │  + reinforce accessed memories │
+   └────────────────────────────────┘
+```
+
+**What each component contributes:**
+
+- **Embeddings** (similarity) — "is this memory about the same thing?" Meaning-based, not keyword-based. "That rough day" matches "everything went wrong" because the meaning is close.
+- **Waypoint graph** (linkWeight) — "is this memory connected through shared people, places, or things?" Pulls in memories that aren't directly similar but are associatively linked. Hearing a song reminds you of the person you heard it with.
+- **Salience** — "how important was this memory?" High-salience memories (explicit requests, emotional moments) persist. Low-salience memories (small talk) fade.
+- **Recency** — "how recently was this accessed?" Recently recalled memories get a small boost.
+- **Sector weights** — "what kind of character is this?" An emotional character weights emotional memories higher. A scholarly character weights semantic memories higher. Same memories, different personality.
+
+Without the waypoint graph, the emotional memory about the song (similarity 0.35) would never surface — it's too semantically distant from "jazz song." But because it shares the entity "Midnight Serenade" with a high-similarity memory, the 0.8 link boost plus the 1.5x emotional sector weight pushes it into the results. This is how an emotional character remembers not just the song, but the feeling attached to it.
+
 ### Waypoint Graph
 
 Memories are linked through shared entities (people, places, topics). When you recall "Japan," the graph also surfaces memories about "jazz" (because you mentioned jazz bars in Tokyo), "their dog" (because they mentioned missing the dog while traveling), etc. One-hop associative expansion.
@@ -326,6 +412,23 @@ examples/comparison/
 
 The `Scenario` struct encapsulates character prompt, player name, session script, sector weights, retrieval limit, and judge context. Runners are fully generic — adding a new scenario means adding a new entry to `AllScenarios` in `scenarios.go`.
 
+## Local Chat Example (`examples/chat/`)
+
+A live REPL that demonstrates Pattern A (server-driven) with Ollama. Fully local — no API keys needed.
+
+```
+Player types message
+    → engram.Search(message, userID, 5, weights)  ← deterministic, every turn
+    → Memories injected into prompt as context
+    → Prompt sent to Ollama /api/chat
+    → Response printed
+    → engram.AddWithOptions(...)  ← deterministic, every turn
+```
+
+The LLM never needs tool-use capability — it just sees memories as part of its prompt. This makes it work well with small local models (1-3B parameters) that struggle with function calling.
+
+Uses two Ollama models: one for embeddings (`nomic-embed-text`, 768-dim) and one for chat (user-specified). Session threading via `SessionID`/`ParentID`. Built-in commands: `/memories`, `/session`, `/new`, `/quit`.
+
 ## Project Structure
 
 ```
@@ -366,6 +469,8 @@ geoffreyengram/
 |   └── engram-mcp/
 |       └── main.go     # MCP stdio server (5 tools)
 ├── examples/
+|   ├── chat/
+|   |   └── main.go     # Local REPL chat with Ollama (Pattern A)
 |   └── comparison/
 |       ├── main.go     # Runners, judge, output, CLI
 |       └── scenarios.go # Scenario struct + 4 scenario definitions
@@ -391,7 +496,10 @@ geoffreyengram/
 
 ### Remaining
 
-- Fine-tuned DistilBERT classifier (local ONNX, ~2ms inference, no API calls)
+- **Local ONNX inference** — `//go:build onnx` build tag, CGO via hugot/ONNX Runtime:
+  - `OnnxEmbedder` — all-MiniLM-L6-v2 (~80MB, ~2ms, 384-dim) — replaces API embedding calls
+  - `DistilBERTClassifier` — fine-tuned 5-class sector classifier (~17MB, ~2ms) — replaces LLM reclassification
+  - Single Go binary with embedded models, no network calls, no Ollama dependency
 - Benchmark suite
 
 ## Who Uses This

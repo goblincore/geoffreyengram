@@ -214,6 +214,26 @@ Your Game Server / Chatbot / AI Agent
 - **Server-driven (Pattern A):** Your code calls `Search()` and `Add()` explicitly. You control when memory is read/written. Simple, predictable, cheaper.
 - **Agent-driven (Pattern B):** The LLM has `recall`/`remember` as MCP tools and decides when to use them. The character has agency over its own memory. More autonomous, more emergent, more LLM calls.
 
+## Local Chat Example
+
+Test geoffreyengram in a live conversation using Ollama. No API keys needed — fully local.
+
+```bash
+# Pull models
+ollama pull nomic-embed-text             # embeddings
+ollama pull hadad/LFM2.5-1.2B:Q4_K_M    # chat (or llama3, mistral, etc.)
+
+# Start chatting
+go run ./examples/chat/ --chat-model hadad/LFM2.5-1.2B:Q4_K_M
+
+# Custom character + model
+go run ./examples/chat/ --chat-model mistral --character "Sifu Chen" --prompt ./sifu.txt
+```
+
+The example uses **Pattern A (server-driven)**: your code calls `Search()` before each LLM call to inject memories into the prompt, and `Add()` after to store the exchange. The LLM just sees memories as context — no tool-use capability required, so even small models work well.
+
+Type `/memories` during a conversation to see what the character remembers (sectors, salience, decay scores).
+
 ## Comparison Example
 
 Does cognitive memory actually produce better characters? Run the comparison test to find out.
@@ -269,6 +289,7 @@ geoffreyengram/
 ├── cmd/
 │   └── engram-mcp/    # MCP stdio server (5 tools)
 ├── examples/
+│   ├── chat/          # Local REPL chat with Ollama (Pattern A)
 │   └── comparison/    # Multi-scenario comparison test (4 scenarios)
 └── docs/
     └── ARCHITECTURE.md
@@ -297,7 +318,9 @@ This project was extracted from a production NPC memory system ([Club Mutant](ht
 ### Roadmap
 - [x] LLM-powered sector classification (async reclassification via Gemini)
 - [x] Comparison examples (4 scenarios testing each cognitive sector)
-- [ ] Fine-tuned DistilBERT classifier (local ONNX, ~2ms inference, no API calls)
+- [ ] Local ONNX inference via hugot (`//go:build onnx`, CGO)
+  - [ ] `OnnxEmbedder` — all-MiniLM-L6-v2 (~80MB, ~2ms, 384-dim, replaces API embedding calls)
+  - [ ] `DistilBERTClassifier` — fine-tuned sector classification (~17MB, ~2ms, replaces LLM reclassification)
 - [ ] Benchmark suite
 
 ## Why Go
