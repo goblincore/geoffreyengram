@@ -333,6 +333,41 @@ block, _ := engine.AssembleContext(ctx, "lily:player123", "greet the player", 50
 // block.Sources traces each fragment to its origin
 ```
 
+### CLI Tool
+
+```bash
+# Install
+go install github.com/goblincore/geoffreyengram/cmd/dualmem@latest
+
+# Add a memory (namespace auto-detected from cwd)
+dualmem add --text "Auth middleware rewrite is compliance-driven, not tech debt" --salience 0.8
+
+# Add with explicit namespace and sector
+dualmem add --ns "claude:club-mutant" --text "Player prefers terse responses" --sector semantic
+
+# Assemble context with token budget (key command for session start)
+dualmem context "auth system" --budget 3000
+
+# Search
+dualmem search "user preferences" --limit 5
+
+# Get profile sketch
+dualmem profile
+
+# Status
+dualmem status
+```
+
+Configure via `~/.config/dualmem/config.yaml` or `.dualmem.yaml` in project root. Requires `GEMINI_API_KEY` or `GOOGLE_API_KEY` environment variable.
+
+### Claude Code Skills
+
+Place these in your project's `.claude/commands/` to use DualMem from Claude Code:
+
+- **`/memory-load`** — Load project memory context at session start (`dualmem context`)
+- **`/memory-save`** — Save important decisions/preferences (`dualmem add`)
+- **`/memory-search`** — Search project memory (`dualmem search`)
+
 ### HTTP API
 
 ```
@@ -383,9 +418,11 @@ geoffreyengram/
 │   ├── sketch.go      # Sketch Path (episodes, arcs, profiles)
 │   ├── pipeline.go    # Background compression workers + agglomerative clustering
 │   ├── store_sqlite.go # SQLite backend
+│   ├── embed_gemini.go # Gemini embedding provider
 │   └── api.go         # HTTP API handlers
 ├── *_test.go          # 97 tests across all subsystems
 ├── cmd/
+│   ├── dualmem/       # CLI tool (add, search, context, profile, status)
 │   └── engram-mcp/    # MCP stdio server (5 tools)
 ├── examples/
 │   ├── chat/          # Local REPL chat with Ollama (Pattern A)
