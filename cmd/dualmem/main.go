@@ -192,6 +192,19 @@ func cmdAdd(cfg CLIConfig) {
 		os.Exit(1)
 	}
 
+	// CLI adds are deliberate — default to semantic sector (facts/decisions)
+	// rather than episodic (which compresses well but penalizes importance score).
+	sectorHint := *sector
+	if sectorHint == "" {
+		sectorHint = "semantic"
+	}
+
+	// CLI adds are intentional saves — default salience to 0.7 (not 0.5)
+	sal := *salience
+	if sal == 0 {
+		sal = 0.7
+	}
+
 	namespace := resolveNamespace(*ns, cfg)
 
 	engine, err := newEngine(cfg)
@@ -204,8 +217,8 @@ func cmdAdd(cfg CLIConfig) {
 	ctx := context.Background()
 	err = engine.AddWithOptions(ctx, dualmem.MemoryInput{
 		UserMessage: *text,
-		SectorHint:  *sector,
-		Salience:    *salience,
+		SectorHint:  sectorHint,
+		Salience:    sal,
 		SessionID:   *session,
 	}, namespace)
 	if err != nil {
