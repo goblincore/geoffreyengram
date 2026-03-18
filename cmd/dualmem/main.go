@@ -104,6 +104,7 @@ func newEngine(cfg CLIConfig) (*dualmem.Engine, error) {
 	return dualmem.New(dualmem.Config{
 		SQLitePath:            cfg.Storage.SQLitePath,
 		EmbeddingProvider:     dualmem.NewGeminiEmbedder(apiKey, cfg.Providers.EmbeddingDimension),
+		Classifier:            dualmem.NewGeminiClassifier(apiKey),
 		MaxDetailPerUser:      100,
 		ImportanceTheta:       0.65,
 		EpisodeBatchInterval:  episodeInterval,
@@ -192,14 +193,8 @@ func cmdAdd(cfg CLIConfig) {
 		os.Exit(1)
 	}
 
-	// CLI adds are deliberate — default to semantic sector (facts/decisions)
-	// rather than episodic (which compresses well but penalizes importance score).
-	sectorHint := *sector
-	if sectorHint == "" {
-		sectorHint = "semantic"
-	}
-
-	// CLI adds are intentional saves — default salience to 0.7 (not 0.5)
+	// CLI adds are intentional saves — default salience to 0.7 (not 0.5).
+	// Sector is classified by Gemini Flash Lite unless explicitly overridden.
 	sal := *salience
 	if sal == 0 {
 		sal = 0.7
@@ -217,7 +212,7 @@ func cmdAdd(cfg CLIConfig) {
 	ctx := context.Background()
 	err = engine.AddWithOptions(ctx, dualmem.MemoryInput{
 		UserMessage: *text,
-		SectorHint:  sectorHint,
+		SectorHint:  *sector,
 		Salience:    sal,
 		SessionID:   *session,
 	}, namespace)
