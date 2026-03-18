@@ -266,6 +266,95 @@ Each scenario follows the same structure: 3 history sessions building up memorie
 
 Results are printed to the terminal and written to `examples/comparison/results_<name>.md` for easy human comparison — each mode's full conversation shown end-to-end.
 
+## DualMem: Dual-Path Agent Memory
+
+As memory scales (500+ memories per user, multiple NPCs, multi-agent scenarios), flat vector search faces compounding problems: recall quality degrades, retrieval cost scales linearly, and LLM context windows get wasted on low-value memories.
+
+**DualMem** solves this with a dual-path architecture inspired by [RandNLA Attention](https://arxiv.org/abs/2410.13720):
+
+```
+Incoming Memory → Importance Scorer (no LLM call)
+                     │
+              score ≥ 0.65        score < 0.65
+                     │                  │
+            ┌────────▼──────┐  ┌────────▼─────────┐
+            │  Detail Path  │  │   Sketch Path     │
+            │  (Top-K=100)  │  │  (Hierarchical)   │
+            │               │  │                   │
+            │  Full text    │  │  L1: Episodes     │
+            │  Full 768d    │  │      (~200 tokens) │
+            │  Full meta    │  │  L2: Arcs         │
+            └───────────────┘  │      (128d, ~100t) │
+                               │  L3: Profile      │
+                               │      (64d, ~50t)   │
+                               └───────────────────┘
+```
+
+- **Detail Path**: Fixed-capacity store of uncompressed, full-fidelity memories per user. Names, explicit preferences, critical events — anything requiring exact recall.
+- **Sketch Path**: Hierarchical compression using random projection (Johnson-Lindenstrauss lemma). Episodes summarize conversation blocks, arcs cluster related episodes into themes, and a continuously-updated profile sketch captures the user's essence in ~50 tokens.
+
+### Key Features
+
+- **No LLM on the Add path** — importance scoring uses heuristics (sector type, salience, entity specificity, novelty via cosine scan). Fire-and-forget latency preserved.
+- **Token-budget-aware retrieval** — `AssembleContext()` fills a token budget with profile → arcs → detail memories → episodes, in priority order.
+- **Drop-in compatible** with Engram — `Add()` and `Search()` match the same signatures. Swap one line.
+- **Random projection** — 768d → 128d (arcs) and 768d → 64d (profiles) via sparse {-1, +1} matrices with JL distance preservation guarantees.
+- **Background compression pipeline** — episodes, arcs, and profile updates run as configurable-interval workers (same pattern as Engram's decay/reflection workers).
+
+### Usage
+
+```go
+import "github.com/goblincore/geoffreyengram/dualmem"
+
+engine, err := dualmem.New(dualmem.Config{
+    SQLitePath:        "./data/dualmem.db",
+    EmbeddingProvider: myEmbedder,       // required
+    Classifier:        myClassifier,     // optional
+    EntityExtractor:   myExtractor,      // optional
+    Summarizer:        myGeminiSummarizer, // optional (enables compression pipeline)
+    MaxDetailPerUser:  100,
+    ImportanceTheta:   0.65,
+})
+defer engine.Close()
+
+// Drop-in compatible with Engram
+engine.Add("I love dark roast coffee", "Great taste!", "lily:player123")
+results := engine.Search("coffee", "lily:player123", 5, nil)
+
+// Dual-path search (both paths)
+result, _ := engine.DualSearch(ctx, "lily:player123", "what does this player like?",
+    dualmem.SearchOpts{Limit: 5, IncludeSketch: true})
+// result.DetailMemories, result.Episodes, result.Arcs, result.Profile
+
+// Token-budget-aware context assembly (the key differentiator)
+block, _ := engine.AssembleContext(ctx, "lily:player123", "greet the player", 500)
+// block.Text is pre-formatted for LLM prompt injection
+// block.TokenCount <= 500
+// block.Sources traces each fragment to its origin
+```
+
+### HTTP API
+
+```
+POST /v1/memory/add       — add a memory
+POST /v1/memory/search    — dual-path search
+POST /v1/memory/context   — AssembleContext (token-budget-aware)
+GET  /v1/memory/profile/:userID — get user profile sketch
+POST /v1/memory/promote   — pin a memory to Detail Path
+POST /v1/memory/demote    — demote a memory to Sketch Path
+```
+
+### Namespace-Based Multi-Agent Memory
+
+`userID` is flexible — use it for NPC isolation, agent memory, or shared world state:
+
+```go
+engine.Add(msg, resp, "npc:lily:player123")      // Lily's memories of this player
+engine.Add(msg, resp, "npc:watcher:player123")    // Watcher's different perspective
+engine.Add(msg, resp, "shared:world")             // World events all NPCs share
+engine.Add(msg, resp, "claude:project-abc")       // Claude agent's project memory
+```
+
 ## Project Structure
 
 ```
@@ -285,7 +374,17 @@ geoffreyengram/
 ├── reflect.go         # Reflect method, deduplication, ReflectionProvider interface
 ├── reflect_gemini.go  # GeminiReflector (built-in LLM reflector)
 ├── reflect_worker.go  # Background reflection goroutine
-├── *_test.go          # 81 tests across all subsystems
+├── dualmem/           # Dual-path agent memory engine
+│   ├── dualmem.go     # Core engine (New, Add, Search, DualSearch, AssembleContext)
+│   ├── types.go       # Types, Config, Store interface, provider interfaces
+│   ├── scorer.go      # Importance scoring (sector + salience + specificity + novelty)
+│   ├── project.go     # JL random projection (768→128, 768→64)
+│   ├── detail.go      # Detail Path (Top-K store, capacity management, search)
+│   ├── sketch.go      # Sketch Path (episodes, arcs, profiles)
+│   ├── pipeline.go    # Background compression workers + agglomerative clustering
+│   ├── store_sqlite.go # SQLite backend
+│   └── api.go         # HTTP API handlers
+├── *_test.go          # 97 tests across all subsystems
 ├── cmd/
 │   └── engram-mcp/    # MCP stdio server (5 tools)
 ├── examples/
@@ -313,11 +412,16 @@ This project was extracted from a production NPC memory system ([Club Mutant](ht
 - Reflective synthesis engine with deduplication
 - MCP server with 5 tools (`remember`, `recall`, `reflect`, `get_session`, `inspect`)
 - Async LLM sector reclassification (heuristic + background Gemini refinement)
-- 81 tests across all subsystems
+- **DualMem dual-path memory** — importance-scored routing, hierarchical compression, token-budget-aware context assembly, HTTP API
+- 97 tests across all subsystems
 
 ### Roadmap
 - [x] LLM-powered sector classification (async reclassification via Gemini)
 - [x] Comparison examples (4 scenarios testing each cognitive sector)
+- [x] DualMem dual-path memory engine (Detail Path + Sketch Path)
+- [ ] DualMem: Postgres/pgvector store backend
+- [ ] DualMem: Data migration script (Engram SQLite → DualMem)
+- [ ] DualMem: MCP server integration
 - [ ] Local ONNX inference via hugot (`//go:build onnx`, CGO)
   - [ ] `OnnxEmbedder` — all-MiniLM-L6-v2 (~80MB, ~2ms, 384-dim, replaces API embedding calls)
   - [ ] `DistilBERTClassifier` — fine-tuned sector classification (~17MB, ~2ms, replaces LLM reclassification)
