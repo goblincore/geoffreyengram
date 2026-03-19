@@ -233,6 +233,7 @@ For explicit invocation, place these in `.claude/commands/`:
 - **`/memory-load`** — `dualmem context` with custom query
 - **`/memory-save`** — `dualmem add` with custom text
 - **`/memory-search`** — `dualmem search` with custom query
+- **`/wrap-up`** — end-of-session continuity save (summarizes work, saves to dualmem)
 
 ## Engram Details
 
