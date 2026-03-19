@@ -54,7 +54,7 @@ results := mem.Search("japan trip", "lily:player123", 5, nil)
 
 Best for: coding agents, multi-agent workflows, high-memory-pressure scenarios, any use case over ~500 memories.
 
-Inspired by [RandNLA Attention](https://arxiv.org/abs/2410.13720)'s dual-path architecture — keeps critical memories at full fidelity while compressing everything else into a hierarchical sketch:
+Uses a dual-path architecture — keeps critical memories at full fidelity while compressing everything else into a hierarchical sketch:
 
 ```
 Incoming Memory → Importance Scorer → LLM Sector Classification (Gemini Flash Lite)
