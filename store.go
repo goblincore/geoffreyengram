@@ -107,6 +107,15 @@ func (s *Store) migrate() error {
 		s.db.Exec(`INSERT INTO schema_version (version) VALUES (2)`)
 	}
 
+	if version < 3 {
+		// Phase 6: multimodal memory support
+		s.db.Exec(`ALTER TABLE memories ADD COLUMN modality TEXT NOT NULL DEFAULT 'text'`)
+		s.db.Exec(`ALTER TABLE memories ADD COLUMN mime_type TEXT NOT NULL DEFAULT ''`)
+		s.db.Exec(`ALTER TABLE memories ADD COLUMN external_ref TEXT NOT NULL DEFAULT ''`)
+		s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_memories_modality ON memories(modality)`)
+		s.db.Exec(`INSERT INTO schema_version (version) VALUES (3)`)
+	}
+
 	return nil
 }
 
@@ -134,10 +143,15 @@ func DecodeVector(b []byte) []float32 {
 
 // InsertMemory stores a new memory row and returns its ID.
 func (s *Store) InsertMemory(m Memory) (int64, error) {
+	modality := string(m.Modality)
+	if modality == "" {
+		modality = "text"
+	}
 	res, err := s.db.Exec(`
-		INSERT INTO memories (content, sector, salience, decay_score, summary, user_id, session_id, parent_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO memories (content, sector, salience, decay_score, summary, user_id, session_id, parent_id, modality, mime_type, external_ref)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.Content, string(m.Sector), m.Salience, m.Salience, m.Summary, m.UserID, m.SessionID, m.ParentID,
+		modality, m.MimeType, m.ExternalRef,
 	)
 	if err != nil {
 		return 0, err
@@ -168,7 +182,7 @@ func scanMemory(rows *sql.Rows, vecBlob *[]byte) (memoryWithVector, error) {
 	if err := rows.Scan(
 		&mwv.ID, &mwv.Content, &mwv.Sector, &mwv.Salience, &mwv.DecayScore,
 		&lastAccessed, &mwv.AccessCount, &created, &mwv.Summary, &mwv.UserID,
-		&mwv.SessionID, &mwv.ParentID,
+		&mwv.SessionID, &mwv.ParentID, &mwv.Modality, &mwv.MimeType, &mwv.ExternalRef,
 		vecBlob,
 	); err != nil {
 		return mwv, err
@@ -184,7 +198,7 @@ func scanMemory(rows *sql.Rows, vecBlob *[]byte) (memoryWithVector, error) {
 
 const memorySelectCols = `m.id, m.content, m.sector, m.salience, m.decay_score,
 	m.last_accessed_at, m.access_count, m.created_at, m.summary, m.user_id,
-	m.session_id, m.parent_id`
+	m.session_id, m.parent_id, m.modality, m.mime_type, m.external_ref`
 
 // GetMemoriesWithVectors loads all memories (with vectors) for a given user.
 // At NPC scale (~50-500 per user) this is fast enough to score in Go.
@@ -237,7 +251,7 @@ func (s *Store) GetSessionMemories(sessionID string) ([]Memory, error) {
 		if err := rows.Scan(
 			&m.ID, &m.Content, &m.Sector, &m.Salience, &m.DecayScore,
 			&lastAccessed, &m.AccessCount, &created, &m.Summary, &m.UserID,
-			&m.SessionID, &m.ParentID,
+			&m.SessionID, &m.ParentID, &m.Modality, &m.MimeType, &m.ExternalRef,
 		); err != nil {
 			return nil, err
 		}
@@ -271,7 +285,7 @@ func (s *Store) GetMemoriesInTimeWindow(userID string, after, before time.Time) 
 		if err := rows.Scan(
 			&m.ID, &m.Content, &m.Sector, &m.Salience, &m.DecayScore,
 			&lastAccessed, &m.AccessCount, &created, &m.Summary, &m.UserID,
-			&m.SessionID, &m.ParentID,
+			&m.SessionID, &m.ParentID, &m.Modality, &m.MimeType, &m.ExternalRef,
 		); err != nil {
 			return nil, err
 		}
@@ -312,7 +326,7 @@ func (s *Store) GetRecentMemories(userID string, limit int, sectors []Sector) ([
 		if err := rows.Scan(
 			&m.ID, &m.Content, &m.Sector, &m.Salience, &m.DecayScore,
 			&lastAccessed, &m.AccessCount, &created, &m.Summary, &m.UserID,
-			&m.SessionID, &m.ParentID,
+			&m.SessionID, &m.ParentID, &m.Modality, &m.MimeType, &m.ExternalRef,
 		); err != nil {
 			return nil, err
 		}
@@ -429,7 +443,7 @@ func (s *Store) GetMemoriesByWaypoint(waypointID int64, userID string, excludeID
 		if err := rows.Scan(
 			&mwv.ID, &mwv.Content, &mwv.Sector, &mwv.Salience, &mwv.DecayScore,
 			&lastAccessed, &mwv.AccessCount, &created, &mwv.Summary, &mwv.UserID,
-			&mwv.SessionID, &mwv.ParentID,
+			&mwv.SessionID, &mwv.ParentID, &mwv.Modality, &mwv.MimeType, &mwv.ExternalRef,
 			&vecBlob, &linkWeight,
 		); err != nil {
 			return nil, err

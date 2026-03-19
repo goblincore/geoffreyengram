@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -92,6 +93,10 @@ type rememberInput struct {
 	ParentID         int64   `json:"parent_id,omitempty"   jsonschema:"Optional parent memory ID for conversation chains"`
 	SectorHint       string  `json:"sector_hint,omitempty" jsonschema:"Optional sector override: episodic, semantic, procedural, emotional, reflective"`
 	Salience         float64 `json:"salience,omitempty"    jsonschema:"Optional salience score 0.0-1.0 (default 0.5)"`
+	MediaBase64      string  `json:"media_base64,omitempty" jsonschema:"Optional base64-encoded media (image or audio) to embed"`
+	MimeType         string  `json:"mime_type,omitempty"    jsonschema:"MIME type of media (e.g. image/png, audio/mpeg). Required if media_base64 is set."`
+	Description      string  `json:"description,omitempty"  jsonschema:"Human-readable description of media content"`
+	ExternalRef      string  `json:"external_ref,omitempty" jsonschema:"Optional game asset ID or URL for the media"`
 }
 
 type recallInput struct {
@@ -99,9 +104,10 @@ type recallInput struct {
 	UserID    string   `json:"user_id"              jsonschema:"User/character pair ID"`
 	Limit     int      `json:"limit,omitempty"      jsonschema:"Max results to return (default 5)"`
 	SessionID string   `json:"session_id,omitempty" jsonschema:"Filter to a specific session"`
-	Sectors   []string `json:"sectors,omitempty"    jsonschema:"Filter to specific sectors: episodic, semantic, procedural, emotional, reflective"`
-	After     string   `json:"after,omitempty"      jsonschema:"Only memories after this RFC3339 timestamp"`
-	Before    string   `json:"before,omitempty"     jsonschema:"Only memories before this RFC3339 timestamp"`
+	Sectors    []string `json:"sectors,omitempty"     jsonschema:"Filter to specific sectors: episodic, semantic, procedural, emotional, reflective"`
+	After      string   `json:"after,omitempty"       jsonschema:"Only memories after this RFC3339 timestamp"`
+	Before     string   `json:"before,omitempty"      jsonschema:"Only memories before this RFC3339 timestamp"`
+	Modalities []string `json:"modalities,omitempty"  jsonschema:"Filter to specific modalities: text, image, audio"`
 }
 
 type reflectInput struct {
@@ -127,7 +133,7 @@ type inspectInput struct {
 
 func rememberHandler(cm *engram.Engram) func(context.Context, *mcp.CallToolRequest, rememberInput) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, input rememberInput) (*mcp.CallToolResult, any, error) {
-		id, err := cm.AddWithOptions(engram.AddOptions{
+		opts := engram.AddOptions{
 			UserID:           input.UserID,
 			UserMessage:      input.UserMessage,
 			AssistantMessage: input.AssistantMessage,
@@ -135,7 +141,23 @@ func rememberHandler(cm *engram.Engram) func(context.Context, *mcp.CallToolReque
 			ParentID:         input.ParentID,
 			SectorHint:       engram.Sector(input.SectorHint),
 			Salience:         input.Salience,
-		})
+			Description:      input.Description,
+			ExternalRef:      input.ExternalRef,
+		}
+
+		// Handle media if provided
+		if input.MediaBase64 != "" {
+			if input.MimeType == "" {
+				return textResult(`{"error": "mime_type is required when media_base64 is provided"}`), nil, nil
+			}
+			data, err := base64.StdEncoding.DecodeString(input.MediaBase64)
+			if err != nil {
+				return textResult(fmt.Sprintf(`{"error": "invalid base64: %v"}`, err)), nil, nil
+			}
+			opts.Media = &engram.MediaContent{MimeType: input.MimeType, Data: data}
+		}
+
+		id, err := cm.AddWithOptions(opts)
 		if err != nil {
 			return textResult(fmt.Sprintf("error: %v", err)), nil, nil
 		}
@@ -171,6 +193,9 @@ func recallHandler(cm *engram.Engram) func(context.Context, *mcp.CallToolRequest
 		}
 		for _, s := range input.Sectors {
 			opts.Sectors = append(opts.Sectors, engram.Sector(s))
+		}
+		for _, m := range input.Modalities {
+			opts.Modalities = append(opts.Modalities, engram.Modality(m))
 		}
 
 		results := cm.SearchWithOptions(opts)
@@ -273,7 +298,7 @@ func textResult(text string) *mcp.CallToolResult {
 }
 
 func memoryToMap(m engram.Memory) map[string]any {
-	return map[string]any{
+	out := map[string]any{
 		"id":          m.ID,
 		"content":     m.Content,
 		"sector":      m.Sector,
@@ -283,7 +308,15 @@ func memoryToMap(m engram.Memory) map[string]any {
 		"session_id":  m.SessionID,
 		"parent_id":   m.ParentID,
 		"created_at":  m.CreatedAt.Format(time.RFC3339),
+		"modality":    string(m.Modality),
 	}
+	if m.MimeType != "" {
+		out["mime_type"] = m.MimeType
+	}
+	if m.ExternalRef != "" {
+		out["external_ref"] = m.ExternalRef
+	}
+	return out
 }
 
 func searchResultToMap(r engram.SearchResult) map[string]any {

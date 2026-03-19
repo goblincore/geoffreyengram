@@ -2,6 +2,7 @@ package engram
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sort"
 	"sync"
@@ -44,10 +45,23 @@ func Init(cfg Config) (*Engram, error) {
 
 	classifier := cfg.Classifier
 	if classifier == nil {
-		if cfg.GeminiAPIKey != "" {
-			classifier = NewLLMClassifier(cfg.GeminiAPIKey, store)
-		} else {
-			classifier = NewHeuristicClassifier("") // heuristic-only, no LLM
+		// Prefer EmbeddingClassifier when an embedder is available — it's faster
+		// (zero extra API calls during Add) and more accurate (96% vs 62% on benchmark).
+		// Falls back to LLMClassifier or HeuristicClassifier if init fails.
+		if embedder != nil {
+			ec, err := NewEmbeddingClassifier(context.Background(), embedder)
+			if err != nil {
+				log.Printf("[engram] EmbeddingClassifier init failed, falling back: %v", err)
+			} else {
+				classifier = ec
+			}
+		}
+		if classifier == nil {
+			if cfg.GeminiAPIKey != "" {
+				classifier = NewLLMClassifier(cfg.GeminiAPIKey, store)
+			} else {
+				classifier = NewHeuristicClassifier("")
+			}
 		}
 	}
 
@@ -202,43 +216,92 @@ func (cm *Engram) AddWithOptions(opts AddOptions) (int64, error) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	// 1. Build content
-	content := opts.UserMessage + " | " + opts.AssistantMessage
+	// 1. Build content and embedding (text vs media paths)
+	var content string
+	var vec []float32
+	var modality Modality
+	var mimeType string
+
+	if opts.Media != nil {
+		// --- Multimodal path ---
+		mmEmbedder, ok := cm.embedder.(MultimodalEmbeddingProvider)
+		if !ok {
+			return 0, fmt.Errorf("engram: multimodal embedding requires a MultimodalEmbeddingProvider (e.g. GeminiEmbedder2)")
+		}
+		modality = ModalityFromMimeType(opts.Media.MimeType)
+		if !mmEmbedder.SupportsModality(modality) {
+			return 0, fmt.Errorf("engram: embedder does not support modality %q", modality)
+		}
+		mimeType = opts.Media.MimeType
+
+		// Content is the human-readable description
+		content = opts.Description
+		if content == "" {
+			content = fmt.Sprintf("[%s: %s]", modality, mimeType)
+		}
+
+		// Embed the media bytes
+		var err error
+		vec, err = mmEmbedder.EmbedMedia(context.Background(), *opts.Media, "RETRIEVAL_DOCUMENT")
+		if err != nil {
+			log.Printf("[engram] EmbedMedia failed: %v", err)
+			return 0, fmt.Errorf("engram: embed media: %w", err)
+		}
+	} else {
+		// --- Text path (unchanged) ---
+		modality = ModalityText
+		content = opts.UserMessage + " | " + opts.AssistantMessage
+
+		if cm.embedder != nil {
+			var err error
+			vec, err = cm.embedder.Embed(context.Background(), content, "RETRIEVAL_DOCUMENT")
+			if err != nil {
+				log.Printf("[engram] Embed failed, storing without vector: %v", err)
+			}
+		}
+	}
 
 	// 2. Classify sector (or use hint)
 	sector := opts.SectorHint
 	if sector == "" {
-		sector = cm.classifier.Classify(content)
-	}
-
-	// 3. Generate embedding
-	var vec []float32
-	if cm.embedder != nil {
-		var err error
-		vec, err = cm.embedder.Embed(context.Background(), content, "RETRIEVAL_DOCUMENT")
-		if err != nil {
-			log.Printf("[engram] Embed failed, storing without vector: %v", err)
+		// For media: use embedding classifier if available (zero extra API calls)
+		if vec != nil {
+			if ec, ok := cm.classifier.(*EmbeddingClassifier); ok {
+				sector = ec.ClassifyFromEmbedding(vec)
+			} else {
+				sector = cm.classifier.Classify(content)
+			}
+		} else {
+			sector = cm.classifier.Classify(content)
 		}
 	}
 
-	// 4. Generate summary
-	summary := buildSummary(opts.UserMessage, opts.AssistantMessage, 200)
+	// 3. Generate summary
+	var summary string
+	if opts.Media != nil {
+		summary = truncateSummary(content, 200)
+	} else {
+		summary = buildSummary(opts.UserMessage, opts.AssistantMessage, 200)
+	}
 
-	// 5. Resolve salience
+	// 4. Resolve salience
 	salience := opts.Salience
 	if salience == 0 {
 		salience = 0.5
 	}
 
-	// 6. Store memory
+	// 5. Store memory
 	mem := Memory{
-		Content:   content,
-		Sector:    sector,
-		Salience:  salience,
-		UserID:    opts.UserID,
-		Summary:   summary,
-		SessionID: opts.SessionID,
-		ParentID:  opts.ParentID,
+		Content:     content,
+		Sector:      sector,
+		Salience:    salience,
+		UserID:      opts.UserID,
+		Summary:     summary,
+		SessionID:   opts.SessionID,
+		ParentID:    opts.ParentID,
+		Modality:    modality,
+		MimeType:    mimeType,
+		ExternalRef: opts.ExternalRef,
 	}
 	memID, err := cm.store.InsertMemory(mem)
 	if err != nil {
@@ -298,10 +361,28 @@ func (cm *Engram) SearchWithOptions(opts SearchOptions) []SearchResult {
 		log.Printf("[engram] No embedding provider configured")
 		return nil
 	}
-	queryVec, err := cm.embedder.Embed(context.Background(), opts.Query, "RETRIEVAL_QUERY")
-	if err != nil {
-		log.Printf("[engram] Embed query failed: %v", err)
-		return nil
+
+	// Embed query: text or media
+	var queryVec []float32
+	if opts.Media != nil {
+		mmEmbedder, ok := cm.embedder.(MultimodalEmbeddingProvider)
+		if !ok {
+			log.Printf("[engram] multimodal search requires MultimodalEmbeddingProvider")
+			return nil
+		}
+		var err error
+		queryVec, err = mmEmbedder.EmbedMedia(context.Background(), *opts.Media, "RETRIEVAL_QUERY")
+		if err != nil {
+			log.Printf("[engram] EmbedMedia query failed: %v", err)
+			return nil
+		}
+	} else {
+		var err error
+		queryVec, err = cm.embedder.Embed(context.Background(), opts.Query, "RETRIEVAL_QUERY")
+		if err != nil {
+			log.Printf("[engram] Embed query failed: %v", err)
+			return nil
+		}
 	}
 
 	candidates, err := cm.store.GetMemoriesWithVectors(opts.UserID)
@@ -310,7 +391,7 @@ func (cm *Engram) SearchWithOptions(opts SearchOptions) []SearchResult {
 		return nil
 	}
 
-	// Apply temporal and sector filters
+	// Apply temporal, sector, and modality filters
 	var filtered []memoryWithVector
 	for _, c := range candidates {
 		if opts.After != nil && c.CreatedAt.Before(*opts.After) {
@@ -326,6 +407,18 @@ func (cm *Engram) SearchWithOptions(opts SearchOptions) []SearchResult {
 			match := false
 			for _, s := range opts.Sectors {
 				if c.Sector == s {
+					match = true
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+		}
+		if len(opts.Modalities) > 0 {
+			match := false
+			for _, mod := range opts.Modalities {
+				if c.Modality == mod {
 					match = true
 					break
 				}

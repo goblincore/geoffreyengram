@@ -245,6 +245,12 @@ type EmbeddingProvider interface {
     Dimension() int
 }
 
+type MultimodalEmbeddingProvider interface {
+    EmbeddingProvider
+    EmbedMedia(ctx context.Context, media MediaContent, taskType string) ([]float32, error)
+    SupportsModality(modality Modality) bool
+}
+
 type SectorClassifier interface {
     Classify(content string) Sector
 }
@@ -258,7 +264,7 @@ type ReflectionProvider interface {
 }
 ```
 
-Built-in: `GeminiEmbedder`, `OpenAIEmbedder`, `OllamaEmbedder`, `HeuristicClassifier`, `DefaultEntityExtractor`, `GeminiReflector`.
+Built-in: `GeminiEmbedder`, `GeminiEmbedder2` (multimodal), `OpenAIEmbedder`, `OllamaEmbedder`, `EmbeddingClassifier` (default), `HeuristicClassifier`, `DefaultEntityExtractor`, `GeminiReflector`.
 
 ### Reflective Synthesis
 
@@ -271,6 +277,48 @@ Player leaves → [time passes] → reflective worker fires
   → stores as high-salience reflective memories
   → surfaces naturally when player returns
 ```
+
+### Multimodal Memory
+
+NPCs can form memories from images and audio — not just text. A character can "hear" a music track and recall related conversations, or see a player-uploaded photo and connect it to past events.
+
+Uses Gemini Embedding 2 to embed text, images, and audio into the **same vector space**. No media blobs stored — just embeddings + metadata.
+
+```go
+mem, _ := engram.Init(engram.Config{
+    DBPath:            "./data/memory.db",
+    EmbeddingProvider: engram.NewGeminiEmbedder2(apiKey, 768), // multimodal
+})
+
+// NPC hears music playing in the bar
+mem.AddWithOptions(engram.AddOptions{
+    UserID:      "lily:player123",
+    Media:       &engram.MediaContent{MimeType: "audio/mpeg", Data: trackBytes},
+    Description: "Jazz playing in the bar",
+    ExternalRef: "asset://tracks/jazz_01.mp3",
+})
+
+// Later: text search finds the audio memory via shared embedding space
+results := mem.Search("what music was playing?", "lily:player123", 5, nil)
+
+// Or search by image to find related text memories
+results = mem.SearchWithOptions(engram.SearchOptions{
+    UserID:     "lily:player123",
+    Media:      &engram.MediaContent{MimeType: "image/png", Data: photoBytes},
+    Limit:      5,
+    Modalities: []engram.Modality{engram.ModalityText}, // find text memories related to image
+})
+```
+
+Supported modalities: `text`, `image` (png/jpeg/gif/webp), `audio` (mp3/wav/ogg). `GeminiEmbedder2` implements `MultimodalEmbeddingProvider`. Text-only embedders (OpenAI, Ollama) continue to work — multimodal is opt-in via the embedder choice.
+
+### Embedding-Based Classification
+
+Sector classification uses zero-shot cosine similarity against anchor descriptions — no extra API calls during `Add()`. The embedding already computed for storage is reused for classification.
+
+Benchmarked at **96% accuracy** on a 50-example corpus (vs 62% for keyword heuristics). The classifier handles 4 input sectors (episodic, semantic, procedural, emotional). Reflective memories are synthesized by `Reflect()`, not classified from input.
+
+This is the default classifier when an embedding provider is available. Falls back to `HeuristicClassifier` or `LLMClassifier` if embedding init fails.
 
 ### MCP Server
 
@@ -331,7 +379,9 @@ geoffreyengram/
 ├── scoring.go             # Composite scoring, cosine similarity, decay
 ├── classify.go            # HeuristicClassifier
 ├── classify_llm.go        # LLMClassifier (async Gemini reclassification)
-├── embed.go               # GeminiEmbedder
+├── classify_embedding.go  # EmbeddingClassifier (zero-shot, 96% accuracy, default)
+├── embed.go               # GeminiEmbedder (text-only, v1)
+├── embed_gemini2.go       # GeminiEmbedder2 (multimodal: text/image/audio)
 ├── embed_openai.go        # OpenAIEmbedder
 ├── embed_ollama.go        # OllamaEmbedder
 ├── waypoints.go           # Entity graph, associative expansion
@@ -364,10 +414,10 @@ geoffreyengram/
 Extracted from a production NPC memory system ([Club Mutant](https://github.com/goblincore/club-mutant)) and extended for coding agent use.
 
 ### What works now
-- **Engram**: 5-sector cognitive model, composite scoring, waypoint entity graph, exponential decay, reflective synthesis, conversation threading, MCP server, async LLM reclassification
+- **Engram**: 5-sector cognitive model, composite scoring, waypoint entity graph, exponential decay, reflective synthesis, conversation threading, multimodal memory (image/audio via Gemini Embedding 2), MCP server
 - **DualMem**: importance-scored dual-path routing, Gemini Flash Lite classification, hierarchical compression pipeline, JL random projection, token-budget-aware context assembly, CLI tool, HTTP API, Claude Code integration
-- **Providers**: Gemini, OpenAI, Ollama (embedding); Heuristic + Gemini (classification)
-- **97 tests** across all subsystems
+- **Providers**: Gemini v1, Gemini v2 (multimodal), OpenAI, Ollama (embedding); EmbeddingClassifier (default, 96%), Heuristic, LLM (classification)
+- **144 tests** across all subsystems
 
 ### Roadmap
 - [x] LLM-powered sector classification

@@ -2,6 +2,23 @@ package engram
 
 import "time"
 
+// Modality describes the type of content in a memory.
+type Modality string
+
+const (
+	ModalityText  Modality = "text"
+	ModalityImage Modality = "image"
+	ModalityAudio Modality = "audio"
+)
+
+// MediaContent holds raw media bytes for embedding (NOT stored in DB).
+// The caller (game engine) provides this; it's passed to the embedder
+// and then discarded after the embedding vector is computed.
+type MediaContent struct {
+	MimeType string // e.g. "image/png", "audio/mpeg"
+	Data     []byte // raw bytes (embedder handles base64 encoding)
+}
+
 // Sector represents one of the 5 cognitive memory sectors.
 type Sector string
 
@@ -68,10 +85,13 @@ type Memory struct {
 	LastAccessedAt time.Time
 	AccessCount    int
 	CreatedAt      time.Time
-	UserID         string // e.g. "lily_bartender:player123"
-	Summary        string // Short text injected into prompts
-	SessionID      string // Conversation session identifier (UUID or caller-provided)
-	ParentID       int64  // Previous memory in the conversation chain (0 = none)
+	UserID         string   // e.g. "lily_bartender:player123"
+	Summary        string   // Short text injected into prompts
+	SessionID      string   // Conversation session identifier (UUID or caller-provided)
+	ParentID       int64    // Previous memory in the conversation chain (0 = none)
+	Modality       Modality // "text" (default), "image", "audio"
+	MimeType       string   // e.g. "image/png", "audio/mpeg" (empty for text)
+	ExternalRef    string   // Optional game asset ID / URL (never blob data)
 }
 
 // AddOptions provides the full API for storing memories with temporal context.
@@ -81,9 +101,12 @@ type AddOptions struct {
 	AssistantMessage string
 	SessionID        string   // Optional session identifier
 	ParentID         int64    // Optional parent memory ID (for threading)
-	SectorHint       Sector   // Optional: skip classification
-	Salience         float64  // Optional: override default 0.5
-	Entities         []Entity // Optional: pre-extracted entities
+	SectorHint       Sector        // Optional: skip classification
+	Salience         float64       // Optional: override default 0.5
+	Entities         []Entity      // Optional: pre-extracted entities
+	Media            *MediaContent // Optional: image or audio to embed (bytes not stored)
+	Description      string        // Human-readable description of media (stored as Content)
+	ExternalRef      string        // Optional: game asset ID for media
 }
 
 // SearchOptions extends basic search with temporal and session filters.
@@ -92,10 +115,12 @@ type SearchOptions struct {
 	UserID    string
 	Limit     int
 	Weights   SectorWeights
-	After     *time.Time // Only memories created after this time
-	Before    *time.Time // Only memories created before this time
-	SessionID string     // Filter to a specific session
-	Sectors   []Sector   // Filter to specific sectors
+	After      *time.Time     // Only memories created after this time
+	Before     *time.Time     // Only memories created before this time
+	SessionID  string         // Filter to a specific session
+	Sectors    []Sector       // Filter to specific sectors
+	Media      *MediaContent  // Optional: search by media instead of text
+	Modalities []Modality     // Optional: filter to specific modalities
 }
 
 // SearchResult is a scored memory returned from retrieval.

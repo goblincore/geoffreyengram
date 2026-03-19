@@ -9,6 +9,15 @@ type EmbeddingProvider interface {
 	Dimension() int
 }
 
+// MultimodalEmbeddingProvider extends EmbeddingProvider with media embedding.
+// Implementations must produce vectors in the SAME embedding space as text,
+// enabling cross-modal retrieval (text query finds audio memories, etc.).
+type MultimodalEmbeddingProvider interface {
+	EmbeddingProvider
+	EmbedMedia(ctx context.Context, media MediaContent, taskType string) ([]float32, error)
+	SupportsModality(modality Modality) bool
+}
+
 // SectorClassifier determines which cognitive sector a memory belongs to.
 // Built-in: HeuristicClassifier (keyword matching + optional LLM fallback).
 type SectorClassifier interface {
