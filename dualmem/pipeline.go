@@ -315,10 +315,17 @@ func (p *Pipeline) profileWorker(ctx context.Context) {
 }
 
 func (p *Pipeline) processProfiles(ctx context.Context) error {
-	// For each user with arcs, update their profile
-	// This is a simplified version — in production, track which arcs are new
-	// since the last profile update via timestamps.
-	return nil // Profile updates happen via DualMem.updateProfile() triggered by arc creation
+	users, err := p.store.GetUsersNeedingProfileUpdate()
+	if err != nil {
+		return fmt.Errorf("get users needing profile update: %w", err)
+	}
+
+	for _, userID := range users {
+		if err := p.UpdateProfile(ctx, userID); err != nil {
+			log.Printf("dualmem: profile update for user %s: %v", userID, err)
+		}
+	}
+	return nil
 }
 
 // UpdateProfile updates or creates a user profile from their arcs.

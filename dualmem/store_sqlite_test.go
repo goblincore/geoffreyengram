@@ -246,3 +246,66 @@ func TestStoreConfig(t *testing.T) {
 		t.Errorf("got %q, want '67890'", val)
 	}
 }
+
+func TestGetUsersNeedingProfileUpdate(t *testing.T) {
+	store := newTestStore(t)
+
+	vec128 := make([]float32, 128)
+	vec64 := make([]float32, 64)
+	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02 15:04:05")
+
+	// user1: has arcs, no profile → needs update
+	store.InsertArc(&Arc{
+		ID:          "arc-u1",
+		SummaryText: "user1 arc",
+		CreatedAt:   time.Now(),
+	}, vec128, "user1", "test-model", 42)
+
+	// user2: has stale profile + newer arc → needs update
+	// Create profile, then backdate it, then add a fresh arc
+	store.UpsertProfile(&ProfileSketch{
+		UserID:    "user2",
+		CommStyle: "old",
+	}, vec64, "test-model", 42)
+	store.db.Exec(`UPDATE profiles SET updated_at = ? WHERE user_id = 'user2'`, yesterday)
+	store.InsertArc(&Arc{
+		ID:          "arc-u2-new",
+		SummaryText: "user2 newer arc",
+		CreatedAt:   time.Now(),
+	}, vec128, "user2", "test-model", 42)
+
+	// user3: has arcs + fresh profile → does NOT need update
+	// Insert arc first, backdate it, then create fresh profile
+	store.InsertArc(&Arc{
+		ID:          "arc-u3",
+		SummaryText: "user3 arc",
+		CreatedAt:   time.Now(),
+	}, vec128, "user3", "test-model", 42)
+	store.db.Exec(`UPDATE arcs SET created_at = ? WHERE user_id = 'user3'`, yesterday)
+	store.UpsertProfile(&ProfileSketch{
+		UserID:    "user3",
+		CommStyle: "current",
+	}, vec64, "test-model", 42)
+
+	users, err := store.GetUsersNeedingProfileUpdate()
+	if err != nil {
+		t.Fatalf("GetUsersNeedingProfileUpdate: %v", err)
+	}
+
+	// Should return user1 and user2, not user3
+	userSet := make(map[string]bool)
+	for _, u := range users {
+		userSet[u] = true
+	}
+
+	if !userSet["user1"] {
+		t.Error("user1 should need profile update (no profile)")
+	}
+	if !userSet["user2"] {
+		t.Error("user2 should need profile update (stale profile)")
+	}
+	if userSet["user3"] {
+		t.Error("user3 should NOT need profile update (fresh profile)")
+	}
+	t.Logf("Users needing update: %v", users)
+}

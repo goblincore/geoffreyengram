@@ -226,6 +226,7 @@ type Store interface {
 	// Sketch Path — profiles
 	UpsertProfile(profile *ProfileSketch, sketchedEmbedding []float32, embeddingModel string, projectionSeed int64) error
 	GetProfile(userID string) (*profileWithVector, error)
+	GetUsersNeedingProfileUpdate() ([]string, error)
 
 	// Config
 	GetConfigValue(key string) (string, error)

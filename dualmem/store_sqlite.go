@@ -293,10 +293,20 @@ func (s *SQLiteStore) InsertSketchRaw(userID, content, sector, sessionID string,
 }
 
 func (s *SQLiteStore) GetUnprocessedRaw(userID string, limit int) ([]sketchRaw, error) {
-	rows, err := s.db.Query(`
-		SELECT id, user_id, content, sector, session_id, embedding, created_at
-		FROM sketch_raw WHERE user_id = ? AND processed = 0
-		ORDER BY created_at ASC LIMIT ?`, userID, limit)
+	var rows *sql.Rows
+	var err error
+	if userID == "" {
+		// Empty userID = query all users
+		rows, err = s.db.Query(`
+			SELECT id, user_id, content, sector, session_id, embedding, created_at
+			FROM sketch_raw WHERE processed = 0
+			ORDER BY created_at ASC LIMIT ?`, limit)
+	} else {
+		rows, err = s.db.Query(`
+			SELECT id, user_id, content, sector, session_id, embedding, created_at
+			FROM sketch_raw WHERE user_id = ? AND processed = 0
+			ORDER BY created_at ASC LIMIT ?`, userID, limit)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -497,6 +507,27 @@ func (s *SQLiteStore) GetProfile(userID string) (*profileWithVector, error) {
 	p.SketchedVector = decodeVector(vecBlob)
 	p.UpdatedAt = parseTime(updatedAt)
 	return &p, nil
+}
+
+func (s *SQLiteStore) GetUsersNeedingProfileUpdate() ([]string, error) {
+	rows, err := s.db.Query(`
+		SELECT DISTINCT a.user_id FROM arcs a
+		LEFT JOIN profiles p ON a.user_id = p.user_id
+		WHERE p.user_id IS NULL OR a.created_at > p.updated_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []string
+	for rows.Next() {
+		var userID string
+		if err := rows.Scan(&userID); err != nil {
+			return nil, err
+		}
+		users = append(users, userID)
+	}
+	return users, rows.Err()
 }
 
 // --- Config ---
