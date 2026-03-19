@@ -181,6 +181,7 @@ func cmdAdd(cfg CLIConfig) {
 	sector := fs.String("sector", "", "Sector hint (semantic, episodic, procedural, emotional, reflective)")
 	salience := fs.Float64("salience", 0, "Salience override (0 = default 0.5)")
 	session := fs.String("session", "", "Session ID")
+	files := fs.String("files", "", "Comma-separated associated file paths")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	fs.Parse(os.Args[2:])
 
@@ -209,12 +210,22 @@ func cmdAdd(cfg CLIConfig) {
 	}
 	defer engine.Close()
 
+	var filesList []string
+	if *files != "" {
+		for _, f := range strings.Split(*files, ",") {
+			if trimmed := strings.TrimSpace(f); trimmed != "" {
+				filesList = append(filesList, trimmed)
+			}
+		}
+	}
+
 	ctx := context.Background()
 	err = engine.AddWithOptions(ctx, dualmem.MemoryInput{
 		UserMessage: *text,
 		SectorHint:  *sector,
 		Salience:    sal,
 		SessionID:   *session,
+		Files:       filesList,
 	}, namespace)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -275,6 +286,9 @@ func cmdSearch(cfg CLIConfig) {
 	for _, dm := range result.DetailMemories {
 		fmt.Printf("[Detail] %s (importance: %.2f, similarity: %.2f, %s)\n",
 			truncate(dm.Text, 120), dm.ImportanceScore, dm.Similarity, dm.CreatedAt.Format("2006-01-02"))
+		if len(dm.Files) > 0 {
+			fmt.Printf("  Files: %s\n", strings.Join(dm.Files, ", "))
+		}
 	}
 	for _, ep := range result.Episodes {
 		fmt.Printf("[Episode] %s (similarity: %.2f)\n", truncate(ep.SummaryText, 120), ep.Similarity)

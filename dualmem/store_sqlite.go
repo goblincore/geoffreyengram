@@ -128,6 +128,11 @@ func (s *SQLiteStore) migrate() error {
 		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (1)`)
 	}
 
+	if version < 2 {
+		s.db.Exec(`ALTER TABLE detail_memories ADD COLUMN files_json TEXT DEFAULT '[]'`)
+		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (2)`)
+	}
+
 	return nil
 }
 
@@ -183,18 +188,18 @@ func parseTime(s string) time.Time {
 
 func (s *SQLiteStore) InsertDetail(dm *DetailMemory, embedding []float32, userID string) error {
 	_, err := s.db.Exec(`
-		INSERT INTO detail_memories (id, user_id, text, embedding, importance_score, sector, entities_json, session_id, parent_id, salience)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO detail_memories (id, user_id, text, embedding, importance_score, sector, entities_json, session_id, parent_id, salience, files_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		dm.ID, userID, dm.Text, encodeVector(embedding), dm.ImportanceScore,
 		dm.Sector, encodeEntities(dm.Entities), dm.SessionID, "",
-		dm.Salience,
+		dm.Salience, encodeStringSlice(dm.Files),
 	)
 	return err
 }
 
 func (s *SQLiteStore) GetDetailMemories(userID string) ([]detailWithVector, error) {
 	rows, err := s.db.Query(`
-		SELECT id, user_id, text, embedding, importance_score, sector, entities_json, session_id, salience, created_at, last_accessed_at, access_count
+		SELECT id, user_id, text, embedding, importance_score, sector, entities_json, session_id, salience, created_at, last_accessed_at, access_count, files_json
 		FROM detail_memories WHERE user_id = ? ORDER BY importance_score DESC`, userID)
 	if err != nil {
 		return nil, err
@@ -205,14 +210,15 @@ func (s *SQLiteStore) GetDetailMemories(userID string) ([]detailWithVector, erro
 	for rows.Next() {
 		var d detailWithVector
 		var vecBlob []byte
-		var entitiesJSON, createdAt, lastAccessed string
+		var entitiesJSON, filesJSON, createdAt, lastAccessed string
 		if err := rows.Scan(&d.ID, &d.UserID, &d.Text, &vecBlob, &d.ImportanceScore,
 			&d.Sector, &entitiesJSON, &d.SessionID, &d.Salience,
-			&createdAt, &lastAccessed, &d.AccessCount); err != nil {
+			&createdAt, &lastAccessed, &d.AccessCount, &filesJSON); err != nil {
 			return nil, err
 		}
 		d.Vector = decodeVector(vecBlob)
 		d.Entities = decodeEntities(entitiesJSON)
+		d.Files = decodeStringSlice(filesJSON)
 		d.CreatedAt = parseTime(createdAt)
 		d.LastAccessedAt = parseTime(lastAccessed)
 		results = append(results, d)
@@ -228,15 +234,15 @@ func (s *SQLiteStore) GetDetailCount(userID string) (int, error) {
 
 func (s *SQLiteStore) GetLowestImportanceDetail(userID string) (*detailWithVector, error) {
 	row := s.db.QueryRow(`
-		SELECT id, user_id, text, embedding, importance_score, sector, entities_json, session_id, salience, created_at, last_accessed_at, access_count
+		SELECT id, user_id, text, embedding, importance_score, sector, entities_json, session_id, salience, created_at, last_accessed_at, access_count, files_json
 		FROM detail_memories WHERE user_id = ? ORDER BY importance_score ASC LIMIT 1`, userID)
 
 	var d detailWithVector
 	var vecBlob []byte
-	var entitiesJSON, createdAt, lastAccessed string
+	var entitiesJSON, filesJSON, createdAt, lastAccessed string
 	if err := row.Scan(&d.ID, &d.UserID, &d.Text, &vecBlob, &d.ImportanceScore,
 		&d.Sector, &entitiesJSON, &d.SessionID, &d.Salience,
-		&createdAt, &lastAccessed, &d.AccessCount); err != nil {
+		&createdAt, &lastAccessed, &d.AccessCount, &filesJSON); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -244,6 +250,7 @@ func (s *SQLiteStore) GetLowestImportanceDetail(userID string) (*detailWithVecto
 	}
 	d.Vector = decodeVector(vecBlob)
 	d.Entities = decodeEntities(entitiesJSON)
+	d.Files = decodeStringSlice(filesJSON)
 	d.CreatedAt = parseTime(createdAt)
 	d.LastAccessedAt = parseTime(lastAccessed)
 	return &d, nil

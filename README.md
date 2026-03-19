@@ -150,8 +150,15 @@ export GEMINI_API_KEY=your-key
 # Add a memory (namespace auto-detected from cwd)
 dualmem add --text "Auth middleware rewrite is compliance-driven, not tech debt" --salience 0.9
 
+# Add with associated file paths (Claude saves these after navigating)
+dualmem add --text "Auth uses JWT with refresh tokens" --files "auth.go,jwt.go,rate_limiter.go" --sector procedural
+
 # Assemble context with token budget (key command for session start)
 dualmem context "auth system" --budget 3000
+# Output includes file paths alongside memories:
+#   [Memory — procedural (importance: 0.83)]
+#   Auth uses JWT with refresh tokens
+#     Files: auth.go, jwt.go, rate_limiter.go
 
 # Search
 dualmem search "user preferences" --limit 5
@@ -179,8 +186,8 @@ DualMem integrates with Claude Code via `~/.claude/CLAUDE.md` instructions that 
 |------|---------|---------------|
 | **Decisions** | "Auth rewrite is compliance-driven, not tech debt" | Prevents re-litigating resolved decisions |
 | **Preferences** | "User prefers bundled PRs for refactors" | Avoids repeat corrections |
-| **File landmarks** | "NPC chat: ClubMutant.ts → dream-npc-go/chat.go → cogmem/" | Eliminates re-navigation across sessions |
-| **Change maps** | "Animation state changes require: OfficeState.ts, ClubMutant.ts, AcsStateMapper.ts, AcsAnimationEngine.ts" | Knows which files move together |
+| **File landmarks** | `--text "NPC chat flow" --files "ClubMutant.ts,npc/chat.go,cogmem/engram.go"` | Eliminates re-navigation across sessions |
+| **Change maps** | `--text "Animation state changes" --files "OfficeState.ts,ClubMutant.ts,AcsStateMapper.ts,AcsAnimationEngine.ts"` | Knows which files move together |
 | **Dead ends** | "Auth logic is NOT in middleware/ — it's in Nakama RPCs" | Avoids false starts |
 | **Debugging insights** | "Race condition was in useGuideState isSavePending ref" | Hard-won knowledge persists |
 
@@ -298,7 +305,7 @@ geoffreyengram/
 ├── reflect_worker.go      # Background reflection
 ├── dualmem/               # Dual-path agent memory engine
 │   ├── dualmem.go         # Engine (New, Add, Search, DualSearch, AssembleContext)
-│   ├── types.go           # Types, Config, Store interface
+│   ├── types.go           # Types, Config, Store interface (incl. Files metadata)
 │   ├── scorer.go          # Importance scoring formula
 │   ├── project.go         # JL random projection (768→128, 768→64)
 │   ├── detail.go          # Detail Path (Top-K, capacity, high-salience guarantee)
@@ -332,6 +339,8 @@ Extracted from a production NPC memory system ([Club Mutant](https://github.com/
 - [x] DualMem dual-path engine
 - [x] CLI tool + Claude Code integration
 - [x] Gemini Flash Lite sector classifier
+- [x] Context styles (assistant vs NPC formatting)
+- [x] File metadata on Detail memories (`--files` flag)
 - [ ] DualMem: Postgres/pgvector store backend
 - [ ] DualMem: MCP server (typed tool schemas, resource exposure)
 - [ ] DualMem: Summarizer provider (Gemini Flash for episode/arc/profile compression)

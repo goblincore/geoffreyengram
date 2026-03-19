@@ -44,6 +44,7 @@ type MemoryInput struct {
 	SectorHint       string   // Optional: skip classification
 	Salience         float64  // Optional: override default 0.5 (0 = use default)
 	Entities         []Entity // Optional: pre-extracted entities
+	Files            []string // Optional: associated file paths (e.g., source files relevant to this memory)
 }
 
 // Entity is an extracted entity for associative linking.
@@ -80,6 +81,7 @@ type DetailMemory struct {
 	Salience        float64
 	ImportanceScore float64
 	Entities        []Entity
+	Files           []string // Associated file paths (landmark files for this memory)
 	SessionID       string
 	CreatedAt       time.Time
 	LastAccessedAt  time.Time
