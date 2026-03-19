@@ -17,12 +17,24 @@ type ImportanceScorer struct {
 
 // Score computes the importance of a memory.
 // existingMaxSim is the max cosine similarity against existing Detail memories (0 if none).
-func (s *ImportanceScorer) Score(sector string, salience float64, content string, existingMaxSim float64) float64 {
+// memType is the memory type tag ("warning", "decision", "continuity", or "").
+func (s *ImportanceScorer) Score(sector string, salience float64, content string, existingMaxSim float64, memType string) float64 {
 	sectorBonus := sectorBonusScore(sector)
 	specificity := specificityScore(content)
 	novelty := noveltyScore(existingMaxSim)
 
-	return sectorBonus*0.3 + salience*0.3 + specificity*0.2 + novelty*0.2
+	score := sectorBonus*0.3 + salience*0.3 + specificity*0.2 + novelty*0.2
+
+	// Typed memories (warning, decision, continuity) are always important enough
+	// for the Detail Path — they represent explicit human intent to persist.
+	if memType != "" {
+		minScore := s.Theta + 0.05 // ensure they clear the threshold
+		if score < minScore {
+			score = minScore
+		}
+	}
+
+	return score
 }
 
 // IsDetail returns true if the score meets the importance threshold.

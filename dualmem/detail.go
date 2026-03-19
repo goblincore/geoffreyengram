@@ -25,7 +25,7 @@ func NewDetailPath(store Store, embedder EmbeddingProvider, theta float64, maxPe
 
 // ScoreAndRoute computes importance and returns (score, isDetail).
 // existingDetails should be the user's current Detail memories for novelty calculation.
-func (dp *DetailPath) ScoreAndRoute(sector string, salience float64, content string, embedding []float32, existingDetails []detailWithVector) (float64, bool) {
+func (dp *DetailPath) ScoreAndRoute(sector string, salience float64, content string, embedding []float32, existingDetails []detailWithVector, memType string) (float64, bool) {
 	maxSim := 0.0
 	for _, d := range existingDetails {
 		sim := CosineSimilarity(embedding, d.Vector)
@@ -34,7 +34,7 @@ func (dp *DetailPath) ScoreAndRoute(sector string, salience float64, content str
 		}
 	}
 
-	score := dp.scorer.Score(sector, salience, content, maxSim)
+	score := dp.scorer.Score(sector, salience, content, maxSim, memType)
 	return score, dp.scorer.IsDetail(score)
 }
 

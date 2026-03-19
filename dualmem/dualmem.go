@@ -162,7 +162,7 @@ func (e *Engine) AddWithOptions(ctx context.Context, input MemoryInput, userID s
 	}
 
 	// Score importance
-	score, isDetail := e.detail.ScoreAndRoute(sector, salience, content, embedding, existingDetails)
+	score, isDetail := e.detail.ScoreAndRoute(sector, salience, content, embedding, existingDetails, input.Type)
 
 	if isDetail {
 		dm := &DetailMemory{

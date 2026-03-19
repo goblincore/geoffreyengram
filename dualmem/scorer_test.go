@@ -65,15 +65,21 @@ func TestImportanceScorer(t *testing.T) {
 	scorer := &ImportanceScorer{Theta: 0.65}
 
 	// Semantic sector + high salience + specific content + novel = high importance
-	highScore := scorer.Score("semantic", 0.9, `John prefers "dark roast" coffee (85% arabica)`, 0.0)
+	highScore := scorer.Score("semantic", 0.9, `John prefers "dark roast" coffee (85% arabica)`, 0.0, "")
 	if !scorer.IsDetail(highScore) {
 		t.Errorf("high-importance memory scored %v, expected >= 0.65 (detail)", highScore)
 	}
 
 	// Episodic sector + default salience + vague content + duplicate = low importance
-	lowScore := scorer.Score("episodic", 0.3, "we talked about stuff", 0.95)
+	lowScore := scorer.Score("episodic", 0.3, "we talked about stuff", 0.95, "")
 	if scorer.IsDetail(lowScore) {
 		t.Errorf("low-importance memory scored %v, expected < 0.65 (sketch)", lowScore)
+	}
+
+	// Typed memories always route to Detail regardless of raw score
+	typedScore := scorer.Score("episodic", 0.5, "we talked about stuff", 0.0, "continuity")
+	if !scorer.IsDetail(typedScore) {
+		t.Errorf("typed continuity memory scored %v, expected >= 0.65 (detail)", typedScore)
 	}
 }
 
