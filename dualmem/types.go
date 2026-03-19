@@ -149,7 +149,7 @@ type Config struct {
 	ImportanceTheta  float64 // Default 0.65
 
 	// Pipeline intervals
-	EpisodeBatchInterval  time.Duration // Default 5min
+	EpisodeBatchInterval  time.Duration // Debounce delay after last Add before episode processing. Default 30s.
 	ArcBuildInterval      time.Duration // Default 24h
 	ProfileUpdateInterval time.Duration // Default 7 days
 
@@ -173,7 +173,7 @@ func (c *Config) ApplyDefaults() {
 		c.ImportanceTheta = 0.65
 	}
 	if c.EpisodeBatchInterval == 0 {
-		c.EpisodeBatchInterval = 5 * time.Minute
+		c.EpisodeBatchInterval = 30 * time.Second
 	}
 	if c.ArcBuildInterval == 0 {
 		c.ArcBuildInterval = 24 * time.Hour

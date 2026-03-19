@@ -184,12 +184,14 @@ func (e *Engine) AddWithOptions(ctx context.Context, input MemoryInput, userID s
 		// If a memory was demoted, route it to sketch
 		if demoted != "" && demoted != content {
 			e.sketch.IngestRaw(ctx, userID, demoted, sector, input.SessionID, nil)
+			e.notifyPipeline()
 		}
 	} else {
 		// Route to Sketch Path
 		if err := e.sketch.IngestRaw(ctx, userID, content, sector, input.SessionID, embedding); err != nil {
 			return fmt.Errorf("dualmem: sketch ingest: %w", err)
 		}
+		e.notifyPipeline()
 	}
 
 	return nil
@@ -366,6 +368,13 @@ func (e *Engine) Close() error {
 		e.pipeline.Stop()
 	}
 	return e.store.Close()
+}
+
+// notifyPipeline signals the compression pipeline that new sketch data is available.
+func (e *Engine) notifyPipeline() {
+	if e.pipeline != nil {
+		e.pipeline.Notify()
+	}
 }
 
 // --- Helpers ---

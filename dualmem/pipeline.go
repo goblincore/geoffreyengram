@@ -18,9 +18,13 @@ type Pipeline struct {
 	projector   *Projector
 	extractor   EntityExtractor
 
-	episodeInterval  time.Duration
+	episodeDebounce  time.Duration // wait after last notify before processing
 	arcInterval      time.Duration
 	profileInterval  time.Duration
+
+	// notify is signalled by Add when a memory is routed to the Sketch Path.
+	// Episode worker only wakes when there's actual work to do.
+	notify chan struct{}
 
 	cancelEpisode  context.CancelFunc
 	cancelArc      context.CancelFunc
@@ -29,15 +33,29 @@ type Pipeline struct {
 
 // NewPipeline creates a compression pipeline.
 func NewPipeline(store Store, embedder EmbeddingProvider, summarizer SummarizerProvider, projector *Projector, extractor EntityExtractor, cfg *Config) *Pipeline {
+	debounce := cfg.EpisodeBatchInterval
+	if debounce < 10*time.Second {
+		debounce = 30 * time.Second
+	}
 	return &Pipeline{
 		store:           store,
 		embedder:        embedder,
 		summarizer:      summarizer,
 		projector:       projector,
 		extractor:       extractor,
-		episodeInterval: cfg.EpisodeBatchInterval,
+		episodeDebounce: debounce,
 		arcInterval:     cfg.ArcBuildInterval,
 		profileInterval: cfg.ProfileUpdateInterval,
+		notify:          make(chan struct{}, 16),
+	}
+}
+
+// Notify signals the pipeline that new sketch data is available.
+// Non-blocking — extra signals are coalesced.
+func (p *Pipeline) Notify() {
+	select {
+	case p.notify <- struct{}{}:
+	default: // channel full, already pending — skip
 	}
 }
 
@@ -75,15 +93,34 @@ func (p *Pipeline) Stop() {
 
 // --- Episode Worker ---
 
+// episodeWorker sleeps until notified that sketch data is available,
+// then debounces — waits for a quiet period after the last notification
+// before processing, so rapid messages batch naturally.
 func (p *Pipeline) episodeWorker(ctx context.Context) {
-	ticker := time.NewTicker(p.episodeInterval)
-	defer ticker.Stop()
+	var timer *time.Timer
 
 	for {
 		select {
 		case <-ctx.Done():
+			if timer != nil {
+				timer.Stop()
+			}
 			return
-		case <-ticker.C:
+
+		case <-p.notify:
+			// Reset debounce timer on each notification
+			if timer != nil {
+				timer.Stop()
+			}
+			timer = time.NewTimer(p.episodeDebounce)
+
+		case <-func() <-chan time.Time {
+			if timer != nil {
+				return timer.C
+			}
+			return nil // block forever if no timer
+		}():
+			timer = nil
 			if err := p.processEpisodes(ctx); err != nil {
 				log.Printf("dualmem: episode worker: %v", err)
 			}
