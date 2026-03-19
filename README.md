@@ -105,28 +105,12 @@ defer engine.Close()
 engine.Add("I love dark roast coffee", "Great taste!", "lily:player123")
 results := engine.Search("coffee", "lily:player123", 5, nil)
 
-// Token-budget-aware context assembly (default: structured for coding agents)
+// Token-budget-aware context assembly
 block, _ := engine.AssembleContext(ctx, "lily:player123", "greet the player", 500)
 // block.Text — pre-formatted for LLM prompt
 // block.TokenCount — guaranteed <= budget
 // block.Sources — traces each fragment to detail/episode/arc/profile
-
-// NPC style: atmospheric context that the character can weave in naturally
-block, _ = engine.AssembleContext(ctx, "lily:player123", "greet the player", 500, dualmem.StyleNPC)
-// Memories formatted as loose background knowledge with temporal hints
-// ("mentioned a Tokyo trip a few weeks ago") instead of structured metadata
 ```
-
-#### Context Styles
-
-`AssembleContext` supports two formatting styles for different use cases:
-
-| Style | Use case | How memories appear |
-|-------|----------|-------------------|
-| `StyleAssistant` (default) | Coding agents, Claude Code | `[Memory — semantic (importance: 0.91)] Auth rewrite is compliance-driven` |
-| `StyleNPC` | Character AI, NPCs | `They mentioned being stressed about work (about 3 days ago)` |
-
-**Assistant style** is structured and explicit — Claude references memories directly as facts. **NPC style** is atmospheric — memories include temporal hints ("a few weeks ago", "a while back") so the character knows how stale a detail is and can weave it in naturally without sounding like a database read.
 
 ### Namespace-Based Multi-Agent Memory
 
@@ -150,15 +134,8 @@ export GEMINI_API_KEY=your-key
 # Add a memory (namespace auto-detected from cwd)
 dualmem add --text "Auth middleware rewrite is compliance-driven, not tech debt" --salience 0.9
 
-# Add with associated file paths (Claude saves these after navigating)
-dualmem add --text "Auth uses JWT with refresh tokens" --files "auth.go,jwt.go,rate_limiter.go" --sector procedural
-
 # Assemble context with token budget (key command for session start)
 dualmem context "auth system" --budget 3000
-# Output includes file paths alongside memories:
-#   [Memory — procedural (importance: 0.83)]
-#   Auth uses JWT with refresh tokens
-#     Files: auth.go, jwt.go, rate_limiter.go
 
 # Search
 dualmem search "user preferences" --limit 5
@@ -172,24 +149,82 @@ Sector classification is automatic via Gemini Flash Lite — no `--sector` flag 
 
 Configure via `~/.config/dualmem/config.yaml` or `.dualmem.yaml` in project root.
 
-## Claude Code Integration
+## Agent Integration (Claude Code, Cursor, etc.)
 
-DualMem integrates with Claude Code via `~/.claude/CLAUDE.md` instructions that tell Claude to automatically:
+DualMem is designed to be used by AI coding agents. The key insight: **the system is only as useful as the instructions that tell the agent when and what to save.** Without good triggers, the agent won't build useful memory.
 
-1. **Load context** at session start — `dualmem context "session context" --budget 3000`
-2. **Save important context** during the session — decisions, preferences, debugging insights, file navigation maps
-3. **Search memory** before grepping — a previous session may have already mapped the relevant files
+### Setup: `~/.claude/CLAUDE.md`
 
-### What to save (automatically, by Claude)
+Add instructions to your global `~/.claude/CLAUDE.md` (or project-level `.claude/CLAUDE.md`) that tell the agent to:
 
-| Type | Example | Why it matters |
-|------|---------|---------------|
-| **Decisions** | "Auth rewrite is compliance-driven, not tech debt" | Prevents re-litigating resolved decisions |
-| **Preferences** | "User prefers bundled PRs for refactors" | Avoids repeat corrections |
-| **File landmarks** | `--text "NPC chat flow" --files "ClubMutant.ts,npc/chat.go,cogmem/engram.go"` | Eliminates re-navigation across sessions |
-| **Change maps** | `--text "Animation state changes" --files "OfficeState.ts,ClubMutant.ts,AcsStateMapper.ts,AcsAnimationEngine.ts"` | Knows which files move together |
-| **Dead ends** | "Auth logic is NOT in middleware/ — it's in Nakama RPCs" | Avoids false starts |
-| **Debugging insights** | "Race condition was in useGuideState isSavePending ref" | Hard-won knowledge persists |
+1. **Load context at session start** — run `dualmem context "session context" --budget 3000` and internalize it silently
+2. **Save typed memories during the session** — using `--type` tags so memories are structured and prioritized
+3. **Search before grepping** — check if a previous session already mapped the relevant files
+
+### Memory Types — `--type` flag
+
+DualMem supports typed memories that are prioritized in context assembly. Warnings appear first, then decisions, then general memories:
+
+```bash
+# ⚠ Warnings — code that should NOT be changed (surfaced first)
+dualmem add --type warning --text "Don't touch rateLimiter cleanup() — skips nil check for hot path" \
+  --files "rate_limiter.go" --salience 0.9
+
+# Decisions — settled choices with rationale (surfaced second)
+dualmem add --type decision --text "Rejected Postgres for CLI — chose SQLite for zero-setup" \
+  --files "store_sqlite.go"
+
+# Continuity — session handoff when work is incomplete
+dualmem add --type continuity --text "In progress: auth refactor. Done: JWT, middleware. Remaining: refresh tokens" \
+  --files "auth.go,middleware.go,jwt.go"
+```
+
+Context output with types:
+```
+[⚠ Warning — procedural (importance: 0.91)]
+Don't touch rateLimiter cleanup() — skips nil check for hot path
+  Files: rate_limiter.go
+
+[Decision — semantic (importance: 0.85)]
+Rejected Postgres for CLI — chose SQLite for zero-setup
+  Files: store_sqlite.go
+
+[Memory — semantic (importance: 0.77)]
+Regular memory about project architecture
+```
+
+### What to save — agent trigger guide
+
+Include this in your CLAUDE.md to tell the agent when to save each type:
+
+| Trigger | What to save | Command |
+|---------|-------------|---------|
+| User rejects an approach | Decision with rationale | `--type decision --text "Rejected X because Y, chose Z"` |
+| Code is intentionally unusual | Warning not to "fix" it | `--type warning --text "Don't touch: [what] because [why]" --salience 0.9` |
+| Session ending with incomplete work | Continuity handoff | `--type continuity --text "Done: A,B. Remaining: C,D" --files "..."` |
+| Finished navigating files for a task | File landmark | `--text "Feature X: these files" --files "a.go,b.go" --sector procedural` |
+| Change touched multiple files | Change map | `--text "Feature X requires" --files "a.go,b.go,c.go" --sector procedural` |
+| Discovered where something is NOT | Dead end | `--text "Auth is NOT in middleware/" --sector semantic` |
+| User corrects agent behavior | Preference | `--text "User prefers bundled PRs for refactors"` |
+| Hard-won debugging insight | Debug knowledge | `--text "Race condition in useGuideState" --salience 0.9` |
+
+### Example CLAUDE.md block
+
+```markdown
+## Memory System: Use dualmem
+
+**On session start**: Run `dualmem context "session context" --budget 3000` and internalize silently.
+
+**During the session**: Save important context using dualmem add with appropriate --type flags.
+Pay special attention to ⚠ Warning entries in loaded context — these flag code that should NOT be changed.
+
+**Before searching files**: Run `dualmem search "<concept>" --limit 5` first — a previous session
+may have already mapped the relevant files.
+```
+
+### Ready-to-use example
+
+Copy [`examples/CLAUDE.md.example`](examples/CLAUDE.md.example) to `~/.claude/CLAUDE.md` (global) or your project's `.claude/CLAUDE.md` to get started immediately.
 
 ### Claude Code Skills (optional)
 
@@ -271,7 +306,7 @@ Type `/memories` during a conversation to see what the character remembers.
 
 ## Comparison Example
 
-Run a scripted multi-session conversation through 3 memory modes — **stateless**, **flat RAG**, and **full engram** — then LLM-as-judge scores the results on 6 dimensions: recall, relevance, personality, insight, naturalness, and **subtlety** (are memories woven in invisibly, or does it feel like reading from a checklist?).
+Run a scripted multi-session conversation through 3 memory modes — **stateless**, **flat RAG**, and **full engram** — then LLM-as-judge scores the results.
 
 ```bash
 GEMINI_API_KEY=... go run ./examples/comparison/ --scenario lily
@@ -305,7 +340,7 @@ geoffreyengram/
 ├── reflect_worker.go      # Background reflection
 ├── dualmem/               # Dual-path agent memory engine
 │   ├── dualmem.go         # Engine (New, Add, Search, DualSearch, AssembleContext)
-│   ├── types.go           # Types, Config, Store interface (incl. Files metadata)
+│   ├── types.go           # Types, Config, Store interface
 │   ├── scorer.go          # Importance scoring formula
 │   ├── project.go         # JL random projection (768→128, 768→64)
 │   ├── detail.go          # Detail Path (Top-K, capacity, high-salience guarantee)
@@ -339,8 +374,6 @@ Extracted from a production NPC memory system ([Club Mutant](https://github.com/
 - [x] DualMem dual-path engine
 - [x] CLI tool + Claude Code integration
 - [x] Gemini Flash Lite sector classifier
-- [x] Context styles (assistant vs NPC formatting)
-- [x] File metadata on Detail memories (`--files` flag)
 - [ ] DualMem: Postgres/pgvector store backend
 - [ ] DualMem: MCP server (typed tool schemas, resource exposure)
 - [ ] DualMem: Summarizer provider (Gemini Flash for episode/arc/profile compression)

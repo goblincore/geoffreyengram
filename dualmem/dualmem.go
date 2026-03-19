@@ -11,6 +11,7 @@ package dualmem
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -171,6 +172,7 @@ func (e *Engine) AddWithOptions(ctx context.Context, input MemoryInput, userID s
 			Salience:        salience,
 			ImportanceScore: score,
 			Entities:        entities,
+			Type:            input.Type,
 			Files:           input.Files,
 			SessionID:       input.SessionID,
 			CreatedAt:       time.Now(),
@@ -254,18 +256,9 @@ func (e *Engine) DualSearch(ctx context.Context, userID string, query string, op
 // AssembleContext is the key differentiator: token-budget-aware context assembly.
 // It retrieves from both paths and formats a structured context block that fits
 // within the given token budget.
-//
-// Style controls formatting:
-//   - StyleAssistant (default): structured labels with metadata for coding agents
-//   - StyleNPC: atmospheric background knowledge for character AI
-func (e *Engine) AssembleContext(ctx context.Context, userID string, query string, tokenBudget int, style ...ContextStyle) (*ContextBlock, error) {
+func (e *Engine) AssembleContext(ctx context.Context, userID string, query string, tokenBudget int) (*ContextBlock, error) {
 	if tokenBudget <= 0 {
 		tokenBudget = 2000 // default budget
-	}
-
-	contextStyle := StyleAssistant
-	if len(style) > 0 && style[0] != "" {
-		contextStyle = style[0]
 	}
 
 	results, err := e.DualSearch(ctx, userID, query, SearchOpts{
@@ -285,11 +278,7 @@ func (e *Engine) AssembleContext(ctx context.Context, userID string, query strin
 		profileText := formatProfile(results.Profile)
 		profileTokens := estimateTokens(profileText)
 		if tokensUsed+profileTokens <= tokenBudget {
-			if contextStyle == StyleNPC {
-				parts = append(parts, "What you know about this person:\n"+profileText)
-			} else {
-				parts = append(parts, "[User Profile]\n"+profileText)
-			}
+			parts = append(parts, "[User Profile]\n"+profileText)
 			sources = append(sources, SourceRef{Type: "profile", ID: results.Profile.UserID})
 			tokensUsed += profileTokens
 		}
@@ -302,30 +291,26 @@ func (e *Engine) AssembleContext(ctx context.Context, userID string, query strin
 		if tokensUsed+arcTokens > tokenBudget {
 			break
 		}
-		if contextStyle == StyleNPC {
-			parts = append(parts, arcText)
-		} else {
-			parts = append(parts, "[Narrative Arc]\n"+arcText)
-		}
+		parts = append(parts, "[Narrative Arc]\n"+arcText)
 		sources = append(sources, SourceRef{Type: "arc", ID: arc.ID})
 		tokensUsed += arcTokens
 	}
 
-	// 3. Detail memories (variable, prioritized by similarity)
+	// 3. Detail memories — sort by type priority (warnings first, then decisions)
+	sort.SliceStable(results.DetailMemories, func(i, j int) bool {
+		return typePriority(results.DetailMemories[i].Type) > typePriority(results.DetailMemories[j].Type)
+	})
 	for _, dm := range results.DetailMemories {
-		dmTokens := estimateTokens(dm.Text)
+		dmTokens := estimateTokens(dm.Text) + estimateTokens(strings.Join(dm.Files, ", "))
 		if tokensUsed+dmTokens > tokenBudget {
 			break
 		}
-		if contextStyle == StyleNPC {
-			parts = append(parts, formatDetailNPC(dm))
-		} else {
-			entry := fmt.Sprintf("[Memory — %s (importance: %.2f)]\n%s", dm.Sector, dm.ImportanceScore, dm.Text)
-			if len(dm.Files) > 0 {
-				entry += "\n  Files: " + strings.Join(dm.Files, ", ")
-			}
-			parts = append(parts, entry)
+		label := formatTypeLabel(dm.Type, dm.Sector, dm.ImportanceScore)
+		entry := label + "\n" + dm.Text
+		if len(dm.Files) > 0 {
+			entry += "\n  Files: " + strings.Join(dm.Files, ", ")
 		}
+		parts = append(parts, entry)
 		sources = append(sources, SourceRef{Type: "detail", ID: dm.ID})
 		tokensUsed += dmTokens
 	}
@@ -337,21 +322,12 @@ func (e *Engine) AssembleContext(ctx context.Context, userID string, query strin
 		if tokensUsed+epTokens > tokenBudget {
 			break
 		}
-		if contextStyle == StyleNPC {
-			parts = append(parts, epText)
-		} else {
-			parts = append(parts, "[Recent Episode]\n"+epText)
-		}
+		parts = append(parts, "[Recent Episode]\n"+epText)
 		sources = append(sources, SourceRef{Type: "episode", ID: ep.ID})
 		tokensUsed += epTokens
 	}
 
-	var text string
-	if contextStyle == StyleNPC {
-		text = strings.Join(parts, "\n")
-	} else {
-		text = strings.Join(parts, "\n\n")
-	}
+	text := strings.Join(parts, "\n\n")
 	return &ContextBlock{
 		Text:       text,
 		TokenCount: tokensUsed,
@@ -417,30 +393,30 @@ func estimateTokens(text string) int {
 	return len(text) / 4
 }
 
-// formatDetailNPC renders a detail memory as loose background context for NPC use.
-// No metadata labels — just the content with a temporal hint if stale.
-func formatDetailNPC(dm DetailMemory) string {
-	daysSince := int(time.Since(dm.CreatedAt).Hours() / 24)
-	text := dm.Text
-
-	// Strip the "User: ... Assistant: ..." prefix format for cleaner NPC context
-	text = strings.TrimPrefix(text, "User: ")
-	if idx := strings.Index(text, "\nAssistant: "); idx > 0 {
-		text = text[:idx]
-	}
-
-	// Add temporal hint so the LLM knows how stale this is
-	switch {
-	case daysSince == 0:
-		return text + " (earlier today)"
-	case daysSince == 1:
-		return text + " (yesterday)"
-	case daysSince <= 7:
-		return fmt.Sprintf("%s (about %d days ago)", text, daysSince)
-	case daysSince <= 30:
-		return fmt.Sprintf("%s (a few weeks ago)", text)
+// typePriority returns sort priority for memory types.
+// Higher = appears first in AssembleContext output.
+func typePriority(t string) int {
+	switch t {
+	case "warning":
+		return 2
+	case "decision", "continuity":
+		return 1
 	default:
-		return fmt.Sprintf("%s (a while back)", text)
+		return 0
+	}
+}
+
+// formatTypeLabel creates the header label for a detail memory in assistant style.
+func formatTypeLabel(memType, sector string, importance float64) string {
+	switch memType {
+	case "warning":
+		return fmt.Sprintf("[⚠ Warning — %s (importance: %.2f)]", sector, importance)
+	case "decision":
+		return fmt.Sprintf("[Decision — %s (importance: %.2f)]", sector, importance)
+	case "continuity":
+		return fmt.Sprintf("[Continuity — %s (importance: %.2f)]", sector, importance)
+	default:
+		return fmt.Sprintf("[Memory — %s (importance: %.2f)]", sector, importance)
 	}
 }
 

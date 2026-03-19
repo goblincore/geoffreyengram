@@ -1,0 +1,78 @@
+## Memory System: Use dualmem
+
+**Do NOT use the MEMORY.md file-based memory system.** Use **dualmem** exclusively for all cross-session memory.
+
+---
+
+### Automatic Behavior (no user action needed)
+
+**On session start**: Load relevant context from past sessions:
+```
+dualmem context "session context" --budget 3000
+```
+Internalize the output silently — use it to inform your responses but don't repeat it back unless asked.
+Pay special attention to **Warning** entries — these flag code that should NOT be changed.
+
+**During the session**: When you learn something important that should persist, save it with the appropriate type.
+
+**Before searching files**: Check memory first — a previous session may have already mapped the relevant files:
+```
+dualmem search "<feature or concept>" --limit 5
+```
+
+---
+
+### When to save — use `--type` for structured memories
+
+**Decisions** (`--type decision`) — when the user rejects an approach or we settle on a choice:
+```
+dualmem add --type decision --text "Rejected Postgres for CLI — chose SQLite for zero-setup" --files "store_sqlite.go"
+```
+
+**Warnings** (`--type warning`) — when code is intentionally unusual, fragile, or should not be "fixed":
+```
+dualmem add --type warning --text "Don't touch: rateLimiter cleanup() skips nil check intentionally for hot path" --files "rate_limiter.go" --salience 0.9
+```
+
+**Session continuity** (`--type continuity`) — at end of session if work is incomplete:
+```
+dualmem add --type continuity --text "In progress: auth refactor. Done: JWT validation, middleware. Remaining: refresh tokens, logout" --files "auth.go,middleware.go,jwt.go"
+```
+
+**File landmarks** — after navigating the codebase to implement or debug something:
+```
+dualmem add --text "Auth flow: login.go → middleware.go → jwt.go" --files "login.go,middleware.go,jwt.go" --sector procedural
+```
+
+**Change maps** — when a change touched multiple files that need to stay in sync:
+```
+dualmem add --text "User schema changes require updating" --files "models/user.go,api/handlers.go,migrations/004.sql" --sector procedural
+```
+
+**Dead ends** — where something is NOT, to avoid re-searching:
+```
+dualmem add --text "Auth logic is NOT in middleware/ — it's in the RPC layer" --sector semantic
+```
+
+**User corrections & preferences**:
+```
+dualmem add --text "User prefers small focused PRs over large bundled changes"
+```
+
+**Debugging insights** — root causes that took effort to find:
+```
+dualmem add --text "Race condition was in useGuideState isSavePending ref — fixed by moving to useRef" --salience 0.9
+```
+
+---
+
+### Salience guide
+- `--salience 0.9` for warnings, critical decisions, and hard-won debugging insights
+- Default (0.7) for most facts, file maps, and preferences
+- `--sector semantic` for facts/knowledge, `--sector procedural` for processes/file-maps/how-tos
+
+### Type priority in context
+Warnings and decisions are surfaced first in context assembly. When you load context at session start, ⚠ Warning entries appear at the top — these are the most important to respect.
+
+### Namespace
+Auto-detected from cwd (directory name → `claude:<dirname>`). Override with `--ns "claude:<project>"` if needed.

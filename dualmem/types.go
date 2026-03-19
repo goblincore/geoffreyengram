@@ -44,6 +44,7 @@ type MemoryInput struct {
 	SectorHint       string   // Optional: skip classification
 	Salience         float64  // Optional: override default 0.5 (0 = use default)
 	Entities         []Entity // Optional: pre-extracted entities
+	Type             string   // Optional: "decision", "warning", "continuity", "" (general)
 	Files            []string // Optional: associated file paths (e.g., source files relevant to this memory)
 }
 
@@ -81,7 +82,8 @@ type DetailMemory struct {
 	Salience        float64
 	ImportanceScore float64
 	Entities        []Entity
-	Files           []string // Associated file paths (landmark files for this memory)
+	Type            string   // Memory type: "decision", "warning", "continuity", "" (general)
+	Files           []string // Associated file paths
 	SessionID       string
 	CreatedAt       time.Time
 	LastAccessedAt  time.Time
@@ -119,23 +121,6 @@ type ProfileSketch struct {
 	CommStyle         string   `json:"communication_style"`
 	UpdatedAt         time.Time `json:"updated_at"`
 }
-
-// ContextStyle controls how AssembleContext formats retrieved memories.
-//
-//   - StyleAssistant (default): structured, explicit facts for coding agents.
-//     Memories are labeled with sector, importance, and timestamps.
-//     Designed for precise recall where Claude references memories directly.
-//
-//   - StyleNPC: loose, atmospheric context for character AI.
-//     Memories are presented as background knowledge without metadata.
-//     Designed so the LLM can naturally weave details into conversation
-//     without sounding like it's reading from a database.
-type ContextStyle string
-
-const (
-	StyleAssistant ContextStyle = "assistant" // Structured, explicit (default)
-	StyleNPC       ContextStyle = "npc"       // Loose, atmospheric
-)
 
 // ContextBlock is the pre-formatted output of AssembleContext.
 type ContextBlock struct {
