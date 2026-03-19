@@ -253,9 +253,18 @@ func (e *Engine) DualSearch(ctx context.Context, userID string, query string, op
 // AssembleContext is the key differentiator: token-budget-aware context assembly.
 // It retrieves from both paths and formats a structured context block that fits
 // within the given token budget.
-func (e *Engine) AssembleContext(ctx context.Context, userID string, query string, tokenBudget int) (*ContextBlock, error) {
+//
+// Style controls formatting:
+//   - StyleAssistant (default): structured labels with metadata for coding agents
+//   - StyleNPC: atmospheric background knowledge for character AI
+func (e *Engine) AssembleContext(ctx context.Context, userID string, query string, tokenBudget int, style ...ContextStyle) (*ContextBlock, error) {
 	if tokenBudget <= 0 {
 		tokenBudget = 2000 // default budget
+	}
+
+	contextStyle := StyleAssistant
+	if len(style) > 0 && style[0] != "" {
+		contextStyle = style[0]
 	}
 
 	results, err := e.DualSearch(ctx, userID, query, SearchOpts{
@@ -275,7 +284,11 @@ func (e *Engine) AssembleContext(ctx context.Context, userID string, query strin
 		profileText := formatProfile(results.Profile)
 		profileTokens := estimateTokens(profileText)
 		if tokensUsed+profileTokens <= tokenBudget {
-			parts = append(parts, "[User Profile]\n"+profileText)
+			if contextStyle == StyleNPC {
+				parts = append(parts, "What you know about this person:\n"+profileText)
+			} else {
+				parts = append(parts, "[User Profile]\n"+profileText)
+			}
 			sources = append(sources, SourceRef{Type: "profile", ID: results.Profile.UserID})
 			tokensUsed += profileTokens
 		}
@@ -288,19 +301,26 @@ func (e *Engine) AssembleContext(ctx context.Context, userID string, query strin
 		if tokensUsed+arcTokens > tokenBudget {
 			break
 		}
-		parts = append(parts, "[Narrative Arc]\n"+arcText)
+		if contextStyle == StyleNPC {
+			parts = append(parts, arcText)
+		} else {
+			parts = append(parts, "[Narrative Arc]\n"+arcText)
+		}
 		sources = append(sources, SourceRef{Type: "arc", ID: arc.ID})
 		tokensUsed += arcTokens
 	}
 
 	// 3. Detail memories (variable, prioritized by similarity)
 	for _, dm := range results.DetailMemories {
-		dmText := dm.Text
-		dmTokens := estimateTokens(dmText)
+		dmTokens := estimateTokens(dm.Text)
 		if tokensUsed+dmTokens > tokenBudget {
 			break
 		}
-		parts = append(parts, fmt.Sprintf("[Memory — %s (importance: %.2f)]\n%s", dm.Sector, dm.ImportanceScore, dmText))
+		if contextStyle == StyleNPC {
+			parts = append(parts, formatDetailNPC(dm))
+		} else {
+			parts = append(parts, fmt.Sprintf("[Memory — %s (importance: %.2f)]\n%s", dm.Sector, dm.ImportanceScore, dm.Text))
+		}
 		sources = append(sources, SourceRef{Type: "detail", ID: dm.ID})
 		tokensUsed += dmTokens
 	}
@@ -312,12 +332,21 @@ func (e *Engine) AssembleContext(ctx context.Context, userID string, query strin
 		if tokensUsed+epTokens > tokenBudget {
 			break
 		}
-		parts = append(parts, "[Recent Episode]\n"+epText)
+		if contextStyle == StyleNPC {
+			parts = append(parts, epText)
+		} else {
+			parts = append(parts, "[Recent Episode]\n"+epText)
+		}
 		sources = append(sources, SourceRef{Type: "episode", ID: ep.ID})
 		tokensUsed += epTokens
 	}
 
-	text := strings.Join(parts, "\n\n")
+	var text string
+	if contextStyle == StyleNPC {
+		text = strings.Join(parts, "\n")
+	} else {
+		text = strings.Join(parts, "\n\n")
+	}
 	return &ContextBlock{
 		Text:       text,
 		TokenCount: tokensUsed,
@@ -381,6 +410,33 @@ func (e *Engine) notifyPipeline() {
 
 func estimateTokens(text string) int {
 	return len(text) / 4
+}
+
+// formatDetailNPC renders a detail memory as loose background context for NPC use.
+// No metadata labels — just the content with a temporal hint if stale.
+func formatDetailNPC(dm DetailMemory) string {
+	daysSince := int(time.Since(dm.CreatedAt).Hours() / 24)
+	text := dm.Text
+
+	// Strip the "User: ... Assistant: ..." prefix format for cleaner NPC context
+	text = strings.TrimPrefix(text, "User: ")
+	if idx := strings.Index(text, "\nAssistant: "); idx > 0 {
+		text = text[:idx]
+	}
+
+	// Add temporal hint so the LLM knows how stale this is
+	switch {
+	case daysSince == 0:
+		return text + " (earlier today)"
+	case daysSince == 1:
+		return text + " (yesterday)"
+	case daysSince <= 7:
+		return fmt.Sprintf("%s (about %d days ago)", text, daysSince)
+	case daysSince <= 30:
+		return fmt.Sprintf("%s (a few weeks ago)", text)
+	default:
+		return fmt.Sprintf("%s (a while back)", text)
+	}
 }
 
 func formatProfile(p *ProfileSketch) string {

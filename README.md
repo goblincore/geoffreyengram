@@ -105,12 +105,28 @@ defer engine.Close()
 engine.Add("I love dark roast coffee", "Great taste!", "lily:player123")
 results := engine.Search("coffee", "lily:player123", 5, nil)
 
-// Token-budget-aware context assembly
+// Token-budget-aware context assembly (default: structured for coding agents)
 block, _ := engine.AssembleContext(ctx, "lily:player123", "greet the player", 500)
 // block.Text — pre-formatted for LLM prompt
 // block.TokenCount — guaranteed <= budget
 // block.Sources — traces each fragment to detail/episode/arc/profile
+
+// NPC style: atmospheric context that the character can weave in naturally
+block, _ = engine.AssembleContext(ctx, "lily:player123", "greet the player", 500, dualmem.StyleNPC)
+// Memories formatted as loose background knowledge with temporal hints
+// ("mentioned a Tokyo trip a few weeks ago") instead of structured metadata
 ```
+
+#### Context Styles
+
+`AssembleContext` supports two formatting styles for different use cases:
+
+| Style | Use case | How memories appear |
+|-------|----------|-------------------|
+| `StyleAssistant` (default) | Coding agents, Claude Code | `[Memory — semantic (importance: 0.91)] Auth rewrite is compliance-driven` |
+| `StyleNPC` | Character AI, NPCs | `They mentioned being stressed about work (about 3 days ago)` |
+
+**Assistant style** is structured and explicit — Claude references memories directly as facts. **NPC style** is atmospheric — memories include temporal hints ("a few weeks ago", "a while back") so the character knows how stale a detail is and can weave it in naturally without sounding like a database read.
 
 ### Namespace-Based Multi-Agent Memory
 
@@ -248,7 +264,7 @@ Type `/memories` during a conversation to see what the character remembers.
 
 ## Comparison Example
 
-Run a scripted multi-session conversation through 3 memory modes — **stateless**, **flat RAG**, and **full engram** — then LLM-as-judge scores the results.
+Run a scripted multi-session conversation through 3 memory modes — **stateless**, **flat RAG**, and **full engram** — then LLM-as-judge scores the results on 6 dimensions: recall, relevance, personality, insight, naturalness, and **subtlety** (are memories woven in invisibly, or does it feel like reading from a checklist?).
 
 ```bash
 GEMINI_API_KEY=... go run ./examples/comparison/ --scenario lily
