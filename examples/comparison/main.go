@@ -68,10 +68,11 @@ type scores struct {
 	Personality float64 `json:"personality"`
 	Insight     float64 `json:"insight"`
 	Naturalness float64 `json:"naturalness"`
+	Subtlety    float64 `json:"subtlety"`
 }
 
 func (s scores) average() float64 {
-	return (s.Recall + s.Relevance + s.Personality + s.Insight + s.Naturalness) / 5.0
+	return (s.Recall + s.Relevance + s.Personality + s.Insight + s.Naturalness + s.Subtlety) / 6.0
 }
 
 // --- Flat RAG Store ---
@@ -386,9 +387,10 @@ Rate each response 1-5 on:
 3. Personality — does the character feel consistent and authentic?
 4. Insight — does the character show understanding beyond surface facts?
 5. Naturalness — does the response feel natural, not like a database dump?
+6. Subtlety — are memories woven in naturally, or does it feel like reading from a checklist? A score of 5 means memories enhance the conversation invisibly — like a real person who just happens to remember. A score of 1 means the character obviously recites stored facts (e.g., "I recall you mentioned X on date Y").
 
 Return ONLY a JSON object with this exact structure:
-{"responses": [{"mode": "A", "scores": {"recall": N, "relevance": N, "personality": N, "insight": N, "naturalness": N}, "explanation": "..."}, {"mode": "B", "scores": {"recall": N, "relevance": N, "personality": N, "insight": N, "naturalness": N}, "explanation": "..."}, {"mode": "C", "scores": {"recall": N, "relevance": N, "personality": N, "insight": N, "naturalness": N}, "explanation": "..."}]}`,
+{"responses": [{"mode": "A", "scores": {"recall": N, "relevance": N, "personality": N, "insight": N, "naturalness": N, "subtlety": N}, "explanation": "..."}, {"mode": "B", "scores": {"recall": N, "relevance": N, "personality": N, "insight": N, "naturalness": N, "subtlety": N}, "explanation": "..."}, {"mode": "C", "scores": {"recall": N, "relevance": N, "personality": N, "insight": N, "naturalness": N, "subtlety": N}, "explanation": "..."}]}`,
 		sc.JudgeContext, statelessResp, flatRAGResp, engramResp, sc.PlayerName)
 
 	rateLimitDelay()
@@ -505,8 +507,8 @@ func writeResultsFile(
 			}
 		}
 
-		fields := []string{"Recall", "Relevance", "Personality", "Insight", "Naturalness"}
-		fieldKeys := []string{"recall", "relevance", "personality", "insight", "naturalness"}
+		fields := []string{"Recall", "Relevance", "Personality", "Insight", "Naturalness", "Subtlety"}
+		fieldKeys := []string{"recall", "relevance", "personality", "insight", "naturalness", "subtlety"}
 
 		b.WriteString("| Metric | Stateless | Flat RAG | Engram |\n")
 		b.WriteString("|--------|-----------|----------|--------|\n")
@@ -612,7 +614,7 @@ func printReport(
 		}
 	}
 
-	fields := []string{"recall", "relevance", "personality", "insight", "naturalness"}
+	fields := []string{"recall", "relevance", "personality", "insight", "naturalness", "subtlety"}
 
 	fmt.Printf("  %-14s %10s %10s %10s\n", "", "Stateless", "Flat RAG", "Engram")
 	fmt.Println("  " + strings.Repeat("─", 46))
@@ -659,6 +661,8 @@ func getScoreField(s scores, field string) float64 {
 		return s.Insight
 	case "naturalness":
 		return s.Naturalness
+	case "subtlety":
+		return s.Subtlety
 	}
 	return 0
 }
