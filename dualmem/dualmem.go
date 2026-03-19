@@ -171,6 +171,7 @@ func (e *Engine) AddWithOptions(ctx context.Context, input MemoryInput, userID s
 			Salience:        salience,
 			ImportanceScore: score,
 			Entities:        entities,
+			Files:           input.Files,
 			SessionID:       input.SessionID,
 			CreatedAt:       time.Now(),
 			LastAccessedAt:  time.Now(),
@@ -319,7 +320,11 @@ func (e *Engine) AssembleContext(ctx context.Context, userID string, query strin
 		if contextStyle == StyleNPC {
 			parts = append(parts, formatDetailNPC(dm))
 		} else {
-			parts = append(parts, fmt.Sprintf("[Memory — %s (importance: %.2f)]\n%s", dm.Sector, dm.ImportanceScore, dm.Text))
+			entry := fmt.Sprintf("[Memory — %s (importance: %.2f)]\n%s", dm.Sector, dm.ImportanceScore, dm.Text)
+			if len(dm.Files) > 0 {
+				entry += "\n  Files: " + strings.Join(dm.Files, ", ")
+			}
+			parts = append(parts, entry)
 		}
 		sources = append(sources, SourceRef{Type: "detail", ID: dm.ID})
 		tokensUsed += dmTokens
