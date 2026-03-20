@@ -101,10 +101,23 @@ func newEngine(cfg CLIConfig) (*dualmem.Engine, error) {
 	arcInterval, _ := time.ParseDuration(cfg.Pipeline.ArcInterval)
 	profileInterval, _ := time.ParseDuration(cfg.Pipeline.ProfileInterval)
 
+	embedder := dualmem.NewGeminiEmbedder(apiKey, cfg.Providers.EmbeddingDimension)
+
+	// Use EmbeddingClassifier (zero extra API calls per Add, reuses embedding).
+	// Falls back to GeminiClassifier if init fails.
+	var classifier dualmem.SectorClassifier
+	ec, err := dualmem.NewEmbeddingClassifier(context.Background(), embedder)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: EmbeddingClassifier init failed, falling back to LLM classifier: %v\n", err)
+		classifier = dualmem.NewGeminiClassifier(apiKey)
+	} else {
+		classifier = ec
+	}
+
 	return dualmem.New(dualmem.Config{
 		SQLitePath:            cfg.Storage.SQLitePath,
-		EmbeddingProvider:     dualmem.NewGeminiEmbedder(apiKey, cfg.Providers.EmbeddingDimension),
-		Classifier:            dualmem.NewGeminiClassifier(apiKey),
+		EmbeddingProvider:     embedder,
+		Classifier:            classifier,
 		MaxDetailPerUser:      100,
 		ImportanceTheta:       0.65,
 		EpisodeBatchInterval:  episodeInterval,

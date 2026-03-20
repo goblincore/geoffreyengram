@@ -126,25 +126,29 @@ func (e *Engine) AddWithOptions(ctx context.Context, input MemoryInput, userID s
 		content = fmt.Sprintf("User: %s\nAssistant: %s", input.UserMessage, input.AssistantMessage)
 	}
 
-	// Classify sector
-	sector := input.SectorHint
-	if sector == "" && e.classifier != nil {
-		sector = e.classifier.Classify(content)
-	}
-	if sector == "" {
-		sector = "episodic"
-	}
-
 	// Determine salience
 	salience := input.Salience
 	if salience == 0 {
 		salience = 0.5
 	}
 
-	// Embed
+	// Embed first — needed for EmbeddingClassifier (zero extra API calls)
 	embedding, err := e.embedder.Embed(ctx, content, "RETRIEVAL_DOCUMENT")
 	if err != nil {
 		return fmt.Errorf("dualmem: embed: %w", err)
+	}
+
+	// Classify sector — prefer ClassifyFromEmbedding when available (reuses embedding)
+	sector := input.SectorHint
+	if sector == "" && e.classifier != nil {
+		if ec, ok := e.classifier.(*EmbeddingClassifier); ok {
+			sector = ec.ClassifyFromEmbedding(embedding)
+		} else {
+			sector = e.classifier.Classify(content)
+		}
+	}
+	if sector == "" {
+		sector = "episodic"
 	}
 
 	// Extract entities
