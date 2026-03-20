@@ -1,41 +1,26 @@
 # geoffreyengram
 
-Cognitive memory engine for AI agents. NPCs, coding assistants, chatbots, companions — any AI that should remember context across sessions, notice patterns, and think between conversations.
+Cognitive memory engine for AI agents. Two systems in one Go library:
 
-Two memory systems in one library:
+- **Engram** — character memory for NPCs, companions, chatbots. Cognitive sectors, natural decay, entity graphs, reflective synthesis, multimodal embedding.
+- **DualMem** — agent memory for coding tools (Claude Code, Cursor, etc.). Dual-path routing, hierarchical compression, token-budget-aware retrieval.
 
-- **Engram** — flat cognitive memory with 5 sectors, composite scoring, entity graphs, and reflective synthesis. Simple, effective for small-scale use (< 500 memories per user).
-- **DualMem** — dual-path architecture that routes memories by importance to a high-fidelity Detail Path or a compressed Sketch Path. Designed for scale: token-budget-aware retrieval, hierarchical compression, and multi-agent namespace isolation.
+Pure Go, SQLite (no CGO), single binary.
 
-## The Problem
+## Engram — Character Memory
 
-AI memory is either too simple or too generic.
+For NPCs and companion AI that should remember players across sessions.
 
-**For NPC/character AI:** Replika forgets things from the same day. Character.ai has 400-character manual memory tags. Kindroid makes users curate their own "Lorebooks." Every conversation feels like a first meeting.
+Memories are classified into 4 cognitive sectors and scored by a composite formula that weights similarity, salience, recency, and entity associations:
 
-**For coding agents:** Claude Code, Cursor, and similar agents lose all context between sessions. Architectural decisions, debugging insights, user preferences, file navigation paths — all rediscovered every conversation. The built-in memory systems (MEMORY.md files) don't scale, can't search semantically, and waste context window on irrelevant memories.
+| Sector | Stores | Decay |
+|--------|--------|-------|
+| **Episodic** | Events, visits, encounters | Slow |
+| **Semantic** | Facts, preferences, knowledge | Moderate |
+| **Procedural** | Skills, routines, how-tos | Moderate |
+| **Emotional** | Feelings, reactions, mood | Slow |
 
-**For multi-agent systems:** Each agent needs its own memory namespace, but shared world state needs to be accessible to all. No existing system handles both isolation and sharing cleanly.
-
-geoffreyengram solves all three with cognitive sectors, importance-scored routing, and namespace-based isolation.
-
-## Two Systems
-
-### Engram: Flat Cognitive Memory
-
-Best for: NPC characters, small-scale chatbots, single-agent use under ~500 memories.
-
-Five cognitive sectors with natural decay, associative recall via entity graphs, and reflective synthesis:
-
-| Sector | What it stores | Decay rate | Example |
-|--------|---------------|------------|---------|
-| **Episodic** | Events, experiences | Slow | "Player visited Tokyo last month" |
-| **Semantic** | Facts, knowledge | Warm | "Player's name is Alex, likes jazz" |
-| **Procedural** | Skills, routines | Warm | "Player always orders a Nebula Fizz" |
-| **Emotional** | Sentiments, feelings | Slow | "Player seemed sad last conversation" |
-| **Reflective** | Meta-observations | Cold | "Player always mentions music when stressed" |
-
-Retrieval uses composite scoring: `(similarity×0.6 + salience×0.2 + recency×0.1 + linkWeight×0.1) × sectorWeight`. Waypoint entity graph provides one-hop associative expansion. Background workers handle decay and reflective synthesis.
+Reflective memories (patterns, meta-observations) are not classified from input — they're synthesized by the `Reflect()` method between conversations.
 
 ```go
 import engram "github.com/goblincore/geoffreyengram"
@@ -46,279 +31,57 @@ mem, _ := engram.Init(engram.Config{
 })
 defer mem.Close()
 
-mem.Add("I just got back from Tokyo!", "That's amazing!", "lily:player123")
-results := mem.Search("japan trip", "lily:player123", 5, nil)
+mem.Add("I just got back from Berlin!", "That's amazing!", "lily:player123")
+results := mem.Search("travel", "lily:player123", 5, nil)
 ```
 
-### DualMem: Dual-Path Agent Memory
-
-Best for: coding agents, multi-agent workflows, high-memory-pressure scenarios, any use case over ~500 memories.
-
-Uses a dual-path architecture — keeps critical memories at full fidelity while compressing everything else into a hierarchical sketch:
-
-```
-Incoming Memory → Importance Scorer → LLM Sector Classification (Gemini Flash Lite)
-                         │
-                  score ≥ 0.65           score < 0.65
-                         │                     │
-               ┌─────────▼───────┐   ┌─────────▼──────────┐
-               │   Detail Path   │   │    Sketch Path      │
-               │   (Top-K=100)   │   │   (Hierarchical)    │
-               │                 │   │                     │
-               │  Full text      │   │  L1: Episodes       │
-               │  Full 768d      │   │      (~200 tokens)   │
-               │  Full metadata  │   │  L2: Narrative Arcs  │
-               └─────────────────┘   │      (128d, ~100t)   │
-                                     │  L3: User Profile    │
-                                     │      (64d, ~50t)     │
-                                     └─────────────────────┘
-```
-
-**Detail Path** — fixed-capacity store of uncompressed, full-fidelity memories. Facts, decisions, explicit preferences, critical constraints. Searched at full 768d resolution with high-salience guarantee (top-2 important memories always surface).
-
-**Sketch Path** — hierarchical compression via background workers:
-- **Episodes** (~200 tokens) — LLM-summarized conversation blocks, 768d embeddings
-- **Narrative Arcs** (~100 tokens) — clustered episodes via agglomerative clustering (entity Jaccard + temporal proximity + embedding similarity), projected to 128d via Johnson-Lindenstrauss random projection
-- **User Profile** (~50 tokens) — continuously updated structured summary, projected to 64d
-
-**Importance Scorer** — routes memories without LLM calls (preserving fire-and-forget latency):
-```
-importance = (sectorBonus × 0.3) + (salience × 0.3) + (specificity × 0.2) + (novelty × 0.2)
-```
-Semantic/procedural sectors score high (facts need precision). Episodic/emotional score low (they compress well). Specificity detected via regex (proper nouns, numbers, dates, quotes). Novelty drops as cosine similarity to existing Detail memories increases.
-
-**Sector Classification** — Gemini 2.5 Flash Lite classifies memories into the correct cognitive sector in ~100-200ms. Falls back to heuristic keyword matching if the LLM is unavailable.
-
-**AssembleContext** — the key differentiator. Given a token budget, assembles a structured context block in priority order: profile sketch → narrative arcs → detail memories → recent episodes. Returns exactly what fits, with source attribution.
-
-```go
-import "github.com/goblincore/geoffreyengram/dualmem"
-
-engine, _ := dualmem.New(dualmem.Config{
-    SQLitePath:        "./data/dualmem.db",
-    EmbeddingProvider: dualmem.NewGeminiEmbedder(apiKey, 768),
-    Classifier:        dualmem.NewGeminiClassifier(apiKey),
-})
-defer engine.Close()
-
-// Drop-in compatible with Engram
-engine.Add("I love dark roast coffee", "Great taste!", "lily:player123")
-results := engine.Search("coffee", "lily:player123", 5, nil)
-
-// Token-budget-aware context assembly
-block, _ := engine.AssembleContext(ctx, "lily:player123", "greet the player", 500)
-// block.Text — pre-formatted for LLM prompt
-// block.TokenCount — guaranteed <= budget
-// block.Sources — traces each fragment to detail/episode/arc/profile
-```
-
-### Namespace-Based Multi-Agent Memory
-
-`userID` is flexible — use it for NPC isolation, agent memory, or shared world state:
-
-```go
-engine.Add(msg, resp, "npc:lily:player123")      // Lily's memories of this player
-engine.Add(msg, resp, "npc:watcher:player123")    // Watcher's different perspective
-engine.Add(msg, resp, "shared:world")             // World events all NPCs share
-engine.Add(msg, resp, "claude:club-mutant")       // Claude agent's project memory
-```
-
-## CLI Tool
-
-DualMem ships as a CLI binary for use by coding agents (Claude Code, Cursor, etc.) and humans.
-
-```bash
-go install github.com/goblincore/geoffreyengram/cmd/dualmem@latest
-export GEMINI_API_KEY=your-key
-
-# Add a memory (namespace auto-detected from cwd)
-dualmem add --text "Auth middleware rewrite is compliance-driven, not tech debt" --salience 0.9
-
-# Assemble context with token budget (key command for session start)
-dualmem context "auth system" --budget 3000
-
-# Search
-dualmem search "user preferences" --limit 5
-
-# Profile, status
-dualmem profile
-dualmem status
-```
-
-Sector classification is automatic via Gemini Flash Lite — no `--sector` flag needed. The CLI defaults to 0.7 salience (intentional saves are important by definition).
-
-Configure via `~/.config/dualmem/config.yaml` or `.dualmem.yaml` in project root.
-
-## Agent Integration (Claude Code, Cursor, etc.)
-
-DualMem is designed to be used by AI coding agents. The key insight: **the system is only as useful as the instructions that tell the agent when and what to save.** Without good triggers, the agent won't build useful memory.
-
-### Setup: `~/.claude/CLAUDE.md`
-
-Add instructions to your global `~/.claude/CLAUDE.md` (or project-level `.claude/CLAUDE.md`) that tell the agent to:
-
-1. **Load context at session start** — run `dualmem context "session context" --budget 3000` and internalize it silently
-2. **Save typed memories during the session** — using `--type` tags so memories are structured and prioritized
-3. **Search before grepping** — check if a previous session already mapped the relevant files
-
-### Memory Types — `--type` flag
-
-DualMem supports typed memories that are prioritized in context assembly. Warnings appear first, then decisions, then general memories:
-
-```bash
-# ⚠ Warnings — code that should NOT be changed (surfaced first)
-dualmem add --type warning --text "Don't touch rateLimiter cleanup() — skips nil check for hot path" \
-  --files "rate_limiter.go" --salience 0.9
-
-# Decisions — settled choices with rationale (surfaced second)
-dualmem add --type decision --text "Rejected Postgres for CLI — chose SQLite for zero-setup" \
-  --files "store_sqlite.go"
-
-# Continuity — session handoff when work is incomplete
-dualmem add --type continuity --text "In progress: auth refactor. Done: JWT, middleware. Remaining: refresh tokens" \
-  --files "auth.go,middleware.go,jwt.go"
-```
-
-Context output with types:
-```
-[⚠ Warning — procedural (importance: 0.91)]
-Don't touch rateLimiter cleanup() — skips nil check for hot path
-  Files: rate_limiter.go
-
-[Decision — semantic (importance: 0.85)]
-Rejected Postgres for CLI — chose SQLite for zero-setup
-  Files: store_sqlite.go
-
-[Memory — semantic (importance: 0.77)]
-Regular memory about project architecture
-```
-
-### What to save — agent trigger guide
-
-Include this in your CLAUDE.md to tell the agent when to save each type:
-
-| Trigger | What to save | Command |
-|---------|-------------|---------|
-| User rejects an approach | Decision with rationale | `--type decision --text "Rejected X because Y, chose Z"` |
-| Code is intentionally unusual | Warning not to "fix" it | `--type warning --text "Don't touch: [what] because [why]" --salience 0.9` |
-| Session ending with incomplete work | Continuity handoff | `--type continuity --text "Done: A,B. Remaining: C,D" --files "..."` |
-| Finished navigating files for a task | File landmark | `--text "Feature X: these files" --files "a.go,b.go" --sector procedural` |
-| Change touched multiple files | Change map | `--text "Feature X requires" --files "a.go,b.go,c.go" --sector procedural` |
-| Discovered where something is NOT | Dead end | `--text "Auth is NOT in middleware/" --sector semantic` |
-| User corrects agent behavior | Preference | `--text "User prefers bundled PRs for refactors"` |
-| Hard-won debugging insight | Debug knowledge | `--text "Race condition in useGuideState" --salience 0.9` |
-
-### Example CLAUDE.md block
-
-```markdown
-## Memory System: Use dualmem
-
-**On session start**: Run `dualmem context "session context" --budget 3000` and internalize silently.
-
-**During the session**: Save important context using dualmem add with appropriate --type flags.
-Pay special attention to ⚠ Warning entries in loaded context — these flag code that should NOT be changed.
-
-**Before searching files**: Run `dualmem search "<concept>" --limit 5` first — a previous session
-may have already mapped the relevant files.
-```
-
-### Ready-to-use example
-
-Copy [`examples/CLAUDE.md.example`](examples/CLAUDE.md.example) to `~/.claude/CLAUDE.md` (global) or your project's `.claude/CLAUDE.md` to get started immediately.
-
-### Claude Code Skills (optional)
-
-For explicit invocation, place these in `.claude/commands/`:
-
-- **`/memory-load`** — `dualmem context` with custom query
-- **`/memory-save`** — `dualmem add` with custom text
-- **`/memory-search`** — `dualmem search` with custom query
-- **`/wrap-up`** — end-of-session continuity save (summarizes work, saves to dualmem)
-
-## Engram Details
-
-### Pluggable Providers
-
-```go
-type EmbeddingProvider interface {
-    Embed(ctx context.Context, text, taskType string) ([]float32, error)
-    Dimension() int
-}
-
-type MultimodalEmbeddingProvider interface {
-    EmbeddingProvider
-    EmbedMedia(ctx context.Context, media MediaContent, taskType string) ([]float32, error)
-    SupportsModality(modality Modality) bool
-}
-
-type SectorClassifier interface {
-    Classify(content string) Sector
-}
-
-type EntityExtractor interface {
-    Extract(content string) []Entity
-}
-
-type ReflectionProvider interface {
-    Reflect(ctx context.Context, memories []Memory, characterContext string) ([]Reflection, error)
-}
-```
-
-Built-in: `GeminiEmbedder`, `GeminiEmbedder2` (multimodal), `OpenAIEmbedder`, `OllamaEmbedder`, `EmbeddingClassifier` (default), `HeuristicClassifier`, `DefaultEntityExtractor`, `GeminiReflector`.
-
-### Reflective Synthesis
-
-Between conversations, the engine synthesizes higher-order observations:
-
-```
-Player leaves → [time passes] → reflective worker fires
-  → loads recent memories → filters existing reflections
-  → calls ReflectionProvider → deduplicates (cosine > 0.85)
-  → stores as high-salience reflective memories
-  → surfaces naturally when player returns
-```
-
-### Multimodal Memory
-
-NPCs can form memories from images and audio — not just text. A character can "hear" a music track and recall related conversations, or see a player-uploaded photo and connect it to past events.
-
-Uses Gemini Embedding 2 to embed text, images, and audio into the **same vector space**. No media blobs stored — just embeddings + metadata.
+### Key features
+
+- **Composite scoring**: `(similarity*0.6 + salience*0.2 + recency*0.1 + linkWeight*0.1) * sectorWeight`
+- **Waypoint entity graph**: one-hop associative expansion — mentioning a song surfaces the person you heard it with
+- **Exponential decay**: per-sector rates, configurable. Important memories persist, small talk fades
+- **High-salience guarantee**: top-2 important memories always surface regardless of query similarity
+- **Reflective synthesis**: between conversations, an LLM synthesizes patterns ("they always mention music when stressed")
+- **Multimodal memory**: embed images and audio via Gemini Embedding 2 — NPCs can "hear" music or "see" photos
+- **Embedding-based classification**: zero extra API calls per `Add()` — reuses the already-computed embedding (96% accuracy on 50-example benchmark)
+- **Time simulation**: `SimulateTimePassing(userID, days)` artificially ages memories and runs decay — test what a character remembers after months pass
+- **Session threading**: `SessionID` / `ParentID` for conversation chains
+- **Per-character personality**: sector weights let an emotional character prioritize feelings over facts
+
+### Multimodal
+
+NPCs can form memories from images and audio via Gemini Embedding 2 — text, images, and audio share the same vector space:
 
 ```go
 mem, _ := engram.Init(engram.Config{
     DBPath:            "./data/memory.db",
-    EmbeddingProvider: engram.NewGeminiEmbedder2(apiKey, 768), // multimodal
+    EmbeddingProvider: engram.NewGeminiEmbedder2(apiKey, 768),
 })
 
-// NPC hears music playing in the bar
+// NPC hears music playing
 mem.AddWithOptions(engram.AddOptions{
     UserID:      "lily:player123",
     Media:       &engram.MediaContent{MimeType: "audio/mpeg", Data: trackBytes},
-    Description: "Jazz playing in the bar",
-    ExternalRef: "asset://tracks/jazz_01.mp3",
+    Description: "Electronic music playing in the club",
 })
 
-// Later: text search finds the audio memory via shared embedding space
+// Text search finds the audio memory
 results := mem.Search("what music was playing?", "lily:player123", 5, nil)
-
-// Or search by image to find related text memories
-results = mem.SearchWithOptions(engram.SearchOptions{
-    UserID:     "lily:player123",
-    Media:      &engram.MediaContent{MimeType: "image/png", Data: photoBytes},
-    Limit:      5,
-    Modalities: []engram.Modality{engram.ModalityText}, // find text memories related to image
-})
 ```
 
-Supported modalities: `text`, `image` (png/jpeg/gif/webp), `audio` (mp3/wav/ogg). `GeminiEmbedder2` implements `MultimodalEmbeddingProvider`. Text-only embedders (OpenAI, Ollama) continue to work — multimodal is opt-in via the embedder choice.
+### Providers
 
-### Embedding-Based Classification
+All pluggable via interfaces:
 
-Sector classification uses zero-shot cosine similarity against anchor descriptions — no extra API calls during `Add()`. The embedding already computed for storage is reused for classification.
-
-Benchmarked at **96% accuracy** on a 50-example corpus (vs 62% for keyword heuristics). The classifier handles 4 input sectors (episodic, semantic, procedural, emotional). Reflective memories are synthesized by `Reflect()`, not classified from input.
-
-This is the default classifier when an embedding provider is available. Falls back to `HeuristicClassifier` or `LLMClassifier` if embedding init fails.
+| Provider | Type | Notes |
+|----------|------|-------|
+| `GeminiEmbedder` | Text embedding | gemini-embedding-001 |
+| `GeminiEmbedder2` | Multimodal embedding | text/image/audio, gemini-embedding-2 |
+| `OpenAIEmbedder` | Text embedding | text-embedding-3-small/large |
+| `OllamaEmbedder` | Text embedding | Local, no API key |
+| `EmbeddingClassifier` | Sector classification | Default. Zero API calls, 96% accuracy |
+| `HeuristicClassifier` | Sector classification | Keyword-based, no API needed |
+| `GeminiReflector` | Reflective synthesis | Explicit opt-in |
 
 ### MCP Server
 
@@ -327,114 +90,121 @@ go install github.com/goblincore/geoffreyengram/cmd/engram-mcp
 ENGRAM_DB_PATH=./data/engram.db GEMINI_API_KEY=key engram-mcp
 ```
 
-Tools: `remember`, `recall`, `reflect`, `get_session`, `inspect`
+Tools: `remember`, `recall`, `reflect`, `get_session`, `inspect`. Supports multimodal via `media_base64` + `mime_type` fields.
 
-### HTTP API (DualMem)
+## DualMem — Agent Memory
+
+For coding agents and multi-agent systems where context window is the bottleneck.
+
+Routes memories by importance: critical ones stay at full fidelity, everything else gets compressed into a hierarchical sketch.
 
 ```
-POST /v1/memory/add       — add a memory
-POST /v1/memory/search    — dual-path search
-POST /v1/memory/context   — AssembleContext (token-budget-aware)
-GET  /v1/memory/profile/:userID — get user profile sketch
-POST /v1/memory/promote   — pin a memory to Detail Path
-POST /v1/memory/demote    — demote a memory to Sketch Path
+Incoming Memory → Importance Scorer
+                       │
+                score ≥ 0.65           score < 0.65
+                       │                     │
+             ┌─────────▼───────┐   ┌─────────▼──────────┐
+             │   Detail Path   │   │    Sketch Path      │
+             │   (Top-K=100)   │   │   (Hierarchical)    │
+             │                 │   │                     │
+             │  Full text      │   │  L1: Episodes       │
+             │  Full 768d vec  │   │  L2: Narrative Arcs  │
+             │  Full metadata  │   │  L3: User Profile    │
+             └─────────────────┘   └─────────────────────┘
 ```
 
-## Local Chat Example
+**AssembleContext** is the key method — given a token budget, it assembles a structured context block in priority order: profile → arcs → detail memories → episodes. Returns exactly what fits.
 
-Test Engram in a live conversation using Ollama. No API keys needed — fully local.
+```go
+import "github.com/goblincore/geoffreyengram/dualmem"
+
+engine, _ := dualmem.New(dualmem.Config{
+    SQLitePath:        "./data/dualmem.db",
+    EmbeddingProvider: dualmem.NewGeminiEmbedder(apiKey, 768),
+})
+defer engine.Close()
+
+engine.Add("chose SQLite for zero-setup", "Good call", "claude:my-project")
+
+block, _ := engine.AssembleContext(ctx, "claude:my-project", "database choice", 500)
+// block.Text — pre-formatted, fits within budget
+// block.Sources — traces each fragment to detail/episode/arc/profile
+```
+
+### CLI
 
 ```bash
-ollama pull nomic-embed-text
-ollama pull hadad/LFM2.5-1.2B:Q4_K_M
+go install github.com/goblincore/geoffreyengram/cmd/dualmem@latest
+export GEMINI_API_KEY=your-key
 
-go run ./examples/chat/ --chat-model hadad/LFM2.5-1.2B:Q4_K_M
+dualmem add --text "Auth uses JWT, not sessions" --type decision --salience 0.9
+dualmem context "auth system" --budget 3000
+dualmem search "database" --limit 5
+dualmem profile
+dualmem status
 ```
 
-Type `/memories` during a conversation to see what the character remembers.
+### Memory types
+
+Typed memories are prioritized in context assembly — warnings first, then decisions:
+
+```bash
+dualmem add --type warning --text "Don't touch rateLimiter cleanup()" --files "rate_limiter.go" --salience 0.9
+dualmem add --type decision --text "Rejected Postgres, chose SQLite" --files "store_sqlite.go"
+dualmem add --type continuity --text "Done: JWT. Remaining: refresh tokens" --files "auth.go,jwt.go"
+```
 
 ## Comparison Example
 
-Run a scripted multi-session conversation through 3 memory modes — **stateless**, **flat RAG**, and **full engram** — then LLM-as-judge scores the results.
+Scripted multi-session conversations through 3 modes — **stateless**, **flat RAG**, **full engram** — with LLM-as-judge scoring:
 
 ```bash
 GEMINI_API_KEY=... go run ./examples/comparison/ --scenario lily
 ```
 
-| Scenario | Character | What it tests |
-|----------|-----------|---------------|
-| `lily` | Bartender | Emotional + episodic — relationship building |
+| Scenario | Character | Tests |
+|----------|-----------|-------|
+| `lily` | Bartender at Club Mutant | Emotional memory + time decay (90-day gap) |
 | `sifu` | Wing Chun instructor | Procedural — skill sequences |
 | `nyx` | Archivist | Semantic — cross-referencing facts |
-| `reeves` | Therapist | All 5 sectors |
+| `reeves` | Therapist | All sectors |
 
 ## Project Structure
 
 ```
 geoffreyengram/
-├── engram.go              # Engram core (Init, Search, Add, Reflect, Close)
-├── types.go               # Sector, Memory, Entity, Config, scoring types
-├── providers.go           # EmbeddingProvider, SectorClassifier, EntityExtractor
-├── store.go               # SQLite persistence, versioned migrations
+├── engram.go              # Core engine (Init, Search, Add, Reflect, SimulateTimePassing)
+├── types.go               # Modality, Sector, Memory, Config, scoring types
+├── providers.go           # EmbeddingProvider, MultimodalEmbeddingProvider, SectorClassifier
+├── store.go               # SQLite persistence, versioned migrations (v1-v3)
 ├── scoring.go             # Composite scoring, cosine similarity, decay
-├── classify.go            # HeuristicClassifier
-├── classify_llm.go        # LLMClassifier (async Gemini reclassification)
-├── classify_embedding.go  # EmbeddingClassifier (zero-shot, 96% accuracy, default)
-├── embed.go               # GeminiEmbedder (text-only, v1)
+├── classify_embedding.go  # EmbeddingClassifier (default, 96% accuracy)
+├── classify.go            # HeuristicClassifier (keyword fallback)
 ├── embed_gemini2.go       # GeminiEmbedder2 (multimodal: text/image/audio)
+├── embed.go               # GeminiEmbedder (text-only, v1)
 ├── embed_openai.go        # OpenAIEmbedder
 ├── embed_ollama.go        # OllamaEmbedder
 ├── waypoints.go           # Entity graph, associative expansion
-├── reflect.go             # ReflectionProvider, deduplication
-├── reflect_gemini.go      # GeminiReflector
-├── decay_worker.go        # Background decay
-├── reflect_worker.go      # Background reflection
+├── reflect.go             # ReflectionProvider, Reflect method
 ├── dualmem/               # Dual-path agent memory engine
-│   ├── dualmem.go         # Engine (New, Add, Search, DualSearch, AssembleContext)
-│   ├── types.go           # Types, Config, Store interface
-│   ├── scorer.go          # Importance scoring formula
-│   ├── project.go         # JL random projection (768→128, 768→64)
-│   ├── detail.go          # Detail Path (Top-K, capacity, high-salience guarantee)
+│   ├── dualmem.go         # Engine (New, Add, DualSearch, AssembleContext)
+│   ├── types.go           # Config, Store interface, DetailMemory, Episode, Arc, Profile
+│   ├── detail.go          # Detail Path (importance scoring, capacity management)
 │   ├── sketch.go          # Sketch Path (episodes, arcs, profiles)
-│   ├── pipeline.go        # Compression workers + agglomerative clustering
-│   ├── store_sqlite.go    # SQLite backend
-│   ├── embed_gemini.go    # Gemini embedding provider
-│   ├── classify_llm.go    # Gemini Flash Lite sector classifier
-│   └── api.go             # HTTP API handlers
+│   ├── pipeline.go        # Background compression workers
+│   ├── classify_embedding.go  # EmbeddingClassifier (ported from engram)
+│   └── store_sqlite.go    # SQLite backend
 ├── cmd/
-│   ├── dualmem/           # CLI tool (add, search, context, profile, status)
-│   └── engram-mcp/        # MCP stdio server (5 tools)
+│   ├── dualmem/           # CLI tool
+│   └── engram-mcp/        # MCP server (5 tools)
 └── examples/
-    ├── chat/              # Local REPL chat with Ollama
-    └── comparison/        # Multi-scenario memory comparison test
+    ├── chat/              # Local REPL with Ollama
+    └── comparison/        # Memory mode comparison + LLM judge
 ```
 
 ## Status
 
-Extracted from a production NPC memory system ([Club Mutant](https://github.com/goblincore/club-mutant)) and extended for coding agent use.
-
-### What works now
-- **Engram**: 5-sector cognitive model, composite scoring, waypoint entity graph, exponential decay, reflective synthesis, conversation threading, multimodal memory (image/audio via Gemini Embedding 2), MCP server
-- **DualMem**: importance-scored dual-path routing, Gemini Flash Lite classification, hierarchical compression pipeline, JL random projection, token-budget-aware context assembly, CLI tool, HTTP API, Claude Code integration
-- **Providers**: Gemini v1, Gemini v2 (multimodal), OpenAI, Ollama (embedding); EmbeddingClassifier (default, 96%), Heuristic, LLM (classification)
-- **144 tests** across all subsystems
-
-### Roadmap
-- [x] LLM-powered sector classification
-- [x] Comparison examples (4 scenarios)
-- [x] DualMem dual-path engine
-- [x] CLI tool + Claude Code integration
-- [x] Gemini Flash Lite sector classifier
-- [ ] DualMem: Postgres/pgvector store backend
-- [ ] DualMem: MCP server (typed tool schemas, resource exposure)
-- [ ] DualMem: Summarizer provider (Gemini Flash for episode/arc/profile compression)
-- [ ] DualMem: Data migration script (Engram SQLite → DualMem)
-- [ ] Local ONNX inference (`OnnxEmbedder`, `DistilBERTClassifier`)
-- [ ] Benchmark suite
-
-## Why Go
-
-The LLM call (100-2000ms) dwarfs any IPC overhead (1ms localhost). Memory should be a sidecar service — persists across sessions, survives crashes, serves multiple clients. Pure Go SQLite (no CGO), single binary, goroutines for background workers.
+Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 146 tests passing.
 
 ## License
 
