@@ -513,6 +513,34 @@ func (cm *Engram) ListRecent(userID string, limit int, sectors []Sector) ([]Memo
 	return cm.store.GetRecentMemories(userID, limit, sectors)
 }
 
+// SimulateTimePassing artificially ages all memories for a user by N days,
+// then runs a decay sweep. Memories with low salience or fast-decaying sectors
+// will be pruned; high-salience emotional/episodic memories will survive.
+// Returns count of memories that survived and were pruned.
+//
+// This is useful for testing how a character's recall changes over time —
+// e.g. after 90 days, does the NPC remember the player's name but forget
+// which city they visited?
+func (cm *Engram) SimulateTimePassing(userID string, days int) (survived, pruned int, err error) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	backdated, err := cm.store.BackdateMemories(userID, days)
+	if err != nil {
+		return 0, 0, fmt.Errorf("engram: backdate: %w", err)
+	}
+
+	updated, deleted, err := cm.store.RunDecaySweep(cm.config.MinDecayScore, cm.config.decayRates)
+	if err != nil {
+		return 0, 0, fmt.Errorf("engram: decay sweep: %w", err)
+	}
+
+	_ = updated
+	log.Printf("[engram] SimulateTimePassing: %d days, %d backdated, %d survived, %d pruned",
+		days, backdated, backdated-deleted, deleted)
+	return backdated - deleted, deleted, nil
+}
+
 // Close shuts down workers and closes the database.
 func (cm *Engram) Close() error {
 	if cm.cancelDecay != nil {

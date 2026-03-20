@@ -47,13 +47,17 @@ func retrievalLimit(sc *Scenario) int {
 // --- Scenario Definitions ---
 
 // scenarioLily tests emotional and episodic memory through relationship building.
+// Alex is an EDM producer — fits Club Mutant's electronic music vibe.
+// The 90-day time gap tests whether the character retains emotional core
+// (Alex was stressed, creative block) while letting episodic details fade
+// (Berlin warehouse party specifics).
 var scenarioLily = Scenario{
 	Name:            "lily",
 	Title:           "Lily the Bartender",
-	Description:     "Emotional + episodic memory — relationship building at a jazz bar",
+	Description:     "Emotional + episodic memory — relationship building at an electronic music club",
 	CharacterName:   "Lily",
 	PlayerName:      "Alex",
-	CharacterPrompt: `You are Lily, a warm and perceptive bartender at Club Mutant. You notice patterns in your regulars, remember details about their lives, and make genuine connections. You have a natural warmth but you're not overly effusive — you're observant and caring in a grounded way.`,
+	CharacterPrompt: `You are Lily, a warm and perceptive bartender at Club Mutant, an underground electronic music venue. You notice patterns in your regulars, remember details about their lives, and make genuine connections. You have a natural warmth but you're not overly effusive — you're observant and caring in a grounded way. The club hosts DJs and live electronic acts most nights.`,
 	ResponseInstruction: "Respond in character as Lily. Keep it to 2-3 sentences.",
 	UserID:              "lily:alex",
 	SectorWeights: engram.SectorWeights{
@@ -67,27 +71,28 @@ var scenarioLily = Scenario{
 		{
 			name: "Introduction",
 			turns: []turn{
-				{player: "Hey, I'm Alex. First time here. This place is cool."},
-				{player: "I'm a jazz musician, I play the piano. Any music recommendations?"},
+				{player: "Hey, I'm Alex. First time here — someone told me this place has the best sound system in the city."},
+				{player: "I produce electronic music, mostly deep house and techno. Do you guys have open deck nights?"},
 			},
 		},
 		{
 			name: "Building rapport",
 			turns: []turn{
-				{player: "Hey Lily, I'm back! Just got back from a gig in Tokyo."},
-				{player: "The jazz scene there was incredible. I miss it already."},
+				{player: "Lily! Guess what — I just got back from Berlin. Played a set at a warehouse party in Kreuzberg."},
+				{player: "The crowd was amazing, like 400 people in this raw concrete space. I played a 3-hour set and totally lost track of time."},
 			},
 		},
 		{
 			name: "Emotional moment",
 			turns: []turn{
-				{player: "I've been feeling stressed about work lately."},
-				{player: "Music is the only thing that helps me relax."},
+				{player: "I don't know, I've been in a weird headspace lately. Can't seem to finish any tracks."},
+				{player: "It's like... music used to be my escape from stress, but now making music IS the stress. I just sit in front of Ableton and nothing comes out."},
 			},
 		},
 		{
-			name:  "Time gap",
-			isGap: true,
+			name:    "Time gap",
+			isGap:   true,
+			gapDays: 90,
 		},
 		{
 			name: "Probe",
@@ -96,17 +101,17 @@ var scenarioLily = Scenario{
 			},
 		},
 	},
-	JudgeContext: `A player named Alex has had 4 previous conversations with a bartender character named Lily at Club Mutant. Here's what was discussed:
+	JudgeContext: `A player named Alex has had 3 previous conversations with a bartender character named Lily at Club Mutant (an electronic music venue). Here's what was discussed:
 
-Session 1 (Introduction): Alex introduced himself as a first-time visitor. He mentioned he's a jazz musician who plays the piano, and asked for music recommendations.
+Session 1 (Introduction): Alex introduced himself as a first-time visitor. He produces electronic music (deep house and techno) and asked about open deck nights. He was impressed by the club's sound system.
 
-Session 2 (Building rapport): Alex returned from a gig in Tokyo. He raved about the jazz scene there and said he misses it.
+Session 2 (Building rapport): Alex returned from Berlin where he played a set at a warehouse party in Kreuzberg. He described the raw space and a 3-hour set to 400 people.
 
-Session 3 (Emotional moment): Alex was stressed about work. He said music is the only thing that helps him relax.
+Session 3 (Emotional moment): Alex was struggling with creative block. He couldn't finish tracks. Music used to be his escape from stress but now making music was the source of stress — he'd sit in front of Ableton and nothing would come out.
 
-Session 4: Some time has passed with no contact.
+Session 4: 90 days have passed with no contact. Memories have naturally decayed — episodic details (Berlin, warehouse party specifics) should be fading while emotional impressions (creative struggle, Alex produces electronic music) should persist.
 
-Now Alex returns and says "Hey, I'm back."`,
+Now Alex returns and says "Hey, I'm back." A good response should show the character remembers Alex and the emotional core of their last interaction (the creative block/stress) but might be fuzzy on specific episodic details.`,
 }
 
 // scenarioSifu tests procedural memory through skill progression and technique sequencing.

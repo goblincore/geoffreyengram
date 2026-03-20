@@ -574,6 +574,26 @@ func (s *Store) RunDecaySweep(minScore float64, decayRates map[Sector]float64) (
 	return len(updates), len(toDelete), nil
 }
 
+// --- Time simulation ---
+
+// BackdateMemories shifts created_at and last_accessed_at backwards by N days
+// for all memories belonging to a user. Used for testing/simulation — lets you
+// see how a character's recall changes after time passes.
+func (s *Store) BackdateMemories(userID string, days int) (int, error) {
+	res, err := s.db.Exec(`
+		UPDATE memories
+		SET created_at = datetime(created_at, ? || ' days'),
+		    last_accessed_at = datetime(last_accessed_at, ? || ' days')
+		WHERE user_id = ?`,
+		fmt.Sprintf("-%d", days), fmt.Sprintf("-%d", days), userID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // --- Memory cap enforcement ---
 
 // EnforceMemoryLimit deletes the oldest low-salience memories if a user exceeds the limit.

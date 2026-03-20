@@ -45,9 +45,10 @@ type turn struct {
 }
 
 type session struct {
-	name  string
-	turns []turn
-	isGap bool // time gap: no player interaction, reflection fires
+	name    string
+	turns   []turn
+	isGap   bool
+	gapDays int // days to simulate passing (0 = reflection only, no time warp) // time gap: no player interaction, reflection fires
 }
 
 // Per-mode response for a single turn.
@@ -327,6 +328,16 @@ func runEngram(ctx context.Context, gemini *geminiClient, apiKey string, sc *Sce
 				log.Printf("[engram] reflect error: %v", rErr)
 			} else {
 				fmt.Printf("  [engram] Generated %d reflections\n", len(reflections))
+			}
+
+			// Simulate time passing — age memories and run decay sweep
+			if sess.gapDays > 0 {
+				survived, pruned, twErr := em.SimulateTimePassing(sc.UserID, sess.gapDays)
+				if twErr != nil {
+					log.Printf("[engram] time warp error: %v", twErr)
+				} else {
+					fmt.Printf("  [engram] Time warp: %d days — %d survived, %d pruned\n", sess.gapDays, survived, pruned)
+				}
 			}
 			continue
 		}
