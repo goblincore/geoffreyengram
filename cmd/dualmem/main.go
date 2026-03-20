@@ -114,6 +114,7 @@ func newEngine(cfg CLIConfig) (*dualmem.Engine, error) {
 		classifier = ec
 	}
 
+	cwd, _ := os.Getwd()
 	return dualmem.New(dualmem.Config{
 		SQLitePath:            cfg.Storage.SQLitePath,
 		EmbeddingProvider:     embedder,
@@ -123,6 +124,7 @@ func newEngine(cfg CLIConfig) (*dualmem.Engine, error) {
 		EpisodeBatchInterval:  episodeInterval,
 		ArcBuildInterval:      arcInterval,
 		ProfileUpdateInterval: profileInterval,
+		RootDir:               cwd,
 	})
 }
 
@@ -142,6 +144,10 @@ func main() {
 		cmdSearch(cfg)
 	case "context":
 		cmdContext(cfg)
+	case "map":
+		cmdMap(cfg)
+	case "diff":
+		cmdDiff(cfg)
 	case "profile":
 		cmdProfile(cfg)
 	case "status":
@@ -165,7 +171,9 @@ func printUsage() {
 Commands:
   add      Add a memory
   search   Dual-path search
-  context  Assemble token-budget-aware context
+  context  Assemble token-budget-aware context (includes code map + diff)
+  map      Generate/view codebase structure map
+  diff     Show changes since last session
   profile  Get user/project profile sketch
   status   Memory counts and health
   promote  Pin a memory to Detail Path
@@ -539,4 +547,104 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// --- Map command ---
+
+func cmdMap(cfg CLIConfig) {
+	fs := flag.NewFlagSet("map", flag.ExitOnError)
+	root := fs.String("root", "", "Project root (default: cwd)")
+	ns := fs.String("ns", "", "Namespace")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	rootDir := *root
+	if rootDir == "" {
+		rootDir, _ = os.Getwd()
+	}
+	namespace := resolveNamespace(*ns, cfg)
+
+	cm, err := dualmem.ScanCodebase(rootDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	cm.Namespace = namespace
+
+	// Get git commit for the map
+	_, commit := dualmem.GetGitState(rootDir)
+	cm.GitCommit = commit
+
+	// Store in DB (needs engine for store access)
+	engine, engErr := newEngine(cfg)
+	if engErr == nil {
+		engine.StoreCodeMap(namespace, cm)
+		engine.Close()
+	}
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(cm)
+		return
+	}
+
+	// Pretty print
+	fmt.Println("=== Codebase Map ===")
+	fmt.Println()
+	fmt.Println(cm.Zoom1)
+	fmt.Println()
+	for _, m := range cm.Zoom2 {
+		fmt.Printf("  %s — %s (%d files)\n", m.Path, m.Summary, m.FileCount)
+		if len(m.KeyTypes) > 0 {
+			fmt.Printf("    Types: %s\n", strings.Join(m.KeyTypes, ", "))
+		}
+		if len(m.EntryPoints) > 0 {
+			fmt.Printf("    Entry: %s\n", strings.Join(m.EntryPoints, ", "))
+		}
+	}
+}
+
+// --- Diff command ---
+
+func cmdDiff(cfg CLIConfig) {
+	fs := flag.NewFlagSet("diff", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	namespace := resolveNamespace(*ns, cfg)
+	rootDir, _ := os.Getwd()
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	marker, err := engine.GetLatestSessionMarker(namespace)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if marker == nil {
+		fmt.Println("No previous session recorded. Run 'dualmem context' first.")
+		return
+	}
+
+	diff, err := dualmem.ComputeStructuralDiff(rootDir, marker)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if diff == nil {
+		fmt.Println("No diff available (not in a git repository).")
+		return
+	}
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(diff)
+		return
+	}
+
+	fmt.Println(diff.Summary)
 }

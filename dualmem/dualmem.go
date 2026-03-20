@@ -259,7 +259,8 @@ func (e *Engine) DualSearch(ctx context.Context, userID string, query string, op
 
 // AssembleContext is the key differentiator: token-budget-aware context assembly.
 // It retrieves from both paths and formats a structured context block that fits
-// within the given token budget.
+// within the given token budget. If Config.RootDir is set, includes structural
+// diffs and code maps before memories.
 func (e *Engine) AssembleContext(ctx context.Context, userID string, query string, tokenBudget int) (*ContextBlock, error) {
 	if tokenBudget <= 0 {
 		tokenBudget = 2000 // default budget
@@ -276,6 +277,48 @@ func (e *Engine) AssembleContext(ctx context.Context, userID string, query strin
 	var parts []string
 	var sources []SourceRef
 	tokensUsed := 0
+
+	// Build set of stale memory IDs (populated by diff below)
+	staleIDs := make(map[string]bool)
+
+	// --- NEW: Structural diff (≤150 tokens) ---
+	if e.cfg.RootDir != "" && tokenBudget >= 200 {
+		lastMarker, _ := e.store.GetLatestSessionMarker(userID)
+		diff, _ := ComputeStructuralDiff(e.cfg.RootDir, lastMarker)
+		if diff != nil && diff.TotalChanges() > 0 {
+			diffText := diff.Summary
+			diffTokens := estimateTokens(diffText)
+			if diffTokens <= 150 && tokensUsed+diffTokens <= tokenBudget {
+				parts = append(parts, "[Changes Since Last Session]\n"+diffText)
+				sources = append(sources, SourceRef{Type: "diff", ID: diff.ToCommit})
+				tokensUsed += diffTokens
+			}
+
+			// Detect stale memories
+			staleList := DetectStaleMemories(diff, e.store, userID)
+			for _, id := range staleList {
+				staleIDs[id] = true
+			}
+		}
+	}
+
+	// --- NEW: Code map (≤400 tokens, auto-generate if missing) ---
+	if e.cfg.RootDir != "" && tokenBudget >= 500 {
+		mapBudget := 400
+		if tokenBudget-tokensUsed-200 < mapBudget {
+			mapBudget = tokenBudget - tokensUsed - 200 // reserve 200 for memories
+		}
+		if mapBudget > 50 {
+			codeMap := e.getOrGenerateCodeMap(userID)
+			if codeMap != nil {
+				mapText := codeMap.RenderAtBudget(mapBudget)
+				mapTokens := estimateTokens(mapText)
+				parts = append(parts, "[Codebase Map]\n"+mapText)
+				sources = append(sources, SourceRef{Type: "codemap", ID: userID})
+				tokensUsed += mapTokens
+			}
+		}
+	}
 
 	// 1. Profile sketch (~50 tokens) — always include if available
 	if results.Profile != nil {
@@ -310,6 +353,9 @@ func (e *Engine) AssembleContext(ctx context.Context, userID string, query strin
 			break
 		}
 		label := formatTypeLabel(dm.Type, dm.Sector, dm.ImportanceScore)
+		if staleIDs[dm.ID] {
+			label += " [STALE? file changed since last session]"
+		}
 		entry := label + "\n" + dm.Text
 		if len(dm.Files) > 0 {
 			entry += "\n  Files: " + strings.Join(dm.Files, ", ")
@@ -332,11 +378,74 @@ func (e *Engine) AssembleContext(ctx context.Context, userID string, query strin
 	}
 
 	text := strings.Join(parts, "\n\n")
+
+	// Record session marker for next time
+	if e.cfg.RootDir != "" {
+		e.recordSessionMarker(userID)
+	}
+
 	return &ContextBlock{
 		Text:       text,
 		TokenCount: tokensUsed,
 		Sources:    sources,
 	}, nil
+}
+
+// getOrGenerateCodeMap loads a stored code map or generates one on the fly.
+func (e *Engine) getOrGenerateCodeMap(namespace string) *CodeMap {
+	stored, _ := e.store.GetCodeMap(namespace)
+	if stored != nil {
+		return &CodeMap{
+			Namespace:   stored.Namespace,
+			RootDir:     stored.RootDir,
+			Zoom1:       stored.Zoom1,
+			Zoom2:       UnmarshalZoom2(stored.Zoom2JSON),
+			GeneratedAt: stored.GeneratedAt,
+			GitCommit:   stored.GitCommit,
+		}
+	}
+
+	// Auto-generate
+	cm, err := ScanCodebase(e.cfg.RootDir)
+	if err != nil {
+		return nil
+	}
+	cm.Namespace = namespace
+
+	// Get current git commit
+	_, commit := GetGitState(e.cfg.RootDir)
+	cm.GitCommit = commit
+
+	// Store for next time
+	e.store.UpsertCodeMap(namespace, e.cfg.RootDir, cm.Zoom1, cm.MarshalZoom2(), cm.GitCommit)
+
+	return cm
+}
+
+// StoreCodeMap persists a code map to the database. Called by the CLI `map` command.
+func (e *Engine) StoreCodeMap(namespace string, cm *CodeMap) error {
+	return e.store.UpsertCodeMap(namespace, cm.RootDir, cm.Zoom1, cm.MarshalZoom2(), cm.GitCommit)
+}
+
+// GetLatestSessionMarker returns the most recent session marker for a namespace.
+// Used by the CLI `diff` command.
+func (e *Engine) GetLatestSessionMarker(namespace string) (*SessionMarker, error) {
+	return e.store.GetLatestSessionMarker(namespace)
+}
+
+// recordSessionMarker saves the current git state for structural diffs.
+func (e *Engine) recordSessionMarker(namespace string) {
+	branch, commit := GetGitState(e.cfg.RootDir)
+	if commit == "" {
+		return
+	}
+	marker := &SessionMarker{
+		ID:        fmt.Sprintf("sm-%d", time.Now().UnixNano()),
+		Namespace: namespace,
+		Branch:    branch,
+		Commit:    commit,
+	}
+	e.store.InsertSessionMarker(marker)
 }
 
 // GetProfile returns the user's profile sketch.

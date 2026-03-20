@@ -138,6 +138,26 @@ func (s *SQLiteStore) migrate() error {
 		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (3)`)
 	}
 
+	if version < 4 {
+		s.db.Exec(`CREATE TABLE IF NOT EXISTS code_maps (
+			namespace    TEXT PRIMARY KEY,
+			root_dir     TEXT NOT NULL,
+			zoom1        TEXT NOT NULL DEFAULT '',
+			zoom2_json   TEXT NOT NULL DEFAULT '[]',
+			generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+			git_commit   TEXT DEFAULT ''
+		)`)
+		s.db.Exec(`CREATE TABLE IF NOT EXISTS session_markers (
+			id          TEXT PRIMARY KEY,
+			namespace   TEXT NOT NULL,
+			branch      TEXT NOT NULL DEFAULT '',
+			commit_hash TEXT NOT NULL DEFAULT '',
+			created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+		)`)
+		s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_session_marker_ns ON session_markers(namespace, created_at DESC)`)
+		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (4)`)
+	}
+
 	return nil
 }
 
@@ -547,6 +567,65 @@ func (s *SQLiteStore) SetConfigValue(key, value string) error {
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
 		key, value)
 	return err
+}
+
+// --- Code maps ---
+
+func (s *SQLiteStore) UpsertCodeMap(namespace, rootDir, zoom1, zoom2JSON, gitCommit string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO code_maps (namespace, root_dir, zoom1, zoom2_json, generated_at, git_commit)
+		VALUES (?, ?, ?, ?, datetime('now'), ?)
+		ON CONFLICT(namespace) DO UPDATE SET
+			root_dir = excluded.root_dir,
+			zoom1 = excluded.zoom1,
+			zoom2_json = excluded.zoom2_json,
+			generated_at = datetime('now'),
+			git_commit = excluded.git_commit`,
+		namespace, rootDir, zoom1, zoom2JSON, gitCommit)
+	return err
+}
+
+func (s *SQLiteStore) GetCodeMap(namespace string) (*StoredCodeMap, error) {
+	var cm StoredCodeMap
+	var genAt string
+	err := s.db.QueryRow(`SELECT namespace, root_dir, zoom1, zoom2_json, generated_at, git_commit FROM code_maps WHERE namespace = ?`, namespace).
+		Scan(&cm.Namespace, &cm.RootDir, &cm.Zoom1, &cm.Zoom2JSON, &genAt, &cm.GitCommit)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	cm.GeneratedAt, _ = time.Parse("2006-01-02 15:04:05", genAt)
+	return &cm, nil
+}
+
+// --- Session markers ---
+
+func (s *SQLiteStore) InsertSessionMarker(marker *SessionMarker) error {
+	_, err := s.db.Exec(`
+		INSERT INTO session_markers (id, namespace, branch, commit_hash, created_at)
+		VALUES (?, ?, ?, ?, datetime('now'))`,
+		marker.ID, marker.Namespace, marker.Branch, marker.Commit)
+	return err
+}
+
+func (s *SQLiteStore) GetLatestSessionMarker(namespace string) (*SessionMarker, error) {
+	var sm SessionMarker
+	var createdAt string
+	err := s.db.QueryRow(`
+		SELECT id, namespace, branch, commit_hash, created_at
+		FROM session_markers WHERE namespace = ?
+		ORDER BY created_at DESC LIMIT 1`, namespace).
+		Scan(&sm.ID, &sm.Namespace, &sm.Branch, &sm.Commit, &createdAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	sm.Timestamp, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+	return &sm, nil
 }
 
 // --- Lifecycle ---

@@ -163,6 +163,9 @@ type Config struct {
 
 	// Random projection
 	ProjectionSeed int64 // 0 = auto-generate and store
+
+	// Codebase context (optional — enables code maps + structural diffs)
+	RootDir string // Project root directory (for code map scanning + git diffs)
 }
 
 // ApplyDefaults fills zero-valued fields with sensible defaults.
@@ -232,8 +235,35 @@ type Store interface {
 	GetConfigValue(key string) (string, error)
 	SetConfigValue(key, value string) error
 
+	// Code maps
+	UpsertCodeMap(namespace, rootDir, zoom1, zoom2JSON, gitCommit string) error
+	GetCodeMap(namespace string) (*StoredCodeMap, error)
+
+	// Session markers
+	InsertSessionMarker(marker *SessionMarker) error
+	GetLatestSessionMarker(namespace string) (*SessionMarker, error)
+
 	// Lifecycle
 	Close() error
+}
+
+// StoredCodeMap is a code map as persisted in SQLite.
+type StoredCodeMap struct {
+	Namespace   string
+	RootDir     string
+	Zoom1       string
+	Zoom2JSON   string
+	GeneratedAt time.Time
+	GitCommit   string
+}
+
+// SessionMarker records git state at the end of a dualmem context call.
+type SessionMarker struct {
+	ID        string
+	Namespace string
+	Branch    string
+	Commit    string
+	Timestamp time.Time
 }
 
 // Internal types pairing domain objects with their embeddings.
