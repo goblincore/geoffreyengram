@@ -138,8 +138,10 @@ go install github.com/goblincore/geoffreyengram/cmd/dualmem@latest
 export GEMINI_API_KEY=your-key
 
 dualmem add --text "Auth uses JWT, not sessions" --type decision --salience 0.9
-dualmem context "auth system" --budget 3000
 dualmem search "database" --limit 5
+dualmem context "auth system" --budget 3000   # memories + code map + diff
+dualmem map                                   # codebase structure map
+dualmem diff                                  # changes since last session
 dualmem profile
 dualmem status
 ```
@@ -152,6 +154,49 @@ Typed memories are prioritized in context assembly — warnings first, then deci
 dualmem add --type warning --text "Don't touch rateLimiter cleanup()" --files "rate_limiter.go" --salience 0.9
 dualmem add --type decision --text "Rejected Postgres, chose SQLite" --files "store_sqlite.go"
 dualmem add --type continuity --text "Done: JWT. Remaining: refresh tokens" --files "auth.go,jwt.go"
+```
+
+### Session context
+
+`dualmem context` assembles a token-budget-aware context block for the start of each coding session. It combines three things:
+
+**Code map** — multi-resolution structural summary of the codebase. Zoom-1 is a one-line system overview, zoom-2 is per-module with key types and entry points. Generated via Go AST parsing and TypeScript regex heuristics.
+
+**Structural diff** — git-based delta since the last session. Shows added/modified/deleted files with elapsed time and branch info. Handles branch switches, rebases, and force-pushes gracefully.
+
+**Stale memory detection** — memories with `--files` associations are cross-referenced against the diff. If a referenced file was modified or deleted, the memory is tagged `[STALE?]` in context output.
+
+```
+$ dualmem context "session context" --budget 3000
+
+[Changes Since Last Session]
+Since last session (9h ago, branch main):
+  Modified (4): cmd/dualmem/main.go, dualmem/dualmem.go, dualmem/store_sqlite.go, dualmem/types.go
+  Added (4): dualmem/codemap.go, dualmem/codemap_test.go, dualmem/diff.go, dualmem/diff_test.go
+
+[Codebase Map]
+Go project. packages: ., dualmem. binaries: cmd/dualmem, cmd/engram-mcp, examples/comparison.
+
+  ./ — Go package engram
+    Types: struct EmbeddingClassifier, struct LLMClassifier, struct Store, ...
+    Entry: NewEmbeddingClassifier(), NewLLMClassifier(), CompositeScore(), ...
+  dualmem/ — Go package dualmem
+    Types: struct StructuralDiff, struct SketchPath, struct SQLiteStore, ...
+    Entry: ComputeStructuralDiff(), DetectStaleMemories(), NewSketchPath(), ...
+
+[⚠ Warning — semantic (importance: 0.83)]
+Don't touch: rateLimiter cleanup() skips nil check intentionally
+
+[Decision — reflective (importance: 0.70)] [STALE? file changed since last session]
+Chose SQLite for zero-setup
+  Files: store_sqlite.go
+```
+
+The `map` and `diff` commands are also available standalone:
+
+```bash
+dualmem map    # print codebase structure without memories
+dualmem diff   # print changes since last session
 ```
 
 ## Comparison Example
@@ -192,6 +237,8 @@ geoffreyengram/
 │   ├── detail.go          # Detail Path (importance scoring, capacity management)
 │   ├── sketch.go          # Sketch Path (episodes, arcs, profiles)
 │   ├── pipeline.go        # Background compression workers
+│   ├── codemap.go         # Codebase scanner (Go AST + TS regex), multi-zoom maps
+│   ├── diff.go            # Git-based structural diffs, stale memory detection
 │   ├── classify_embedding.go  # EmbeddingClassifier (ported from engram)
 │   └── store_sqlite.go    # SQLite backend
 ├── cmd/
@@ -204,7 +251,7 @@ geoffreyengram/
 
 ## Status
 
-Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 146 tests passing.
+Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 154 tests passing.
 
 ## License
 
