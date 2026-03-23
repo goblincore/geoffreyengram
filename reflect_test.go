@@ -30,6 +30,8 @@ func (m *mockEmbedder) Embed(ctx context.Context, text, taskType string) ([]floa
 
 func (m *mockEmbedder) Dimension() int { return m.dim }
 
+func (m *mockEmbedder) ModelName() string { return "mock-embedder" }
+
 func testEngram(t *testing.T, reflector ReflectionProvider, embedder EmbeddingProvider) *Engram {
 	t.Helper()
 	dir := t.TempDir()

@@ -98,6 +98,11 @@ func (e *OllamaEmbedder) Dimension() int {
 	return e.dimension
 }
 
+// ModelName returns the Ollama embedding model name.
+func (e *OllamaEmbedder) ModelName() string {
+	return e.model
+}
+
 // --- Ollama Embed API types ---
 
 type ollamaEmbedRequest struct {

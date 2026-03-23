@@ -208,6 +208,17 @@ func TestSynthesizeZoom1(t *testing.T) {
 	}
 }
 
+func TestEmbeddingProviderModelName(t *testing.T) {
+	// mockEmbedder is defined in dualmem_test.go; it must implement EmbeddingProvider.
+	// After adding ModelName() to the interface, it must return a non-empty string.
+	m := &mockEmbedder{dim: 768}
+	name := m.ModelName()
+	if name == "" {
+		t.Error("ModelName() returned empty string; expected a non-empty model identifier")
+	}
+	t.Logf("ModelName() = %q", name)
+}
+
 func writeFile(t *testing.T, dir, name, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {

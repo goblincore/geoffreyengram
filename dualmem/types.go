@@ -12,6 +12,9 @@ import (
 type EmbeddingProvider interface {
 	Embed(ctx context.Context, text string, taskType string) ([]float32, error)
 	Dimension() int
+	// ModelName returns the embedding model identifier (e.g. "gemini-embedding-001").
+	// Used to detect provider changes across sessions and annotate stored embeddings.
+	ModelName() string
 }
 
 // SectorClassifier determines which cognitive sector a memory belongs to.
@@ -135,6 +138,50 @@ type SourceRef struct {
 	ID   string
 }
 
+// --- Sector configuration ---
+
+// SectorConfig defines the classification sectors and their behavior.
+type SectorConfig struct {
+	// Anchors maps sector name → natural-language description for embedding classification.
+	// Each description is embedded once at init and used for zero-shot cosine classification.
+	Anchors map[string]string
+
+	// DetailBias lists sectors that get a 1.0 bonus in importance scoring
+	// (i.e., biased toward Detail Path). Sectors not listed get 0.0.
+	DetailBias []string
+
+	// Default is the fallback sector when classification fails or no classifier is configured.
+	Default string
+}
+
+// CodingSectors returns sector config optimized for coding agent memory.
+func CodingSectors() *SectorConfig {
+	return &SectorConfig{
+		Anchors: map[string]string{
+			"decision":   "A choice was made between alternatives. An architectural decision, a rejected approach, a dead end discovered, or a trade-off evaluated.",
+			"warning":    "Something must not be changed or requires caution. Fragile code, intentional quirks, invariants that must hold, or known pitfalls.",
+			"map":        "Where things are in the codebase. File relationships, navigation landmarks, which files implement a feature, change coupling between files.",
+			"continuity": "Work in progress. What was done, what remains, session handoffs, current status of an ongoing task.",
+		},
+		DetailBias: []string{"decision", "warning"},
+		Default:    "decision",
+	}
+}
+
+// NPCSectors returns sector config for NPC/character memory (engram-compatible).
+func NPCSectors() *SectorConfig {
+	return &SectorConfig{
+		Anchors: map[string]string{
+			"episodic":   "Something happened at a specific time. A visit, encounter, meeting, or event that someone experienced or witnessed.",
+			"semantic":   "A fact, preference, or stable truth about someone. What they like, who they are, biographical details, knowledge.",
+			"procedural": "How to do something. A technique, method, process, recipe, instructions, or step-by-step skill.",
+			"emotional":  "Someone felt or expressed an emotion. They seemed happy, sad, angry, nervous, excited, or moved during an interaction.",
+		},
+		DetailBias: []string{"semantic", "procedural"},
+		Default:    "semantic",
+	}
+}
+
 // --- Configuration ---
 
 // Config holds DualMem initialization parameters.
@@ -147,6 +194,9 @@ type Config struct {
 	Classifier        SectorClassifier
 	EntityExtractor   EntityExtractor
 	Summarizer        SummarizerProvider // LLM for episode/arc/profile summarization
+
+	// Sector classification
+	Sectors *SectorConfig // nil = CodingSectors (default)
 
 	// Capacity
 	MaxDetailPerUser int     // Default 100
@@ -172,6 +222,9 @@ type Config struct {
 func (c *Config) ApplyDefaults() {
 	if c.SQLitePath == "" {
 		c.SQLitePath = "./data/dualmem.db"
+	}
+	if c.Sectors == nil {
+		c.Sectors = CodingSectors()
 	}
 	if c.MaxDetailPerUser == 0 {
 		c.MaxDetailPerUser = 100

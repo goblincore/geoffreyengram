@@ -66,6 +66,8 @@ func (m *classifyMockEmbedder) Embed(_ context.Context, text, _ string) ([]float
 
 func (m *classifyMockEmbedder) Dimension() int { return m.dimension }
 
+func (m *classifyMockEmbedder) ModelName() string { return "mock-classify-embedder" }
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && searchString(s, substr)
 }

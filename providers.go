@@ -7,6 +7,9 @@ import "context"
 type EmbeddingProvider interface {
 	Embed(ctx context.Context, text string, taskType string) ([]float32, error)
 	Dimension() int
+	// ModelName returns the embedding model identifier (e.g. "gemini-embedding-001").
+	// Used to detect provider changes across sessions and annotate stored embeddings.
+	ModelName() string
 }
 
 // MultimodalEmbeddingProvider extends EmbeddingProvider with media embedding.

@@ -33,10 +33,12 @@ func (m *mockEmbedder) Embed(_ context.Context, text string, _ string) ([]float3
 
 func (m *mockEmbedder) Dimension() int { return m.dim }
 
+func (m *mockEmbedder) ModelName() string { return "mock-embedder" }
+
 // mockClassifier returns a fixed sector for testing.
 type mockClassifier struct{}
 
-func (m *mockClassifier) Classify(content string) string { return "episodic" }
+func (m *mockClassifier) Classify(content string) string { return "decision" }
 
 // mockExtractor returns simple entities for testing.
 type mockExtractor struct{}
@@ -67,7 +69,7 @@ func TestEngineAddAndSearch(t *testing.T) {
 	engine := newTestEngine(t)
 	ctx := context.Background()
 
-	// Add memories with semantic sector hint + high salience so they route to Detail
+	// Add memories with decision sector hint + high salience so they route to Detail
 	for _, msg := range []string{
 		"John prefers dark roast coffee",
 		"Alice's favorite band is Aphex Twin",
@@ -75,7 +77,7 @@ func TestEngineAddAndSearch(t *testing.T) {
 	} {
 		engine.AddWithOptions(ctx, MemoryInput{
 			UserMessage: msg,
-			SectorHint:  "semantic",
+			SectorHint:  "decision",
 			Salience:    0.9,
 		}, "user1")
 	}
@@ -95,11 +97,11 @@ func TestEngineAddWithOptions(t *testing.T) {
 	engine := newTestEngine(t)
 	ctx := context.Background()
 
-	// Add with high salience + semantic hint → should route to Detail
+	// Add with high salience + decision hint → should route to Detail
 	err := engine.AddWithOptions(ctx, MemoryInput{
 		UserMessage:      "John Smith lives at 42 Oak Street",
 		AssistantMessage: "Noted!",
-		SectorHint:       "semantic",
+		SectorHint:       "decision",
 		Salience:         0.9,
 		SessionID:        "sess-1",
 	}, "user1")
@@ -143,7 +145,7 @@ func TestEngineAssembleContext(t *testing.T) {
 	engine := newTestEngine(t)
 	ctx := context.Background()
 
-	// Add memories with semantic sector so they route to Detail
+	// Add memories with decision sector so they route to Detail
 	for _, msg := range []string{
 		"Alice works at TechCorp as an engineer",
 		"Bob's favorite programming language is Go",
@@ -153,7 +155,7 @@ func TestEngineAssembleContext(t *testing.T) {
 	} {
 		engine.AddWithOptions(ctx, MemoryInput{
 			UserMessage: msg,
-			SectorHint:  "semantic",
+			SectorHint:  "decision",
 			Salience:    0.9,
 		}, "user1")
 	}
@@ -193,7 +195,7 @@ func TestEngineDetailCapacity(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		err := engine.AddWithOptions(ctx, MemoryInput{
 			UserMessage: "Important fact number " + string(rune('A'+i)),
-			SectorHint:  "semantic",
+			SectorHint:  "decision",
 			Salience:    0.9,
 		}, "user1")
 		if err != nil {
@@ -256,7 +258,7 @@ func TestEngineDemoteFromDetail(t *testing.T) {
 	// Add a high-importance memory
 	err := engine.AddWithOptions(ctx, MemoryInput{
 		UserMessage: "Critical fact: John prefers dark roast",
-		SectorHint:  "semantic",
+		SectorHint:  "decision",
 		Salience:    0.95,
 	}, "user1")
 	if err != nil {

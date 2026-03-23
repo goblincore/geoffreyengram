@@ -73,6 +73,9 @@ func (e *GeminiEmbedder2) SupportsModality(m Modality) bool {
 // Dimension returns the configured embedding dimension.
 func (e *GeminiEmbedder2) Dimension() int { return e.dimension }
 
+// ModelName returns the Gemini Embedding 2 model name.
+func (e *GeminiEmbedder2) ModelName() string { return "gemini-embedding-2-preview" }
+
 // embed is the shared implementation for text and media embedding.
 func (e *GeminiEmbedder2) embed(ctx context.Context, parts []gemini2Part, taskType string) ([]float32, error) {
 	if e.apiKey == "" {

@@ -115,6 +115,11 @@ func (e *OpenAIEmbedder) Dimension() int {
 	return e.dimension
 }
 
+// ModelName returns the OpenAI embedding model name.
+func (e *OpenAIEmbedder) ModelName() string {
+	return e.model
+}
+
 // --- OpenAI Embed API types ---
 
 type openAIEmbedRequest struct {

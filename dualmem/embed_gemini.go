@@ -95,3 +95,5 @@ func (e *GeminiEmbedder) Embed(ctx context.Context, text, taskType string) ([]fl
 }
 
 func (e *GeminiEmbedder) Dimension() int { return e.dimension }
+
+func (e *GeminiEmbedder) ModelName() string { return "gemini-embedding-001" }

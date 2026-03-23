@@ -88,6 +88,11 @@ func (e *GeminiEmbedder) Dimension() int {
 	return e.dimension
 }
 
+// ModelName returns the Gemini embedding model name.
+func (e *GeminiEmbedder) ModelName() string {
+	return "gemini-embedding-001"
+}
+
 // --- Gemini Embed API types ---
 
 type geminiEmbedRequest struct {

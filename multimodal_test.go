@@ -42,6 +42,8 @@ func (m *mmMockEmbedder) SupportsModality(mod Modality) bool {
 
 func (m *mmMockEmbedder) Dimension() int { return m.dim }
 
+func (m *mmMockEmbedder) ModelName() string { return "mock-multimodal-embedder" }
+
 // Verify interface compliance
 var _ MultimodalEmbeddingProvider = (*mmMockEmbedder)(nil)
 
