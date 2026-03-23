@@ -175,7 +175,7 @@ func TestRenderAtBudget(t *testing.T) {
 	}
 
 	// Tiny budget: zoom-1 only
-	out := cm.RenderAtBudget(30)
+	out := cm.RenderAtBudget(30, nil, nil)
 	if !strings.Contains(out, "Go project") {
 		t.Error("expected zoom-1 in tiny budget")
 	}
@@ -184,7 +184,7 @@ func TestRenderAtBudget(t *testing.T) {
 	}
 
 	// Large budget: zoom-1 + zoom-2
-	out = cm.RenderAtBudget(500)
+	out = cm.RenderAtBudget(500, nil, nil)
 	if !strings.Contains(out, "engine/") {
 		t.Error("expected engine/ in large budget")
 	}
@@ -282,6 +282,86 @@ func writeFile(t *testing.T, dir, name, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestModuleToSummaryText(t *testing.T) {
+	m := ModuleMap{
+		Path:        "engine/",
+		Language:    "go",
+		Summary:     "Go package engine",
+		KeyTypes:    []string{"struct Engine", "interface Provider"},
+		EntryPoints: []string{"Init()", "Search()"},
+	}
+	text := moduleToSummaryText(m)
+	if !strings.Contains(text, "engine/") {
+		t.Errorf("expected path in summary, got %q", text)
+	}
+	if !strings.Contains(text, "struct Engine") {
+		t.Errorf("expected types in summary, got %q", text)
+	}
+	if !strings.Contains(text, "Init()") {
+		t.Errorf("expected entry points in summary, got %q", text)
+	}
+
+	// Empty types/entries
+	m2 := ModuleMap{Path: "docs/", Language: "other", Summary: "5 files"}
+	text2 := moduleToSummaryText(m2)
+	if !strings.Contains(text2, "docs/") {
+		t.Errorf("expected path in summary, got %q", text2)
+	}
+}
+
+func TestRenderAtBudget_QueryAware(t *testing.T) {
+	cm := &CodeMap{
+		Zoom1: "Go project.",
+		Zoom2: []ModuleMap{
+			{Path: "engine/", Language: "go", Summary: "Go package engine", KeyTypes: []string{"struct Engine"}, FileCount: 10},
+			{Path: "store/", Language: "go", Summary: "Go package store", KeyTypes: []string{"struct SQLiteStore"}, FileCount: 5},
+			{Path: "cmd/cli/", Language: "go", Summary: "Go binary (package main)", EntryPoints: []string{"main()"}, FileCount: 1},
+		},
+	}
+
+	// Fake embeddings: engine is similar to query, store is not
+	queryEmb := []float32{1.0, 0.0, 0.0}
+	moduleEmbs := map[string][]float32{
+		"engine/":  {0.9, 0.1, 0.0},  // high similarity
+		"store/":   {0.0, 0.0, 1.0},  // low similarity
+		"cmd/cli/": {0.1, 0.9, 0.0},  // medium similarity
+	}
+
+	out := cm.RenderAtBudget(500, queryEmb, moduleEmbs)
+
+	// Engine should appear before store (higher similarity)
+	engineIdx := strings.Index(out, "engine/")
+	storeIdx := strings.Index(out, "store/")
+	if engineIdx < 0 || storeIdx < 0 {
+		t.Fatalf("expected both modules in output, got: %s", out)
+	}
+	if engineIdx > storeIdx {
+		t.Errorf("expected engine/ before store/ (higher similarity), got engine at %d, store at %d", engineIdx, storeIdx)
+	}
+}
+
+func TestRenderAtBudget_FallbackSort(t *testing.T) {
+	cm := &CodeMap{
+		Zoom1: "Go project.",
+		Zoom2: []ModuleMap{
+			{Path: "small/", Language: "go", Summary: "Go package small", FileCount: 2},
+			{Path: "big/", Language: "go", Summary: "Go package big", FileCount: 20},
+		},
+	}
+
+	// nil embeddings = file count sort
+	out := cm.RenderAtBudget(500, nil, nil)
+
+	bigIdx := strings.Index(out, "big/")
+	smallIdx := strings.Index(out, "small/")
+	if bigIdx < 0 || smallIdx < 0 {
+		t.Fatalf("expected both modules, got: %s", out)
+	}
+	if bigIdx > smallIdx {
+		t.Errorf("expected big/ before small/ (more files) in fallback sort")
 	}
 }
 

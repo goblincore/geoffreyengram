@@ -320,7 +320,7 @@ func (e *Engine) AssembleContext(ctx context.Context, userID string, query strin
 		if mapBudget > 50 {
 			codeMap := e.getOrGenerateCodeMap(userID)
 			if codeMap != nil {
-				mapText := codeMap.RenderAtBudget(mapBudget)
+				mapText := codeMap.RenderAtBudget(mapBudget, nil, nil)
 				mapTokens := estimateTokens(mapText)
 				parts = append(parts, "[Codebase Map]\n"+mapText)
 				sources = append(sources, SourceRef{Type: "codemap", ID: userID})

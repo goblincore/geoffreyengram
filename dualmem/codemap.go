@@ -1,6 +1,7 @@
 package dualmem
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"go/ast"
@@ -361,12 +362,11 @@ func synthesizeZoom1(modules []ModuleMap, rootDir string) string {
 // --- Render ---
 
 // RenderAtBudget formats the code map within a token budget.
-// Always includes zoom-1. Adds zoom-2 modules by file count (largest first)
-// until budget is exhausted.
-func (cm *CodeMap) RenderAtBudget(maxTokens int) string {
+// When queryEmbedding and moduleEmbeddings are provided, sorts by similarity.
+// Otherwise falls back to file count (largest first).
+func (cm *CodeMap) RenderAtBudget(maxTokens int, queryEmbedding []float32, moduleEmbeddings map[string][]float32) string {
 	var sb strings.Builder
 
-	// Always include zoom-1
 	sb.WriteString(cm.Zoom1)
 	tokensUsed := estimateTokensStr(cm.Zoom1)
 
@@ -374,12 +374,20 @@ func (cm *CodeMap) RenderAtBudget(maxTokens int) string {
 		return sb.String()
 	}
 
-	// Sort modules by file count (most files = most important)
 	sorted := make([]ModuleMap, len(cm.Zoom2))
 	copy(sorted, cm.Zoom2)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].FileCount > sorted[j].FileCount
-	})
+
+	if queryEmbedding != nil && moduleEmbeddings != nil {
+		sort.Slice(sorted, func(i, j int) bool {
+			simI := CosineSimilarity(queryEmbedding, moduleEmbeddings[sorted[i].Path])
+			simJ := CosineSimilarity(queryEmbedding, moduleEmbeddings[sorted[j].Path])
+			return simI > simJ
+		})
+	} else {
+		sort.Slice(sorted, func(i, j int) bool {
+			return sorted[i].FileCount > sorted[j].FileCount
+		})
+	}
 
 	sb.WriteString("\n")
 	for _, m := range sorted {
@@ -461,4 +469,43 @@ func UnmarshalZoom2(data string) []ModuleMap {
 	var modules []ModuleMap
 	json.Unmarshal([]byte(data), &modules)
 	return modules
+}
+
+// moduleToSummaryText builds a text representation of a module for embedding.
+func moduleToSummaryText(m ModuleMap) string {
+	var sb strings.Builder
+	sb.WriteString(m.Path)
+	sb.WriteString(" — ")
+	sb.WriteString(m.Summary)
+	if len(m.KeyTypes) > 0 {
+		sb.WriteString(". Types: ")
+		sb.WriteString(strings.Join(m.KeyTypes, ", "))
+	}
+	if len(m.EntryPoints) > 0 {
+		sb.WriteString(". Entry: ")
+		sb.WriteString(strings.Join(m.EntryPoints, ", "))
+	}
+	return sb.String()
+}
+
+// EmbedCodeMap embeds all module summaries in a code map.
+// Returns nil if embedder is nil (graceful degradation for standalone CLI usage).
+func EmbedCodeMap(ctx context.Context, cm *CodeMap, embedder EmbeddingProvider) (map[string]ModuleEmbedding, error) {
+	if embedder == nil || len(cm.Zoom2) == 0 {
+		return nil, nil
+	}
+
+	result := make(map[string]ModuleEmbedding, len(cm.Zoom2))
+	for _, m := range cm.Zoom2 {
+		summary := moduleToSummaryText(m)
+		vec, err := embedder.Embed(ctx, summary, "RETRIEVAL_DOCUMENT")
+		if err != nil {
+			return nil, fmt.Errorf("codemap: embed module %s: %w", m.Path, err)
+		}
+		result[m.Path] = ModuleEmbedding{
+			Summary:   summary,
+			Embedding: vec,
+		}
+	}
+	return result, nil
 }
