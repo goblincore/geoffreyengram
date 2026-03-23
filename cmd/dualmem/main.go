@@ -103,13 +103,15 @@ func newEngine(cfg CLIConfig) (*dualmem.Engine, error) {
 
 	embedder := dualmem.NewGeminiEmbedder(apiKey, cfg.Providers.EmbeddingDimension)
 
+	sectors := dualmem.CodingSectors()
+
 	// Use EmbeddingClassifier (zero extra API calls per Add, reuses embedding).
 	// Falls back to GeminiClassifier if init fails.
 	var classifier dualmem.SectorClassifier
-	ec, err := dualmem.NewEmbeddingClassifier(context.Background(), embedder)
+	ec, err := dualmem.NewEmbeddingClassifier(context.Background(), embedder, sectors)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: EmbeddingClassifier init failed, falling back to LLM classifier: %v\n", err)
-		classifier = dualmem.NewGeminiClassifier(apiKey)
+		classifier = dualmem.NewGeminiClassifier(apiKey, sectors)
 	} else {
 		classifier = ec
 	}
@@ -119,6 +121,7 @@ func newEngine(cfg CLIConfig) (*dualmem.Engine, error) {
 		SQLitePath:            cfg.Storage.SQLitePath,
 		EmbeddingProvider:     embedder,
 		Classifier:            classifier,
+		Sectors:               sectors,
 		MaxDetailPerUser:      100,
 		ImportanceTheta:       0.65,
 		EpisodeBatchInterval:  episodeInterval,
@@ -199,7 +202,7 @@ func cmdAdd(cfg CLIConfig) {
 	fs := flag.NewFlagSet("add", flag.ExitOnError)
 	ns := fs.String("ns", "", "Namespace")
 	text := fs.String("text", "", "Memory text (required)")
-	sector := fs.String("sector", "", "Sector hint (semantic, episodic, procedural, emotional, reflective)")
+	sector := fs.String("sector", "", "Sector hint (default: auto-classify; coding presets: decision, warning, map, continuity)")
 	salience := fs.Float64("salience", 0, "Salience override (0 = default 0.5)")
 	session := fs.String("session", "", "Session ID")
 	memType := fs.String("type", "", "Memory type: decision, warning, continuity (default: general)")
@@ -578,7 +581,7 @@ func cmdMap(cfg CLIConfig) {
 	// Store in DB (needs engine for store access)
 	engine, engErr := newEngine(cfg)
 	if engErr == nil {
-		engine.StoreCodeMap(namespace, cm)
+		engine.StoreCodeMap(context.Background(), namespace, cm)
 		engine.Close()
 	}
 
