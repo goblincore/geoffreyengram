@@ -359,6 +359,55 @@ func (s *SQLiteStore) GetUnprocessedRaw(userID string, limit int) ([]sketchRaw, 
 	return results, rows.Err()
 }
 
+func (s *SQLiteStore) GetAllSketchRaw(userID string, limit int) ([]sketchRaw, error) {
+	rows, err := s.db.Query(`
+		SELECT id, user_id, content, sector, session_id, embedding, created_at
+		FROM sketch_raw WHERE user_id = ?
+		ORDER BY created_at ASC LIMIT ?`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []sketchRaw
+	for rows.Next() {
+		var r sketchRaw
+		var embBlob []byte
+		var createdAt string
+		if err := rows.Scan(&r.ID, &r.UserID, &r.Content, &r.Sector, &r.SessionID, &embBlob, &createdAt); err != nil {
+			return nil, err
+		}
+		r.Embedding = decodeVector(embBlob)
+		r.CreatedAt = parseTime(createdAt)
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
+func (s *SQLiteStore) GetSketchRawByID(id string) (*sketchRaw, error) {
+	var r sketchRaw
+	var embBlob []byte
+	var createdAt string
+	err := s.db.QueryRow(`
+		SELECT id, user_id, content, sector, session_id, embedding, created_at
+		FROM sketch_raw WHERE id = ?`, id).
+		Scan(&r.ID, &r.UserID, &r.Content, &r.Sector, &r.SessionID, &embBlob, &createdAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	r.Embedding = decodeVector(embBlob)
+	r.CreatedAt = parseTime(createdAt)
+	return &r, nil
+}
+
+func (s *SQLiteStore) DeleteSketchRaw(id string) error {
+	_, err := s.db.Exec(`DELETE FROM sketch_raw WHERE id = ?`, id)
+	return err
+}
+
 func (s *SQLiteStore) MarkRawProcessed(ids []string) error {
 	if len(ids) == 0 {
 		return nil
@@ -419,6 +468,26 @@ func (s *SQLiteStore) GetEpisodes(userID string, after *time.Time) ([]episodeWit
 		results = append(results, e)
 	}
 	return results, rows.Err()
+}
+
+func (s *SQLiteStore) GetEpisodeByID(id string) (*episodeWithVector, error) {
+	var e episodeWithVector
+	var vecBlob []byte
+	var entitiesJSON, createdAt string
+	err := s.db.QueryRow(`
+		SELECT id, user_id, summary_text, embedding, entities_json, emotional_tone, created_at
+		FROM episodes WHERE id = ?`, id).
+		Scan(&e.ID, &e.UserID, &e.SummaryText, &vecBlob, &entitiesJSON, &e.EmotionalTone, &createdAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	e.Vector = decodeVector(vecBlob)
+	e.Entities = decodeEntities(entitiesJSON)
+	e.CreatedAt = parseTime(createdAt)
+	return &e, nil
 }
 
 func (s *SQLiteStore) GetExpiredEpisodes(before time.Time) ([]episodeWithVector, error) {

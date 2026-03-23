@@ -49,8 +49,10 @@ type contextRequest struct {
 }
 
 type promoteRequest struct {
-	UserID   string `json:"user_id"`
-	MemoryID string `json:"memory_id"`
+	UserID   string  `json:"user_id"`
+	MemoryID string  `json:"memory_id"`
+	Type     string  `json:"type,omitempty"`
+	Salience float64 `json:"salience,omitempty"`
 }
 
 type demoteRequest struct {
@@ -161,7 +163,12 @@ func handlePromote(e *Engine) http.HandlerFunc {
 			return
 		}
 
-		if err := e.PromoteToDetail(r.Context(), req.UserID, req.MemoryID); err != nil {
+		var opts *PromoteOpts
+		if req.Type != "" || req.Salience > 0 {
+			opts = &PromoteOpts{Type: req.Type, Salience: req.Salience}
+		}
+
+		if err := e.PromoteToDetail(r.Context(), req.UserID, req.MemoryID, opts); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

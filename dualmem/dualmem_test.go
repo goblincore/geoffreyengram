@@ -338,6 +338,224 @@ func min(a, b int) int {
 	return b
 }
 
+func TestPromoteFromSketchRaw(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Add a memory with low salience — should route to sketch
+	err := engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "low importance chat about nothing special",
+		Salience:    0.1,
+	}, "user1")
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// Verify it's in sketch_raw (not detail)
+	detailCount, _ := engine.store.GetDetailCount("user1")
+	raws, _ := engine.store.GetAllSketchRaw("user1", 100)
+	if len(raws) == 0 {
+		t.Skip("memory routed to detail instead of sketch — adjust salience")
+	}
+	rawID := raws[0].ID
+	t.Logf("Before promote: %d detail, %d raw", detailCount, len(raws))
+
+	// Promote
+	err = engine.PromoteToDetail(ctx, "user1", rawID, nil)
+	if err != nil {
+		t.Fatalf("PromoteToDetail: %v", err)
+	}
+
+	// Verify: in detail, gone from sketch_raw
+	details, _ := engine.store.GetDetailMemories("user1")
+	found := false
+	for _, d := range details {
+		if d.Text == "low importance chat about nothing special" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("promoted memory not found in detail path")
+	}
+
+	raw, _ := engine.store.GetSketchRawByID(rawID)
+	if raw != nil {
+		t.Error("raw entry should be deleted after promotion")
+	}
+}
+
+func TestPromoteFromEpisode(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Directly insert an episode via store
+	vec := make([]float32, 768)
+	vec[0] = 0.7
+	ep := &Episode{
+		ID:          "ep-promote-1",
+		SummaryText: "Summary of recent coffee discussions with multiple friends",
+		Entities:    []Entity{{Text: "coffee", Type: "topic"}},
+	}
+	err := engine.store.InsertEpisode(ep, vec, "user1", "mock-embedder", nil)
+	if err != nil {
+		t.Fatalf("InsertEpisode: %v", err)
+	}
+
+	// Promote the episode
+	err = engine.PromoteToDetail(ctx, "user1", "ep-promote-1", nil)
+	if err != nil {
+		t.Fatalf("PromoteToDetail: %v", err)
+	}
+
+	// Verify in detail
+	details, _ := engine.store.GetDetailMemories("user1")
+	found := false
+	for _, d := range details {
+		if strings.Contains(d.Text, "coffee discussions") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("promoted episode not found in detail path")
+	}
+
+	// Episode should be deleted
+	epCheck, _ := engine.store.GetEpisodeByID("ep-promote-1")
+	if epCheck != nil {
+		t.Error("episode should be deleted after promotion")
+	}
+}
+
+func TestPromoteWithTypeOverride(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Insert a raw sketch entry
+	engine.store.InsertSketchRaw("user1", "never touch the rate limiter cleanup", "decision", "", nil)
+	raws, _ := engine.store.GetAllSketchRaw("user1", 10)
+	if len(raws) == 0 {
+		t.Fatal("expected raw entry")
+	}
+
+	// Promote with type override
+	err := engine.PromoteToDetail(ctx, "user1", raws[0].ID, &PromoteOpts{
+		Type:     "warning",
+		Salience: 0.9,
+	})
+	if err != nil {
+		t.Fatalf("PromoteToDetail: %v", err)
+	}
+
+	details, _ := engine.store.GetDetailMemories("user1")
+	if len(details) == 0 {
+		t.Fatal("expected detail memory")
+	}
+	if details[0].Type != "warning" {
+		t.Errorf("type = %q, want 'warning'", details[0].Type)
+	}
+	if details[0].Salience != 0.9 {
+		t.Errorf("salience = %v, want 0.9", details[0].Salience)
+	}
+}
+
+func TestPromoteNotFound(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	err := engine.PromoteToDetail(ctx, "user1", "nonexistent-id", nil)
+	if err == nil {
+		t.Fatal("expected error for nonexistent ID")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error = %v, want 'not found' message", err)
+	}
+}
+
+func TestPromoteCapacityManagement(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	engine, err := New(Config{
+		SQLitePath:        dbPath,
+		EmbeddingProvider: &mockEmbedder{dim: 768},
+		Classifier:        &mockClassifier{},
+		MaxDetailPerUser:  2,
+		ImportanceTheta:   0.30,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer engine.Close()
+	ctx := context.Background()
+
+	// Fill detail to capacity
+	for _, msg := range []string{"first important fact", "second important fact"} {
+		engine.AddWithOptions(ctx, MemoryInput{
+			UserMessage: msg,
+			SectorHint:  "decision",
+			Salience:    0.9,
+		}, "user1")
+	}
+	count, _ := engine.store.GetDetailCount("user1")
+	if count != 2 {
+		t.Fatalf("expected 2 detail memories, got %d", count)
+	}
+
+	// Insert a raw entry directly and promote it
+	engine.store.InsertSketchRaw("user1", "third critical warning about fragile code", "warning", "", nil)
+	raws, _ := engine.store.GetAllSketchRaw("user1", 10)
+	if len(raws) == 0 {
+		t.Fatal("expected raw entry")
+	}
+
+	err = engine.PromoteToDetail(ctx, "user1", raws[0].ID, &PromoteOpts{Type: "warning", Salience: 0.95})
+	if err != nil {
+		t.Fatalf("PromoteToDetail: %v", err)
+	}
+
+	// Detail should still be at capacity (2), with lowest demoted
+	count, _ = engine.store.GetDetailCount("user1")
+	if count > 2 {
+		t.Errorf("detail count = %d, exceeds cap of 2", count)
+	}
+}
+
+func TestReEvaluateSketchRaw(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Insert raw entries directly (simulating old pre-type-boost memories)
+	for _, content := range []string{
+		"Rejected Postgres for CLI — chose SQLite for zero-setup",
+		"Don't touch rate limiter cleanup — intentional nil check skip",
+		"Just chatting about the weather today",
+	} {
+		engine.store.InsertSketchRaw("user1", content, "decision", "", nil)
+	}
+
+	raws, _ := engine.store.GetAllSketchRaw("user1", 100)
+	if len(raws) != 3 {
+		t.Fatalf("expected 3 raws, got %d", len(raws))
+	}
+
+	// Re-evaluate with type=warning — the type boost should promote them
+	count, err := engine.ReEvaluateSketchRaw(ctx, "user1", &PromoteOpts{Type: "warning"})
+	if err != nil {
+		t.Fatalf("ReEvaluateSketchRaw: %v", err)
+	}
+
+	t.Logf("Promoted %d out of 3 raw entries", count)
+	if count == 0 {
+		t.Error("expected at least some promotions with type boost")
+	}
+
+	// Promoted entries should be in detail now
+	details, _ := engine.store.GetDetailMemories("user1")
+	if len(details) != count {
+		t.Errorf("detail count = %d, want %d", len(details), count)
+	}
+}
+
 func TestAssembleContext_QueryAwareCodeMap(t *testing.T) {
 	tmpDir := t.TempDir()
 

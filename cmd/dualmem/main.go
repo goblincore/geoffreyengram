@@ -469,11 +469,14 @@ func cmdStatus(cfg CLIConfig) {
 func cmdPromote(cfg CLIConfig) {
 	fs := flag.NewFlagSet("promote", flag.ExitOnError)
 	ns := fs.String("ns", "", "Namespace")
-	id := fs.String("id", "", "Memory ID")
+	id := fs.String("id", "", "Memory ID (single promote)")
+	all := fs.Bool("all", false, "Re-evaluate all sketch_raw entries")
+	memType := fs.String("type", "", "Type override for promoted memories (warning, decision, continuity)")
+	sal := fs.Float64("salience", 0, "Salience override (0 = default)")
 	fs.Parse(os.Args[2:])
 
-	if *id == "" {
-		fmt.Fprintln(os.Stderr, "error: --id required")
+	if *id == "" && !*all {
+		fmt.Fprintln(os.Stderr, "error: --id or --all required")
 		os.Exit(1)
 	}
 
@@ -485,11 +488,25 @@ func cmdPromote(cfg CLIConfig) {
 	}
 	defer engine.Close()
 
-	if err := engine.PromoteToDetail(context.Background(), namespace, *id); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+	var opts *dualmem.PromoteOpts
+	if *memType != "" || *sal > 0 {
+		opts = &dualmem.PromoteOpts{Type: *memType, Salience: *sal}
 	}
-	fmt.Println("Promoted to Detail Path")
+
+	if *all {
+		count, err := engine.ReEvaluateSketchRaw(context.Background(), namespace, opts)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Promoted %d memories to Detail Path\n", count)
+	} else {
+		if err := engine.PromoteToDetail(context.Background(), namespace, *id, opts); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Promoted to Detail Path")
+	}
 }
 
 func cmdDemote(cfg CLIConfig) {

@@ -146,6 +146,138 @@ func TestStoreSketchRaw(t *testing.T) {
 	}
 }
 
+func TestStoreGetSketchRawByID(t *testing.T) {
+	store := newTestStore(t)
+
+	// Insert a raw entry
+	vec := make([]float32, 768)
+	vec[0] = 0.3
+	if err := store.InsertSketchRaw("user1", "test raw content", "decision", "sess-1", vec); err != nil {
+		t.Fatalf("InsertSketchRaw: %v", err)
+	}
+
+	// Find it via GetAllSketchRaw to get the ID
+	raws, _ := store.GetAllSketchRaw("user1", 10)
+	if len(raws) != 1 {
+		t.Fatalf("expected 1 raw, got %d", len(raws))
+	}
+	id := raws[0].ID
+
+	// Get by ID
+	raw, err := store.GetSketchRawByID(id)
+	if err != nil {
+		t.Fatalf("GetSketchRawByID: %v", err)
+	}
+	if raw == nil {
+		t.Fatal("expected raw, got nil")
+	}
+	if raw.Content != "test raw content" {
+		t.Errorf("content = %q", raw.Content)
+	}
+	if raw.Sector != "decision" {
+		t.Errorf("sector = %q, want 'decision'", raw.Sector)
+	}
+	if len(raw.Embedding) != 768 {
+		t.Errorf("embedding dim = %d, want 768", len(raw.Embedding))
+	}
+
+	// Not found
+	raw, err = store.GetSketchRawByID("nonexistent")
+	if err != nil {
+		t.Fatalf("GetSketchRawByID: %v", err)
+	}
+	if raw != nil {
+		t.Error("expected nil for nonexistent ID")
+	}
+}
+
+func TestStoreDeleteSketchRaw(t *testing.T) {
+	store := newTestStore(t)
+
+	store.InsertSketchRaw("user1", "to be deleted", "decision", "", nil)
+	raws, _ := store.GetAllSketchRaw("user1", 10)
+	if len(raws) != 1 {
+		t.Fatalf("expected 1 raw, got %d", len(raws))
+	}
+
+	if err := store.DeleteSketchRaw(raws[0].ID); err != nil {
+		t.Fatalf("DeleteSketchRaw: %v", err)
+	}
+
+	raws, _ = store.GetAllSketchRaw("user1", 10)
+	if len(raws) != 0 {
+		t.Errorf("expected 0 raws after delete, got %d", len(raws))
+	}
+}
+
+func TestStoreGetEpisodeByID(t *testing.T) {
+	store := newTestStore(t)
+
+	vec := make([]float32, 768)
+	vec[0] = 0.5
+	ep := &Episode{
+		ID:            "ep-lookup-1",
+		SummaryText:   "Episode about testing lookups",
+		Entities:      []Entity{{Text: "testing", Type: "topic"}},
+		EmotionalTone: "neutral",
+	}
+	if err := store.InsertEpisode(ep, vec, "user1", "test-model", nil); err != nil {
+		t.Fatalf("InsertEpisode: %v", err)
+	}
+
+	// Get by ID
+	got, err := store.GetEpisodeByID("ep-lookup-1")
+	if err != nil {
+		t.Fatalf("GetEpisodeByID: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected episode, got nil")
+	}
+	if got.SummaryText != "Episode about testing lookups" {
+		t.Errorf("summary = %q", got.SummaryText)
+	}
+	if len(got.Vector) != 768 {
+		t.Errorf("vector dim = %d, want 768", len(got.Vector))
+	}
+
+	// Not found
+	got, err = store.GetEpisodeByID("nonexistent")
+	if err != nil {
+		t.Fatalf("GetEpisodeByID: %v", err)
+	}
+	if got != nil {
+		t.Error("expected nil for nonexistent ID")
+	}
+}
+
+func TestStoreGetAllSketchRaw(t *testing.T) {
+	store := newTestStore(t)
+
+	// Insert some, mark some processed
+	store.InsertSketchRaw("user1", "raw 1", "decision", "", nil)
+	store.InsertSketchRaw("user1", "raw 2", "warning", "", nil)
+
+	raws, _ := store.GetUnprocessedRaw("user1", 10)
+	if len(raws) >= 1 {
+		store.MarkRawProcessed([]string{raws[0].ID})
+	}
+
+	// GetUnprocessedRaw should return 1
+	unprocessed, _ := store.GetUnprocessedRaw("user1", 10)
+	if len(unprocessed) != 1 {
+		t.Errorf("unprocessed = %d, want 1", len(unprocessed))
+	}
+
+	// GetAllSketchRaw should return 2 (both processed and unprocessed)
+	all, err := store.GetAllSketchRaw("user1", 10)
+	if err != nil {
+		t.Fatalf("GetAllSketchRaw: %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("all = %d, want 2", len(all))
+	}
+}
+
 func TestStoreEpisodes(t *testing.T) {
 	store := newTestStore(t)
 

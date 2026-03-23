@@ -505,11 +505,219 @@ func (e *Engine) GetProfile(ctx context.Context, userID string) (*ProfileSketch,
 	return e.sketch.GetProfile(ctx, userID)
 }
 
-// PromoteToDetail pins a sketch memory to the Detail Path.
-func (e *Engine) PromoteToDetail(ctx context.Context, userID string, memoryID string) error {
-	// This would require loading the sketch memory, embedding it, and inserting into detail.
-	// Placeholder for now — would need a way to identify sketch items by ID.
-	return fmt.Errorf("dualmem: PromoteToDetail not yet implemented")
+// PromoteToDetail moves a sketch memory (raw or episode) to the Detail Path.
+// Searches sketch_raw then episodes by ID. opts is optional (nil = defaults).
+func (e *Engine) PromoteToDetail(ctx context.Context, userID string, memoryID string, opts *PromoteOpts) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	var text, sector, sessionID string
+	var embedding []float32
+	var entities []Entity
+	var sourceType string // "raw" or "episode"
+
+	// Try sketch_raw first
+	raw, err := e.store.GetSketchRawByID(memoryID)
+	if err != nil {
+		return fmt.Errorf("dualmem: lookup raw: %w", err)
+	}
+	if raw != nil {
+		text = raw.Content
+		sector = raw.Sector
+		sessionID = raw.SessionID
+		embedding = raw.Embedding
+		sourceType = "raw"
+	}
+
+	// Try episodes if not found in raw
+	if sourceType == "" {
+		ep, err := e.store.GetEpisodeByID(memoryID)
+		if err != nil {
+			return fmt.Errorf("dualmem: lookup episode: %w", err)
+		}
+		if ep != nil {
+			text = ep.SummaryText
+			entities = ep.Entities
+			embedding = ep.Vector
+			sourceType = "episode"
+		}
+	}
+
+	if sourceType == "" {
+		return fmt.Errorf("dualmem: memory %s not found in sketch path", memoryID)
+	}
+
+	// Embed if needed (raw entries may have nil embedding)
+	if len(embedding) == 0 || len(embedding) != e.embedder.Dimension() {
+		embedding, err = e.embedder.Embed(ctx, text, "RETRIEVAL_DOCUMENT")
+		if err != nil {
+			return fmt.Errorf("dualmem: embed for promote: %w", err)
+		}
+	}
+
+	// Classify sector if empty
+	if sector == "" && e.classifier != nil {
+		if ec, ok := e.classifier.(*EmbeddingClassifier); ok {
+			sector = ec.ClassifyFromEmbedding(embedding)
+		} else {
+			sector = e.classifier.Classify(text)
+		}
+	}
+	if sector == "" {
+		sector = e.cfg.Sectors.Default
+	}
+
+	// Extract entities if none
+	if len(entities) == 0 && e.extractor != nil {
+		for _, ext := range e.extractor.Extract(text) {
+			entities = append(entities, Entity{Text: ext.Text, Type: ext.Type})
+		}
+	}
+
+	// Apply opts
+	memType := ""
+	salience := 0.7
+	var files []string
+	if opts != nil {
+		if opts.Type != "" {
+			memType = opts.Type
+		}
+		if opts.Salience > 0 {
+			salience = opts.Salience
+		}
+	}
+
+	// Score, but guarantee Detail routing
+	existingDetails, _ := e.store.GetDetailMemories(userID)
+	score, _ := e.detail.ScoreAndRoute(sector, salience, text, embedding, existingDetails, memType)
+	if score < e.cfg.ImportanceTheta+0.05 {
+		score = e.cfg.ImportanceTheta + 0.05
+	}
+
+	dm := &DetailMemory{
+		ID:              generateID(),
+		Text:            text,
+		Sector:          sector,
+		Salience:        salience,
+		ImportanceScore: score,
+		Entities:        entities,
+		Type:            memType,
+		Files:           files,
+		SessionID:       sessionID,
+		CreatedAt:       time.Now(),
+		LastAccessedAt:  time.Now(),
+	}
+
+	demoted, err := e.detail.Insert(ctx, dm, embedding, userID)
+	if err != nil {
+		return fmt.Errorf("dualmem: detail insert on promote: %w", err)
+	}
+
+	// Route demoted memory to sketch if needed
+	if demoted != "" && demoted != text {
+		e.sketch.IngestRaw(ctx, userID, demoted, sector, sessionID, nil)
+	}
+
+	// Delete from source table
+	switch sourceType {
+	case "raw":
+		e.store.DeleteSketchRaw(memoryID)
+	case "episode":
+		e.store.DeleteEpisode(memoryID)
+	}
+
+	return nil
+}
+
+// ReEvaluateSketchRaw re-scores all raw sketch entries for a user and promotes
+// those that now exceed the importance threshold. Useful for recovering old
+// memories that were scored before the type-boost fix.
+func (e *Engine) ReEvaluateSketchRaw(ctx context.Context, userID string, opts *PromoteOpts) (int, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	raws, err := e.store.GetAllSketchRaw(userID, 1000)
+	if err != nil {
+		return 0, fmt.Errorf("dualmem: get all raw: %w", err)
+	}
+
+	memType := ""
+	salience := 0.5
+	if opts != nil {
+		if opts.Type != "" {
+			memType = opts.Type
+		}
+		if opts.Salience > 0 {
+			salience = opts.Salience
+		}
+	}
+
+	existingDetails, _ := e.store.GetDetailMemories(userID)
+	promoted := 0
+
+	for _, raw := range raws {
+		embedding := raw.Embedding
+		if len(embedding) == 0 || len(embedding) != e.embedder.Dimension() {
+			embedding, err = e.embedder.Embed(ctx, raw.Content, "RETRIEVAL_DOCUMENT")
+			if err != nil {
+				continue // skip entries that fail to embed
+			}
+		}
+
+		sector := raw.Sector
+		if sector == "" && e.classifier != nil {
+			if ec, ok := e.classifier.(*EmbeddingClassifier); ok {
+				sector = ec.ClassifyFromEmbedding(embedding)
+			} else {
+				sector = e.classifier.Classify(raw.Content)
+			}
+		}
+		if sector == "" {
+			sector = e.cfg.Sectors.Default
+		}
+
+		score, isDetail := e.detail.ScoreAndRoute(sector, salience, raw.Content, embedding, existingDetails, memType)
+		if !isDetail {
+			continue
+		}
+
+		var entities []Entity
+		if e.extractor != nil {
+			for _, ext := range e.extractor.Extract(raw.Content) {
+				entities = append(entities, Entity{Text: ext.Text, Type: ext.Type})
+			}
+		}
+
+		dm := &DetailMemory{
+			ID:              generateID(),
+			Text:            raw.Content,
+			Sector:          sector,
+			Salience:        salience,
+			ImportanceScore: score,
+			Entities:        entities,
+			Type:            memType,
+			SessionID:       raw.SessionID,
+			CreatedAt:       time.Now(),
+			LastAccessedAt:  time.Now(),
+		}
+
+		demoted, err := e.detail.Insert(ctx, dm, embedding, userID)
+		if err != nil {
+			continue
+		}
+
+		if demoted != "" && demoted != raw.Content {
+			e.sketch.IngestRaw(ctx, userID, demoted, sector, raw.SessionID, nil)
+		}
+
+		e.store.DeleteSketchRaw(raw.ID)
+		promoted++
+
+		// Refresh existing details for novelty scoring of next entry
+		existingDetails, _ = e.store.GetDetailMemories(userID)
+	}
+
+	return promoted, nil
 }
 
 // DemoteFromDetail removes a memory from Detail Path and routes to Sketch.

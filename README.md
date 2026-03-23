@@ -149,6 +149,9 @@ dualmem search "database" --limit 5
 dualmem context "auth system" --budget 3000   # memories + code map + diff
 dualmem map                                   # codebase structure map
 dualmem diff                                  # changes since last session
+dualmem promote --id <memory-id>              # move sketch → detail
+dualmem promote --all --type warning          # batch re-evaluate all raw sketch entries
+dualmem demote --id <memory-id>               # move detail → sketch
 dualmem profile
 dualmem status
 ```
@@ -162,6 +165,27 @@ dualmem add --type warning --text "Don't touch rateLimiter cleanup()" --files "r
 dualmem add --type decision --text "Rejected Postgres, chose SQLite" --files "store_sqlite.go"
 dualmem add --type continuity --text "Done: JWT. Remaining: refresh tokens" --files "auth.go,jwt.go"
 ```
+
+### Promote / demote
+
+Memories can be moved between paths. Promote moves a sketch memory (raw entry or episode) to the Detail Path; demote does the reverse.
+
+```bash
+# Single promote — by memory ID (from search results)
+dualmem promote --id abc123
+
+# Promote with type/salience override
+dualmem promote --id abc123 --type warning --salience 0.9
+
+# Batch re-evaluate — re-scores all raw sketch entries with current scorer
+# Useful for recovering old memories saved before the type-boost fix
+dualmem promote --all --type warning
+
+# Demote — move from detail to sketch
+dualmem demote --id abc123
+```
+
+Also available via API: `POST /v1/memory/promote` with `{"user_id", "memory_id", "type", "salience"}`.
 
 ### Session context
 
@@ -224,7 +248,7 @@ geoffreyengram/
 ├── waypoints.go           # Entity graph, associative expansion
 ├── reflect.go             # ReflectionProvider, Reflect method
 ├── dualmem/               # Dual-path agent memory engine
-│   ├── dualmem.go         # Engine (New, Add, DualSearch, AssembleContext)
+│   ├── dualmem.go         # Engine (New, Add, DualSearch, AssembleContext, PromoteToDetail, ReEvaluateSketchRaw)
 │   ├── types.go           # Config, SectorConfig, Store interface, DetailMemory, Episode, Arc, Profile
 │   ├── detail.go          # Detail Path (importance scoring, capacity management)
 │   ├── sketch.go          # Sketch Path (episodes, arcs, profiles)
@@ -244,7 +268,7 @@ geoffreyengram/
 
 ## Status
 
-Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 154 tests passing.
+Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 172 tests passing.
 
 ## License
 

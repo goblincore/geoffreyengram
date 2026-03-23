@@ -36,6 +36,12 @@ type SummarizerProvider interface {
 	UpdateProfile(ctx context.Context, currentProfile *ProfileSketch, newArcs []string) (*ProfileSketch, error)
 }
 
+// PromoteOpts configures behavior when promoting sketch memories to Detail Path.
+type PromoteOpts struct {
+	Type     string  // Override type ("warning", "decision", "continuity")
+	Salience float64 // Override salience (0 = default 0.7 for promotions)
+}
+
 // --- Input/Output types ---
 
 // MemoryInput is the input for Add/AddWithOptions.
@@ -267,11 +273,15 @@ type Store interface {
 	// Sketch Path — raw staging
 	InsertSketchRaw(userID, content, sector, sessionID string, embedding []float32) error
 	GetUnprocessedRaw(userID string, limit int) ([]sketchRaw, error)
+	GetAllSketchRaw(userID string, limit int) ([]sketchRaw, error)
+	GetSketchRawByID(id string) (*sketchRaw, error)
+	DeleteSketchRaw(id string) error
 	MarkRawProcessed(ids []string) error
 
 	// Sketch Path — episodes
 	InsertEpisode(ep *Episode, embedding []float32, userID, embeddingModel string, sourceRawIDs []string) error
 	GetEpisodes(userID string, after *time.Time) ([]episodeWithVector, error)
+	GetEpisodeByID(id string) (*episodeWithVector, error)
 	GetExpiredEpisodes(before time.Time) ([]episodeWithVector, error)
 	DeleteEpisode(id string) error
 
