@@ -2,7 +2,10 @@ package dualmem
 
 import (
 	"context"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -333,4 +336,42 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func TestAssembleContext_QueryAwareCodeMap(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a tiny Go project
+	writeFile(t, tmpDir, "main.go", "package main\nfunc main() {}\n")
+	subDir := filepath.Join(tmpDir, "auth")
+	os.MkdirAll(subDir, 0755)
+	writeFile(t, subDir, "auth.go", "package auth\ntype Validator struct {}\nfunc Validate() error { return nil }\n")
+
+	// Init git
+	exec.Command("git", "-C", tmpDir, "init").Run()
+	exec.Command("git", "-C", tmpDir, "add", ".").Run()
+	exec.Command("git", "-C", tmpDir, "-c", "user.email=test@test.com", "-c", "user.name=Test", "commit", "-m", "init").Run()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	engine, err := New(Config{
+		SQLitePath:        dbPath,
+		EmbeddingProvider: &mockEmbedder{dim: 768},
+		Classifier:        &mockClassifier{},
+		EntityExtractor:   &mockExtractor{},
+		RootDir:           tmpDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+	block, err := engine.AssembleContext(ctx, "testuser", "authentication validation", 3000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(block.Text, "[Codebase Map]") {
+		t.Error("expected codemap in context output")
+	}
 }

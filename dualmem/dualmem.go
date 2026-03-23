@@ -272,12 +272,23 @@ func (e *Engine) DualSearch(ctx context.Context, userID string, query string, op
 // diffs and code maps before memories.
 func (e *Engine) AssembleContext(ctx context.Context, userID string, query string, tokenBudget int) (*ContextBlock, error) {
 	if tokenBudget <= 0 {
-		tokenBudget = 2000 // default budget
+		tokenBudget = 2000
+	}
+
+	// Embed query FIRST — shared by DualSearch and codemap ranking
+	var queryEmb []float32
+	if query != "" {
+		var err error
+		queryEmb, err = e.embedder.Embed(ctx, query, "RETRIEVAL_QUERY")
+		if err != nil {
+			return nil, fmt.Errorf("dualmem: embed query: %w", err)
+		}
 	}
 
 	results, err := e.DualSearch(ctx, userID, query, SearchOpts{
-		Limit:         10,
-		IncludeSketch: true,
+		Limit:          10,
+		IncludeSketch:  true,
+		QueryEmbedding: queryEmb,
 	})
 	if err != nil {
 		return nil, err
@@ -286,11 +297,9 @@ func (e *Engine) AssembleContext(ctx context.Context, userID string, query strin
 	var parts []string
 	var sources []SourceRef
 	tokensUsed := 0
-
-	// Build set of stale memory IDs (populated by diff below)
 	staleIDs := make(map[string]bool)
 
-	// --- NEW: Structural diff (≤150 tokens) ---
+	// --- Structural diff (≤150 tokens) ---
 	if e.cfg.RootDir != "" && tokenBudget >= 200 {
 		lastMarker, _ := e.store.GetLatestSessionMarker(userID)
 		diff, _ := ComputeStructuralDiff(e.cfg.RootDir, lastMarker)
@@ -302,8 +311,6 @@ func (e *Engine) AssembleContext(ctx context.Context, userID string, query strin
 				sources = append(sources, SourceRef{Type: "diff", ID: diff.ToCommit})
 				tokensUsed += diffTokens
 			}
-
-			// Detect stale memories
 			staleList := DetectStaleMemories(diff, e.store, userID)
 			for _, id := range staleList {
 				staleIDs[id] = true
@@ -311,16 +318,16 @@ func (e *Engine) AssembleContext(ctx context.Context, userID string, query strin
 		}
 	}
 
-	// --- NEW: Code map (≤400 tokens, auto-generate if missing) ---
+	// --- Code map (≤400 tokens, query-aware ranking) ---
 	if e.cfg.RootDir != "" && tokenBudget >= 500 {
 		mapBudget := 400
 		if tokenBudget-tokensUsed-200 < mapBudget {
-			mapBudget = tokenBudget - tokensUsed - 200 // reserve 200 for memories
+			mapBudget = tokenBudget - tokensUsed - 200
 		}
 		if mapBudget > 50 {
-			codeMap := e.getOrGenerateCodeMap(userID)
+			codeMap, moduleEmbs := e.getOrGenerateCodeMap(ctx, userID)
 			if codeMap != nil {
-				mapText := codeMap.RenderAtBudget(mapBudget, nil, nil)
+				mapText := codeMap.RenderAtBudget(mapBudget, queryEmb, moduleEmbs)
 				mapTokens := estimateTokens(mapText)
 				parts = append(parts, "[Codebase Map]\n"+mapText)
 				sources = append(sources, SourceRef{Type: "codemap", ID: userID})
@@ -401,10 +408,16 @@ func (e *Engine) AssembleContext(ctx context.Context, userID string, query strin
 }
 
 // getOrGenerateCodeMap loads a stored code map or generates one on the fly.
-func (e *Engine) getOrGenerateCodeMap(namespace string) *CodeMap {
+// Returns the code map and per-module embeddings (for query-aware ranking).
+func (e *Engine) getOrGenerateCodeMap(ctx context.Context, namespace string) (*CodeMap, map[string][]float32) {
+	_, currentCommit := GetGitState(e.cfg.RootDir)
+
 	stored, _ := e.store.GetCodeMap(namespace)
-	if stored != nil {
-		return &CodeMap{
+	storedEmbs, storedModel, _ := e.store.GetCodeMapEmbeddings(namespace)
+
+	// Use cache if git commit matches and embedding model matches
+	if stored != nil && stored.GitCommit == currentCommit && currentCommit != "" {
+		cm := &CodeMap{
 			Namespace:   stored.Namespace,
 			RootDir:     stored.RootDir,
 			Zoom1:       stored.Zoom1,
@@ -412,28 +425,58 @@ func (e *Engine) getOrGenerateCodeMap(namespace string) *CodeMap {
 			GeneratedAt: stored.GeneratedAt,
 			GitCommit:   stored.GitCommit,
 		}
+		if storedModel == e.embedder.ModelName() && len(storedEmbs) > 0 {
+			return cm, storedEmbs
+		}
+		// Re-embed with current model
+		embs, err := EmbedCodeMap(ctx, cm, e.embedder)
+		if err == nil && embs != nil {
+			flat := flattenEmbeddings(embs)
+			e.store.UpsertCodeMapEmbeddings(namespace, embs, e.embedder.ModelName())
+			return cm, flat
+		}
+		return cm, nil
 	}
 
-	// Auto-generate
+	// Regenerate
 	cm, err := ScanCodebase(e.cfg.RootDir)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	cm.Namespace = namespace
+	cm.GitCommit = currentCommit
 
-	// Get current git commit
-	_, commit := GetGitState(e.cfg.RootDir)
-	cm.GitCommit = commit
-
-	// Store for next time
 	e.store.UpsertCodeMap(namespace, e.cfg.RootDir, cm.Zoom1, cm.MarshalZoom2(), cm.GitCommit)
 
-	return cm
+	embs, err := EmbedCodeMap(ctx, cm, e.embedder)
+	if err == nil && embs != nil {
+		flat := flattenEmbeddings(embs)
+		e.store.UpsertCodeMapEmbeddings(namespace, embs, e.embedder.ModelName())
+		return cm, flat
+	}
+
+	return cm, nil
 }
 
-// StoreCodeMap persists a code map to the database. Called by the CLI `map` command.
-func (e *Engine) StoreCodeMap(namespace string, cm *CodeMap) error {
-	return e.store.UpsertCodeMap(namespace, cm.RootDir, cm.Zoom1, cm.MarshalZoom2(), cm.GitCommit)
+func flattenEmbeddings(embs map[string]ModuleEmbedding) map[string][]float32 {
+	flat := make(map[string][]float32, len(embs))
+	for k, v := range embs {
+		flat[k] = v.Embedding
+	}
+	return flat
+}
+
+// StoreCodeMap persists a code map to the database and embeds modules. Called by the CLI `map` command.
+func (e *Engine) StoreCodeMap(ctx context.Context, namespace string, cm *CodeMap) error {
+	err := e.store.UpsertCodeMap(namespace, cm.RootDir, cm.Zoom1, cm.MarshalZoom2(), cm.GitCommit)
+	if err != nil {
+		return err
+	}
+	embs, embErr := EmbedCodeMap(ctx, cm, e.embedder)
+	if embErr == nil && embs != nil {
+		e.store.UpsertCodeMapEmbeddings(namespace, embs, e.embedder.ModelName())
+	}
+	return nil
 }
 
 // GetLatestSessionMarker returns the most recent session marker for a namespace.
