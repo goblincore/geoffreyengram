@@ -161,6 +161,10 @@ dualmem profile
 dualmem status
 ```
 
+### Claude Code integration
+
+Copy [`docs/example-claude-md.md`](docs/example-claude-md.md) into your `~/.claude/CLAUDE.md` to give Claude Code cross-session memory. It teaches the agent to automatically load context at session start, save decisions/warnings/checkpoints during work, and search memory before exploring the codebase.
+
 ### Memory types
 
 Typed memories are prioritized in context assembly — warnings first, then decisions:
