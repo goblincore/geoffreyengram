@@ -98,6 +98,13 @@ For coding agents and multi-agent systems where context window is the bottleneck
 
 Routes memories by importance: critical ones stay at full fidelity, everything else gets compressed into a hierarchical sketch.
 
+Sectors are configurable via `SectorConfig`. Ships with two presets:
+
+| Preset | Sectors | Detail Bias | Use Case |
+|--------|---------|-------------|----------|
+| `CodingSectors()` | decision, warning, map, continuity | decision, warning | Coding agents (default) |
+| `NPCSectors()` | episodic, semantic, procedural, emotional | semantic, procedural | NPC/character memory |
+
 ```
 Incoming Memory → Importance Scorer
                        │
@@ -113,7 +120,7 @@ Incoming Memory → Importance Scorer
              └─────────────────┘   └─────────────────────┘
 ```
 
-**AssembleContext** is the key method — given a token budget, it assembles a structured context block in priority order: profile → arcs → detail memories → episodes. Returns exactly what fits.
+**AssembleContext** is the key method — given a token budget, it assembles a structured context block in priority order: structural diff → code map (query-ranked) → profile → arcs → detail memories → episodes. Returns exactly what fits.
 
 ```go
 import "github.com/goblincore/geoffreyengram/dualmem"
@@ -160,7 +167,7 @@ dualmem add --type continuity --text "Done: JWT. Remaining: refresh tokens" --fi
 
 `dualmem context` assembles a token-budget-aware context block for the start of each coding session. It combines three things:
 
-**Code map** — multi-resolution structural summary of the codebase. Zoom-1 is a one-line system overview, zoom-2 is per-module with key types and entry points. Generated via Go AST parsing and TypeScript regex heuristics.
+**Code map** — multi-resolution structural summary of the codebase. Zoom-1 is a one-line system overview, zoom-2 is per-module with key types and entry points. Generated via Go AST parsing and TypeScript regex heuristics. Query-aware: module summaries are embedded at scan time, then ranked by cosine similarity to the query at render time. Aggressively filters noise directories (assets, icons, sass, .github, .changeset, etc.). Auto-regenerates when git HEAD changes.
 
 **Structural diff** — git-based delta since the last session. Shows added/modified/deleted files with elapsed time and branch info. Handles branch switches, rebases, and force-pushes gracefully.
 
@@ -184,10 +191,10 @@ Go project. packages: ., dualmem. binaries: cmd/dualmem, cmd/engram-mcp, example
     Types: struct StructuralDiff, struct SketchPath, struct SQLiteStore, ...
     Entry: ComputeStructuralDiff(), DetectStaleMemories(), NewSketchPath(), ...
 
-[⚠ Warning — semantic (importance: 0.83)]
+[⚠ Warning — warning (importance: 0.83)]
 Don't touch: rateLimiter cleanup() skips nil check intentionally
 
-[Decision — reflective (importance: 0.70)] [STALE? file changed since last session]
+[Decision — decision (importance: 0.70)] [STALE? file changed since last session]
 Chose SQLite for zero-setup
   Files: store_sqlite.go
 ```
@@ -199,28 +206,13 @@ dualmem map    # print codebase structure without memories
 dualmem diff   # print changes since last session
 ```
 
-## Comparison Example
-
-Scripted multi-session conversations through 3 modes — **stateless**, **flat RAG**, **full engram** — with LLM-as-judge scoring:
-
-```bash
-GEMINI_API_KEY=... go run ./examples/comparison/ --scenario lily
-```
-
-| Scenario | Character | Tests |
-|----------|-----------|-------|
-| `lily` | Bartender at Club Mutant | Emotional memory + time decay (90-day gap) |
-| `sifu` | Wing Chun instructor | Procedural — skill sequences |
-| `nyx` | Archivist | Semantic — cross-referencing facts |
-| `reeves` | Therapist | All sectors |
-
 ## Project Structure
 
 ```
 geoffreyengram/
 ├── engram.go              # Core engine (Init, Search, Add, Reflect, SimulateTimePassing)
 ├── types.go               # Modality, Sector, Memory, Config, scoring types
-├── providers.go           # EmbeddingProvider, MultimodalEmbeddingProvider, SectorClassifier
+├── providers.go           # EmbeddingProvider (Embed, Dimension, ModelName), MultimodalEmbeddingProvider, SectorClassifier
 ├── store.go               # SQLite persistence, versioned migrations (v1-v3)
 ├── scoring.go             # Composite scoring, cosine similarity, decay
 ├── classify_embedding.go  # EmbeddingClassifier (default, 96% accuracy)
@@ -233,14 +225,15 @@ geoffreyengram/
 ├── reflect.go             # ReflectionProvider, Reflect method
 ├── dualmem/               # Dual-path agent memory engine
 │   ├── dualmem.go         # Engine (New, Add, DualSearch, AssembleContext)
-│   ├── types.go           # Config, Store interface, DetailMemory, Episode, Arc, Profile
+│   ├── types.go           # Config, SectorConfig, Store interface, DetailMemory, Episode, Arc, Profile
 │   ├── detail.go          # Detail Path (importance scoring, capacity management)
 │   ├── sketch.go          # Sketch Path (episodes, arcs, profiles)
 │   ├── pipeline.go        # Background compression workers
-│   ├── codemap.go         # Codebase scanner (Go AST + TS regex), multi-zoom maps
+│   ├── codemap.go         # Codebase scanner (Go AST + TS regex), query-aware ranking via embeddings
 │   ├── diff.go            # Git-based structural diffs, stale memory detection
 │   ├── classify_embedding.go  # EmbeddingClassifier (ported from engram)
-│   └── store_sqlite.go    # SQLite backend
+│   ├── store_sqlite.go    # SQLite backend (migrations v1-v5)
+│   └── project.go         # Random projection, cosine similarity
 ├── cmd/
 │   ├── dualmem/           # CLI tool
 │   └── engram-mcp/        # MCP server (5 tools)
