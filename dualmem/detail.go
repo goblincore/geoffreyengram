@@ -14,11 +14,16 @@ type DetailPath struct {
 }
 
 // NewDetailPath creates a Detail Path manager.
-func NewDetailPath(store Store, embedder EmbeddingProvider, theta float64, maxPerUser int) *DetailPath {
+// detailBias lists sector names that get a scoring bonus toward the Detail Path.
+func NewDetailPath(store Store, embedder EmbeddingProvider, theta float64, maxPerUser int, detailBias []string) *DetailPath {
+	biasSet := make(map[string]bool, len(detailBias))
+	for _, s := range detailBias {
+		biasSet[s] = true
+	}
 	return &DetailPath{
-		store:     store,
-		scorer:    &ImportanceScorer{Theta: theta},
-		embedder:  embedder,
+		store:      store,
+		scorer:     &ImportanceScorer{Theta: theta, DetailBias: biasSet},
+		embedder:   embedder,
 		maxPerUser: maxPerUser,
 	}
 }

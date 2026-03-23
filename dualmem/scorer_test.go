@@ -3,7 +3,40 @@ package dualmem
 import "testing"
 
 func TestSectorBonusScore(t *testing.T) {
+	// Test with CodingSectors defaults
+	coding := CodingSectors()
+	biasSet := make(map[string]bool)
+	for _, s := range coding.DetailBias {
+		biasSet[s] = true
+	}
+	scorer := &ImportanceScorer{Theta: 0.65, DetailBias: biasSet}
+
 	tests := []struct {
+		sector string
+		want   float64
+	}{
+		{"decision", 1.0},
+		{"warning", 1.0},
+		{"map", 0.0},
+		{"continuity", 0.0},
+		{"", 0.0},
+	}
+	for _, tt := range tests {
+		got := scorer.sectorBonusScore(tt.sector)
+		if got != tt.want {
+			t.Errorf("sectorBonusScore(%q) = %v, want %v", tt.sector, got, tt.want)
+		}
+	}
+
+	// Test with NPCSectors
+	npc := NPCSectors()
+	npcBias := make(map[string]bool)
+	for _, s := range npc.DetailBias {
+		npcBias[s] = true
+	}
+	npcScorer := &ImportanceScorer{Theta: 0.65, DetailBias: npcBias}
+
+	npcTests := []struct {
 		sector string
 		want   float64
 	}{
@@ -11,13 +44,11 @@ func TestSectorBonusScore(t *testing.T) {
 		{"procedural", 1.0},
 		{"episodic", 0.0},
 		{"emotional", 0.0},
-		{"reflective", 0.0},
-		{"", 0.0},
 	}
-	for _, tt := range tests {
-		got := sectorBonusScore(tt.sector)
+	for _, tt := range npcTests {
+		got := npcScorer.sectorBonusScore(tt.sector)
 		if got != tt.want {
-			t.Errorf("sectorBonusScore(%q) = %v, want %v", tt.sector, got, tt.want)
+			t.Errorf("NPC sectorBonusScore(%q) = %v, want %v", tt.sector, got, tt.want)
 		}
 	}
 }
@@ -62,22 +93,27 @@ func TestNoveltyScore(t *testing.T) {
 }
 
 func TestImportanceScorer(t *testing.T) {
-	scorer := &ImportanceScorer{Theta: 0.65}
+	coding := CodingSectors()
+	biasSet := make(map[string]bool)
+	for _, s := range coding.DetailBias {
+		biasSet[s] = true
+	}
+	scorer := &ImportanceScorer{Theta: 0.65, DetailBias: biasSet}
 
-	// Semantic sector + high salience + specific content + novel = high importance
-	highScore := scorer.Score("semantic", 0.9, `John prefers "dark roast" coffee (85% arabica)`, 0.0, "")
+	// Decision sector + high salience + specific content + novel = high importance
+	highScore := scorer.Score("decision", 0.9, `Chose SQLite over Postgres for "zero-setup" (85% of users)`, 0.0, "")
 	if !scorer.IsDetail(highScore) {
 		t.Errorf("high-importance memory scored %v, expected >= 0.65 (detail)", highScore)
 	}
 
-	// Episodic sector + default salience + vague content + duplicate = low importance
-	lowScore := scorer.Score("episodic", 0.3, "we talked about stuff", 0.95, "")
+	// Continuity sector + default salience + vague content + duplicate = low importance
+	lowScore := scorer.Score("continuity", 0.3, "we talked about stuff", 0.95, "")
 	if scorer.IsDetail(lowScore) {
 		t.Errorf("low-importance memory scored %v, expected < 0.65 (sketch)", lowScore)
 	}
 
 	// Typed memories always route to Detail regardless of raw score
-	typedScore := scorer.Score("episodic", 0.5, "we talked about stuff", 0.0, "continuity")
+	typedScore := scorer.Score("continuity", 0.5, "we talked about stuff", 0.0, "continuity")
 	if !scorer.IsDetail(typedScore) {
 		t.Errorf("typed continuity memory scored %v, expected >= 0.65 (detail)", typedScore)
 	}

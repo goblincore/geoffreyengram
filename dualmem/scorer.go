@@ -12,14 +12,15 @@ import (
 //
 //	importance = (sectorBonus * 0.3) + (salience * 0.3) + (specificity * 0.2) + (novelty * 0.2)
 type ImportanceScorer struct {
-	Theta float64 // routing threshold (default 0.65)
+	Theta      float64         // routing threshold (default 0.65)
+	DetailBias map[string]bool // sectors that get a 1.0 bonus (biased toward Detail Path)
 }
 
 // Score computes the importance of a memory.
 // existingMaxSim is the max cosine similarity against existing Detail memories (0 if none).
 // memType is the memory type tag ("warning", "decision", "continuity", or "").
 func (s *ImportanceScorer) Score(sector string, salience float64, content string, existingMaxSim float64, memType string) float64 {
-	sectorBonus := sectorBonusScore(sector)
+	sectorBonus := s.sectorBonusScore(sector)
 	specificity := specificityScore(content)
 	novelty := noveltyScore(existingMaxSim)
 
@@ -42,15 +43,13 @@ func (s *ImportanceScorer) IsDetail(score float64) bool {
 	return score >= s.Theta
 }
 
-// sectorBonusScore returns 1.0 for sectors that need precision (semantic, procedural),
-// 0.0 for sectors that compress well (episodic, emotional, reflective).
-func sectorBonusScore(sector string) float64 {
-	switch strings.ToLower(sector) {
-	case "semantic", "procedural":
+// sectorBonusScore returns 1.0 for sectors in the DetailBias set,
+// 0.0 for everything else.
+func (s *ImportanceScorer) sectorBonusScore(sector string) float64 {
+	if s.DetailBias[strings.ToLower(sector)] {
 		return 1.0
-	default:
-		return 0.0
 	}
+	return 0.0
 }
 
 // Heuristic regex patterns for specificity detection.

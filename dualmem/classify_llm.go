@@ -16,27 +16,30 @@ import (
 // where the user is waiting anyway. For NPC/real-time usage, use a heuristic
 // classifier or the async LLMClassifier from the engram package.
 type GeminiClassifier struct {
-	apiKey string
-	client *http.Client
+	apiKey        string
+	client        *http.Client
+	sectors       *SectorConfig
 }
 
 // NewGeminiClassifier creates a synchronous LLM-based sector classifier.
-func NewGeminiClassifier(apiKey string) *GeminiClassifier {
+// The sectors config determines which sectors are available and their descriptions.
+func NewGeminiClassifier(apiKey string, sectors *SectorConfig) *GeminiClassifier {
 	return &GeminiClassifier{
-		apiKey: apiKey,
-		client: &http.Client{Timeout: 10 * time.Second},
+		apiKey:  apiKey,
+		client:  &http.Client{Timeout: 10 * time.Second},
+		sectors: sectors,
 	}
 }
 
 // Classify calls Gemini Flash Lite to classify content into a cognitive sector.
-// Returns "semantic" as fallback on any error.
+// Returns the default sector as fallback on any error.
 func (c *GeminiClassifier) Classify(content string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	sector, err := c.llmClassify(ctx, content)
 	if err != nil {
-		return "semantic" // safe default
+		return c.sectors.Default
 	}
 	return sector
 }
@@ -44,16 +47,15 @@ func (c *GeminiClassifier) Classify(content string) string {
 func (c *GeminiClassifier) llmClassify(ctx context.Context, content string) (string, error) {
 	url := "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=" + c.apiKey
 
-	prompt := `Classify this memory into exactly one cognitive sector. Reply with ONLY the sector name, nothing else.
+	// Build sector list dynamically from config
+	var sectorLines []string
+	for name, desc := range c.sectors.Anchors {
+		sectorLines = append(sectorLines, fmt.Sprintf("- %s: %s", name, desc))
+	}
 
-Sectors:
-- episodic: specific events, experiences, things that happened at a particular time
-- semantic: facts, knowledge, preferences, stable truths about someone or something
-- procedural: skills, techniques, how-to knowledge, learned methods, processes
-- emotional: feelings, sentiments, emotional reactions, moods
-- reflective: patterns, meta-observations, insights connecting multiple experiences
-
-Memory: "` + content + `"`
+	prompt := "Classify this memory into exactly one sector. Reply with ONLY the sector name, nothing else.\n\nSectors:\n" +
+		strings.Join(sectorLines, "\n") +
+		"\n\nMemory: \"" + content + "\""
 
 	reqBody := map[string]any{
 		"contents": []map[string]any{
@@ -105,18 +107,12 @@ Memory: "` + content + `"`
 	}
 
 	text := strings.TrimSpace(strings.ToLower(geminiResp.Candidates[0].Content.Parts[0].Text))
-	switch {
-	case strings.Contains(text, "episodic"):
-		return "episodic", nil
-	case strings.Contains(text, "semantic"):
-		return "semantic", nil
-	case strings.Contains(text, "procedural"):
-		return "procedural", nil
-	case strings.Contains(text, "emotional"):
-		return "emotional", nil
-	case strings.Contains(text, "reflective"):
-		return "reflective", nil
-	default:
-		return "semantic", nil
+
+	// Match against configured sector names
+	for name := range c.sectors.Anchors {
+		if strings.Contains(text, strings.ToLower(name)) {
+			return name, nil
+		}
 	}
+	return c.sectors.Default, nil
 }
