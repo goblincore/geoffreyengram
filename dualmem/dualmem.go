@@ -70,7 +70,7 @@ func New(cfg Config) (*Engine, error) {
 
 	e := &Engine{
 		store:      store,
-		detail:     NewDetailPath(store, cfg.EmbeddingProvider, cfg.ImportanceTheta, cfg.MaxDetailPerUser),
+		detail:     NewDetailPath(store, cfg.EmbeddingProvider, cfg.ImportanceTheta, cfg.MaxDetailPerUser, cfg.Sectors.DetailBias),
 		sketch:     NewSketchPath(store, projector, cfg.EmbeddingProvider),
 		projector:  projector,
 		embedder:   cfg.EmbeddingProvider,
@@ -113,6 +113,9 @@ func (e *Engine) Search(query, userID string, limit int, weights map[string]floa
 	return results.DetailMemories
 }
 
+// Embedder returns the engine's embedding provider.
+func (e *Engine) Embedder() EmbeddingProvider { return e.embedder }
+
 // --- Extended API ---
 
 // AddWithOptions stores a memory with full options, routing to Detail or Sketch Path.
@@ -148,7 +151,7 @@ func (e *Engine) AddWithOptions(ctx context.Context, input MemoryInput, userID s
 		}
 	}
 	if sector == "" {
-		sector = "episodic"
+		sector = e.cfg.Sectors.Default
 	}
 
 	// Extract entities
@@ -209,10 +212,16 @@ func (e *Engine) DualSearch(ctx context.Context, userID string, query string, op
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	// Embed query
-	queryEmb, err := e.embedder.Embed(ctx, query, "RETRIEVAL_QUERY")
-	if err != nil {
-		return nil, fmt.Errorf("dualmem: embed query: %w", err)
+	// Embed query (or use pre-computed)
+	var queryEmb []float32
+	if opts.QueryEmbedding != nil {
+		queryEmb = opts.QueryEmbedding
+	} else {
+		var err error
+		queryEmb, err = e.embedder.Embed(ctx, query, "RETRIEVAL_QUERY")
+		if err != nil {
+			return nil, fmt.Errorf("dualmem: embed query: %w", err)
+		}
 	}
 
 	result := &DualSearchResult{}

@@ -295,6 +295,39 @@ func TestEngineDropInCompatibility(t *testing.T) {
 	t.Log("Drop-in compatibility: Add and Search work with Engram-compatible signatures")
 }
 
+func TestDualSearch_UsesPrecomputedEmbedding(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Add a test memory using AddWithOptions (Add has a different signature)
+	err := engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "credential review validation logic",
+		SectorHint:  "decision",
+		Salience:    0.9,
+	}, "testuser")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-compute embedding
+	emb, err := engine.Embedder().Embed(ctx, "credential review", "RETRIEVAL_QUERY")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Search with pre-computed embedding
+	results, err := engine.DualSearch(ctx, "testuser", "credential review", SearchOpts{
+		Limit:          5,
+		QueryEmbedding: emb,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results.DetailMemories) == 0 {
+		t.Fatal("expected at least one detail memory")
+	}
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a

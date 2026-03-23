@@ -59,14 +59,15 @@ type Entity struct {
 
 // SearchOpts configures dual-path search.
 type SearchOpts struct {
-	Limit         int               // Max detail memories to return (default 5)
-	Weights       map[string]float64 // Per-sector retrieval weights (nil = equal)
-	After         *time.Time        // Temporal filter: only after
-	Before        *time.Time        // Temporal filter: only before
-	SessionID     string            // Filter to session
-	Sectors       []string          // Filter to sectors
-	IncludeSketch bool              // Include sketch results (default true)
-	TokenBudget   int               // If > 0, limits total context size
+	Limit          int                // Max detail memories to return (default 5)
+	Weights        map[string]float64 // Per-sector retrieval weights (nil = equal)
+	After          *time.Time         // Temporal filter: only after
+	Before         *time.Time         // Temporal filter: only before
+	SessionID      string             // Filter to session
+	Sectors        []string           // Filter to sectors
+	IncludeSketch  bool               // Include sketch results (default true)
+	TokenBudget    int                // If > 0, limits total context size
+	QueryEmbedding []float32          // Pre-computed query embedding; if non-nil, DualSearch skips embedding
 }
 
 // DualSearchResult contains results from both paths.
