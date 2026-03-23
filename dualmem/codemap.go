@@ -39,6 +39,17 @@ var skipDirs = map[string]bool{
 	".git": true, "node_modules": true, "vendor": true, "__pycache__": true,
 	".next": true, "dist": true, "build": true, ".claude": true, ".vscode": true,
 	".idea": true, "coverage": true, ".nyc_output": true, "target": true,
+	".nx-cache": true, ".github": true, ".changeset": true, ".superpowers": true,
+	".turbo": true, ".cache": true, ".parcel-cache": true, ".output": true,
+	".nuxt": true, ".svelte-kit": true, "tmp": true, "temp": true, "logs": true,
+	".vexp": true,
+}
+
+// skipExactNames filters out non-code content directories by exact base name.
+var skipExactNames = map[string]bool{
+	"assets": true, "images": true, "icons": true, "fonts": true,
+	"sass": true, "scss": true, "styles": true, "css": true,
+	"fixtures": true, "snapshots": true, "__snapshots__": true, "__mocks__": true,
 }
 
 // ScanCodebase walks a directory tree and builds a multi-resolution code map.
@@ -65,7 +76,7 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 			return nil // skip errors
 		}
 		if info.IsDir() {
-			if skipDirs[info.Name()] {
+			if skipDirs[info.Name()] || skipExactNames[info.Name()] {
 				return filepath.SkipDir
 			}
 			rel, _ := filepath.Rel(rootDir, path)
@@ -112,8 +123,7 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 		case len(d.tsFiles) > 0:
 			mod = parseTypeScriptModule(d.relPath, d.tsFiles)
 		default:
-			// Only include directories with 3+ files or meaningful names
-			if len(d.allFiles) >= 3 || isInterestingDir(d.relPath) {
+			if isInterestingDir(d.relPath) {
 				mod = &ModuleMap{
 					Path:      d.relPath + "/",
 					Language:  detectLanguage(d.allFiles),

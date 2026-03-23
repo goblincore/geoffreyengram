@@ -1,6 +1,7 @@
 package dualmem
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -217,6 +218,64 @@ func TestEmbeddingProviderModelName(t *testing.T) {
 		t.Error("ModelName() returned empty string; expected a non-empty model identifier")
 	}
 	t.Logf("ModelName() = %q", name)
+}
+
+func TestScanCodebase_FiltersNonCodeDirs(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Code directory — should be included
+	codeDir := filepath.Join(tmpDir, "src", "auth")
+	os.MkdirAll(codeDir, 0755)
+	writeFile(t, codeDir, "auth.ts", `export function login(): void {}`)
+
+	// Asset directories — should be excluded
+	for _, name := range []string{"images", "icons", "fonts", "sass"} {
+		d := filepath.Join(tmpDir, "src", name)
+		os.MkdirAll(d, 0755)
+		for i := 0; i < 5; i++ {
+			writeFile(t, d, fmt.Sprintf("file%d.png", i), "data")
+		}
+	}
+
+	// Tool directories — should be excluded
+	for _, name := range []string{".github", ".changeset", ".superpowers"} {
+		d := filepath.Join(tmpDir, name)
+		os.MkdirAll(d, 0755)
+		for i := 0; i < 5; i++ {
+			writeFile(t, d, fmt.Sprintf("file%d.yml", i), "data")
+		}
+	}
+
+	// Non-interesting "other" dir with files but no code — should be excluded
+	miscDir := filepath.Join(tmpDir, "random-stuff")
+	os.MkdirAll(miscDir, 0755)
+	for i := 0; i < 10; i++ {
+		writeFile(t, miscDir, fmt.Sprintf("file%d.txt", i), "data")
+	}
+
+	cm, err := ScanCodebase(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, m := range cm.Zoom2 {
+		for _, bad := range []string{"images", "icons", "fonts", "sass", ".github", ".changeset", ".superpowers", "random-stuff"} {
+			if strings.Contains(m.Path, bad) {
+				t.Errorf("should not include %q in codemap, got module %q", bad, m.Path)
+			}
+		}
+	}
+
+	// Code directory should survive
+	foundAuth := false
+	for _, m := range cm.Zoom2 {
+		if strings.Contains(m.Path, "auth") {
+			foundAuth = true
+		}
+	}
+	if !foundAuth {
+		t.Error("expected src/auth/ module in codemap")
+	}
 }
 
 func writeFile(t *testing.T, dir, name, content string) {
