@@ -152,6 +152,8 @@ dualmem diff                                  # changes since last session
 dualmem promote --id <memory-id>              # move sketch → detail
 dualmem promote --all --type warning          # batch re-evaluate all raw sketch entries
 dualmem demote --id <memory-id>               # move detail → sketch
+dualmem gc                                    # clean stale/expired/superseded memories
+dualmem gc --dry-run --verbose                # preview what gc would do
 dualmem profile
 dualmem status
 ```
@@ -186,6 +188,30 @@ dualmem demote --id abc123
 ```
 
 Also available via API: `POST /v1/memory/promote` with `{"user_id", "memory_id", "type", "salience"}`.
+
+### Garbage collection
+
+Over time, continuity entries accumulate — you add "remaining: auth, payments" and later "remaining: payments" but the old one is still there saying auth isn't done. `dualmem gc` cleans these up automatically.
+
+```bash
+# Preview what would be cleaned
+dualmem gc --dry-run --verbose
+
+# Run cleanup
+dualmem gc
+```
+
+GC runs five cleanup strategies in order:
+
+1. **Expire episodes** — delete episodes past the retention window (default 30 days)
+2. **Expire arcs** — delete arcs past the retention window (default 90 days)
+3. **Git-stale demotion** — demote detail memories whose associated files changed since last session (warnings exempt)
+4. **Continuity supersession** — when multiple continuity entries cover the same topic (cosine similarity > 0.75), keep the newest, demote the rest
+5. **Access-cold demotion** — demote detail memories not accessed in 30+ days with importance < 0.8 (warnings exempt)
+
+Supersession also runs automatically on `add --type continuity` — adding a new continuity entry auto-demotes older similar ones, so stale status entries don't accumulate.
+
+Additionally, `AssembleContext` applies access-recency weighting: memories not accessed in 60+ days are ranked lower within their priority tier. Warnings are always exempt from recency decay.
 
 ### Session context
 
@@ -238,7 +264,7 @@ Both systems share embedding providers and SQLite storage, but they're designed 
 |---|---|---|
 | **Designed for** | NPCs, companions, chatbots | Coding agents, multi-agent systems |
 | **Search scoring** | Composite: similarity + salience + recency + entity links | Pure cosine similarity (Detail Path) |
-| **Memory decay** | Exponential decay — old small talk fades naturally | No decay. Fixed-capacity eviction + hierarchical compression |
+| **Memory decay** | Exponential decay — old small talk fades naturally | Garbage collection (expiry, supersession, access-cold demotion) + hierarchical compression |
 | **Entity graph** | Waypoints — mentioning a song surfaces the person you heard it with | Entities stored as metadata only, no associative expansion |
 | **Reflective synthesis** | `Reflect()` creates meta-memories ("they always mention music when stressed") | Not available |
 | **Multimodal** | Text, images, audio in same vector space (Gemini Embedding 2) | Text only |
@@ -265,14 +291,15 @@ geoffreyengram/
 ├── waypoints.go           # Entity graph, associative expansion
 ├── reflect.go             # ReflectionProvider, Reflect method
 ├── dualmem/               # Dual-path agent memory engine
-│   ├── dualmem.go         # Engine (New, Add, DualSearch, AssembleContext, PromoteToDetail, ReEvaluateSketchRaw)
-│   ├── types.go           # Config, SectorConfig, Store interface, DetailMemory, Episode, Arc, Profile
+│   ├── dualmem.go         # Engine (New, Add, DualSearch, AssembleContext, GarbageCollect, PromoteToDetail)
+│   ├── types.go           # Config, SectorConfig, GCOptions, Store interface, DetailMemory, Episode, Arc
 │   ├── detail.go          # Detail Path (importance scoring, capacity management)
 │   ├── sketch.go          # Sketch Path (episodes, arcs, profiles)
 │   ├── pipeline.go        # Background compression workers
 │   ├── codemap.go         # Codebase scanner (Go AST + TS regex), query-aware ranking via embeddings
 │   ├── diff.go            # Git-based structural diffs, stale memory detection
 │   ├── classify_embedding.go  # EmbeddingClassifier (ported from engram)
+│   ├── summarize_gemini.go    # GeminiSummarizer (episode/arc/profile compression)
 │   ├── store_sqlite.go    # SQLite backend (migrations v1-v5)
 │   └── project.go         # Random projection, cosine similarity
 ├── cmd/
@@ -285,7 +312,7 @@ geoffreyengram/
 
 ## Status
 
-Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 172 tests passing.
+Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 181+ tests passing.
 
 ## License
 
