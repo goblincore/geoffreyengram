@@ -284,3 +284,57 @@ func writeFile(t *testing.T, dir, name, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestCodeMapEmbeddings_StoreRoundTrip(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	embeddings := map[string]ModuleEmbedding{
+		"engine/": {
+			Summary:   "engine/ — Go package engine. Types: struct Engine",
+			Embedding: []float32{0.1, 0.2, 0.3},
+		},
+		"store/": {
+			Summary:   "store/ — Go package store. Types: struct SQLiteStore",
+			Embedding: []float32{0.4, 0.5, 0.6},
+		},
+	}
+
+	// Upsert
+	err = store.UpsertCodeMapEmbeddings("test-ns", embeddings, "mock-embedder")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Retrieve
+	got, model, err := store.GetCodeMapEmbeddings("test-ns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model != "mock-embedder" {
+		t.Errorf("model = %q, want mock-embedder", model)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d embeddings, want 2", len(got))
+	}
+	if len(got["engine/"]) != 3 {
+		t.Errorf("engine/ embedding len = %d, want 3", len(got["engine/"]))
+	}
+
+	// Delete
+	err = store.DeleteCodeMapEmbeddings("test-ns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got2, _, err := store.GetCodeMapEmbeddings("test-ns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got2) != 0 {
+		t.Errorf("expected empty after delete, got %d", len(got2))
+	}
+}

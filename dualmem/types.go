@@ -293,12 +293,23 @@ type Store interface {
 	UpsertCodeMap(namespace, rootDir, zoom1, zoom2JSON, gitCommit string) error
 	GetCodeMap(namespace string) (*StoredCodeMap, error)
 
+	// Code map embeddings
+	UpsertCodeMapEmbeddings(namespace string, embeddings map[string]ModuleEmbedding, embeddingModel string) error
+	GetCodeMapEmbeddings(namespace string) (map[string][]float32, string, error)
+	DeleteCodeMapEmbeddings(namespace string) error
+
 	// Session markers
 	InsertSessionMarker(marker *SessionMarker) error
 	GetLatestSessionMarker(namespace string) (*SessionMarker, error)
 
 	// Lifecycle
 	Close() error
+}
+
+// ModuleEmbedding pairs a module's summary text with its embedding vector.
+type ModuleEmbedding struct {
+	Summary   string
+	Embedding []float32
 }
 
 // StoredCodeMap is a code map as persisted in SQLite.

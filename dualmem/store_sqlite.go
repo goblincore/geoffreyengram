@@ -158,6 +158,18 @@ func (s *SQLiteStore) migrate() error {
 		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (4)`)
 	}
 
+	if version < 5 {
+		s.db.Exec(`CREATE TABLE IF NOT EXISTS code_map_embeddings (
+			namespace       TEXT NOT NULL,
+			module_path     TEXT NOT NULL,
+			summary         TEXT NOT NULL,
+			embedding       BLOB NOT NULL,
+			embedding_model TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (namespace, module_path)
+		)`)
+		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (5)`)
+	}
+
 	return nil
 }
 
@@ -598,6 +610,60 @@ func (s *SQLiteStore) GetCodeMap(namespace string) (*StoredCodeMap, error) {
 	}
 	cm.GeneratedAt, _ = time.Parse("2006-01-02 15:04:05", genAt)
 	return &cm, nil
+}
+
+// --- Code map embeddings ---
+
+func (s *SQLiteStore) UpsertCodeMapEmbeddings(namespace string, embeddings map[string]ModuleEmbedding, embeddingModel string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	tx.Exec(`DELETE FROM code_map_embeddings WHERE namespace = ?`, namespace)
+
+	stmt, err := tx.Prepare(`INSERT INTO code_map_embeddings (namespace, module_path, summary, embedding, embedding_model) VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for path, me := range embeddings {
+		_, err := stmt.Exec(namespace, path, me.Summary, encodeVector(me.Embedding), embeddingModel)
+		if err != nil {
+			return fmt.Errorf("insert embedding %s: %w", path, err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (s *SQLiteStore) GetCodeMapEmbeddings(namespace string) (map[string][]float32, string, error) {
+	rows, err := s.db.Query(`SELECT module_path, embedding, embedding_model FROM code_map_embeddings WHERE namespace = ?`, namespace)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+
+	result := make(map[string][]float32)
+	var model string
+	for rows.Next() {
+		var path string
+		var embBlob []byte
+		var m string
+		if err := rows.Scan(&path, &embBlob, &m); err != nil {
+			return nil, "", err
+		}
+		result[path] = decodeVector(embBlob)
+		model = m
+	}
+	return result, model, rows.Err()
+}
+
+func (s *SQLiteStore) DeleteCodeMapEmbeddings(namespace string) error {
+	_, err := s.db.Exec(`DELETE FROM code_map_embeddings WHERE namespace = ?`, namespace)
+	return err
 }
 
 // --- Session markers ---
