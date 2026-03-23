@@ -120,7 +120,7 @@ Incoming Memory → Importance Scorer
              └─────────────────┘   └─────────────────────┘
 ```
 
-**AssembleContext** is the key method — given a token budget, it assembles a structured context block in priority order: structural diff → code map (query-ranked) → profile → arcs → detail memories → episodes. Returns exactly what fits.
+**AssembleContext** is the key method — given a token budget, it assembles a structured context block in priority order: structural diff → code map (query-ranked) → checkpoints → profile → arcs → detail memories → episodes. Returns exactly what fits. **Task-aware**: auto-detects intent from the query (debug, continue, feature, explore) and adjusts memory type weights accordingly — debugging boosts warnings, resuming boosts continuity.
 
 ```go
 import "github.com/goblincore/geoffreyengram/dualmem"
@@ -146,14 +146,17 @@ export GEMINI_API_KEY=your-key
 
 dualmem add --text "Auth uses JWT, not sessions" --type decision --salience 0.9
 dualmem search "database" --limit 5
-dualmem context "auth system" --budget 3000   # memories + code map + diff
-dualmem map                                   # codebase structure map
-dualmem diff                                  # changes since last session
-dualmem promote --id <memory-id>              # move sketch → detail
-dualmem promote --all --type warning          # batch re-evaluate all raw sketch entries
-dualmem demote --id <memory-id>               # move detail → sketch
-dualmem gc                                    # clean stale/expired/superseded memories
-dualmem gc --dry-run --verbose                # preview what gc would do
+dualmem context "auth system" --budget 3000             # memories + code map + diff
+dualmem context "fix the bug" --intent debug            # explicit intent override
+dualmem checkpoint --task "auth refactor" --status in_progress --files "auth.go" --done "JWT" --remaining "refresh,logout"
+dualmem checkpoint --list                               # view active checkpoints
+dualmem map                                             # codebase structure map
+dualmem diff                                            # changes since last session
+dualmem promote --id <memory-id>                        # move sketch → detail
+dualmem promote --all --type warning                    # batch re-evaluate all raw sketch entries
+dualmem demote --id <memory-id>                         # move detail → sketch
+dualmem gc                                              # clean stale/expired/superseded memories
+dualmem gc --dry-run --verbose                          # preview what gc would do
 dualmem profile
 dualmem status
 ```
@@ -166,6 +169,53 @@ Typed memories are prioritized in context assembly — warnings first, then deci
 dualmem add --type warning --text "Don't touch rateLimiter cleanup()" --files "rate_limiter.go" --salience 0.9
 dualmem add --type decision --text "Rejected Postgres, chose SQLite" --files "store_sqlite.go"
 dualmem add --type continuity --text "Done: JWT. Remaining: refresh tokens" --files "auth.go,jwt.go"
+```
+
+### Task-aware context
+
+`AssembleContext` auto-detects the task intent from the query string and adjusts how memory types are ranked. This means "fix the bug" prioritizes warnings and decisions, while "resume work" prioritizes continuity entries and file maps.
+
+| Intent | Trigger keywords | Boosts | Suppresses |
+|--------|-----------------|--------|------------|
+| `debug` | fix, bug, error, crash, fail, debug | warnings (2x), decisions (1.5x) | continuity (0.5x) |
+| `continue` | continue, resume, pick up, session context | continuity (2x), maps (1.5x) | general (0.8x) |
+| `feature` | add, implement, create, build | decisions (1.5x), maps (1.5x) | continuity (0.8x) |
+| `explore` | where is, how does, explain, architecture | maps (2x), general (1.2x) | continuity (0.5x) |
+
+Override with `--intent`:
+
+```bash
+dualmem context "auth system" --intent debug    # force debug weighting
+dualmem context "auth system" --intent continue  # force continue weighting
+```
+
+### Checkpoints
+
+Structured session handoffs that replace free-form continuity prose. Checkpoints have typed fields for task, status, files, completed/remaining steps, and blockers. They auto-supersede — saving a new checkpoint for the same task replaces the old one.
+
+```bash
+# Save a checkpoint
+dualmem checkpoint --task "auth refactor" --status in_progress \
+  --files "auth.go,middleware.go" \
+  --done "JWT validation,middleware setup" \
+  --remaining "refresh tokens,logout endpoint" \
+  --decision "JWT vs session tokens"
+
+# List active checkpoints
+dualmem checkpoint --list
+
+# Checkpoint with blocker
+dualmem checkpoint --task "auth refactor" --status blocked --blocked "waiting for API spec"
+```
+
+In `dualmem context` output, checkpoints render as compact structured blocks at the top:
+
+```
+[Checkpoint: auth refactor] status=in_progress
+  Files: auth.go, middleware.go
+  Pending decision: JWT vs session tokens
+  Done: JWT validation; middleware setup
+  Remaining: refresh tokens; logout endpoint
 ```
 
 ### Promote / demote
@@ -215,11 +265,13 @@ Additionally, `AssembleContext` applies access-recency weighting: memories not a
 
 ### Session context
 
-`dualmem context` assembles a token-budget-aware context block for the start of each coding session. It combines three things:
+`dualmem context` assembles a token-budget-aware context block for the start of each coding session. It combines four things:
 
 **Code map** — multi-resolution structural summary of the codebase. Zoom-1 is a one-line system overview, zoom-2 is per-module with key types and entry points. Generated via Go AST parsing and TypeScript regex heuristics. Query-aware: module summaries are embedded at scan time, then ranked by cosine similarity to the query at render time. Aggressively filters noise directories (assets, icons, sass, .github, .changeset, etc.). Auto-regenerates when git HEAD changes.
 
 **Structural diff** — git-based delta since the last session. Shows added/modified/deleted files with elapsed time and branch info. Handles branch switches, rebases, and force-pushes gracefully.
+
+**Structured checkpoints** — typed session handoffs (task, status, files, steps, blockers) render as compact structured blocks before other memories. Auto-supersede by task name.
 
 **Stale memory detection** — memories with `--files` associations are cross-referenced against the diff. If a referenced file was modified or deleted, the memory is tagged `[STALE?]` in context output.
 
@@ -291,8 +343,8 @@ geoffreyengram/
 ├── waypoints.go           # Entity graph, associative expansion
 ├── reflect.go             # ReflectionProvider, Reflect method
 ├── dualmem/               # Dual-path agent memory engine
-│   ├── dualmem.go         # Engine (New, Add, DualSearch, AssembleContext, GarbageCollect, PromoteToDetail)
-│   ├── types.go           # Config, SectorConfig, GCOptions, Store interface, DetailMemory, Episode, Arc
+│   ├── dualmem.go         # Engine (New, Add, DualSearch, AssembleContext, SaveCheckpoint, GarbageCollect, PromoteToDetail)
+│   ├── types.go           # Config, SectorConfig, Intent, Checkpoint, GCOptions, Store interface
 │   ├── detail.go          # Detail Path (importance scoring, capacity management)
 │   ├── sketch.go          # Sketch Path (episodes, arcs, profiles)
 │   ├── pipeline.go        # Background compression workers
@@ -312,7 +364,7 @@ geoffreyengram/
 
 ## Status
 
-Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 181+ tests passing.
+Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 216 tests passing.
 
 ## License
 

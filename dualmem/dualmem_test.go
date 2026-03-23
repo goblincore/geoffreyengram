@@ -837,3 +837,307 @@ func TestGetDetailsByType(t *testing.T) {
 		t.Errorf("expected 1 warning, got %d", len(warnings))
 	}
 }
+
+func TestDetectIntent(t *testing.T) {
+	tests := []struct {
+		query  string
+		expect Intent
+	}{
+		// Debug
+		{"fix the bug in codemap", IntentDebug},
+		{"error in AssembleContext", IntentDebug},
+		{"why is the test failing", IntentDebug},
+		{"crash on nil pointer", IntentDebug},
+		{"debug the search ranking", IntentDebug},
+
+		// Continue
+		{"continue yesterday's work", IntentContinue},
+		{"resume the auth refactor", IntentContinue},
+		{"pick up where we left off", IntentContinue},
+		{"session context", IntentContinue},
+
+		// Explore
+		{"where is the embedding logic", IntentExplore},
+		{"how does the pipeline work", IntentExplore},
+		{"explain the sketch path", IntentExplore},
+		{"architecture overview", IntentExplore},
+
+		// Feature
+		{"add a new CLI command", IntentFeature},
+		{"implement intent detection", IntentFeature},
+		{"create a checkpoint system", IntentFeature},
+		{"build a migration tool", IntentFeature},
+
+		// Default (no strong signal)
+		{"coffee preferences", IntentDefault},
+		{"memory system", IntentDefault},
+		{"dualmem", IntentDefault},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			got := DetectIntent(tt.query)
+			if got != tt.expect {
+				t.Errorf("DetectIntent(%q) = %q, want %q", tt.query, got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestIntentProfileTypeMultiplier(t *testing.T) {
+	debug := IntentProfiles[IntentDebug]
+
+	if m := debug.TypeMultiplier("warning"); m != 2.0 {
+		t.Errorf("debug.warning = %.1f, want 2.0", m)
+	}
+	if m := debug.TypeMultiplier("continuity"); m != 0.5 {
+		t.Errorf("debug.continuity = %.1f, want 0.5", m)
+	}
+
+	cont := IntentProfiles[IntentContinue]
+	if m := cont.TypeMultiplier("continuity"); m != 2.0 {
+		t.Errorf("continue.continuity = %.1f, want 2.0", m)
+	}
+
+	explore := IntentProfiles[IntentExplore]
+	if m := explore.TypeMultiplier("map"); m != 2.0 {
+		t.Errorf("explore.map = %.1f, want 2.0", m)
+	}
+}
+
+func TestDetailSortScoreWithIntent(t *testing.T) {
+	now := time.Now()
+	recent := now.Add(-1 * time.Hour)
+
+	warning := DetailMemory{Type: "warning", LastAccessedAt: recent}
+	decision := DetailMemory{Type: "decision", LastAccessedAt: recent}
+	continuity := DetailMemory{Type: "continuity", LastAccessedAt: recent}
+	general := DetailMemory{Type: "", LastAccessedAt: recent}
+
+	// Without intent: warnings > decisions/continuity > general
+	wScore := detailSortScore(warning, nil, now)
+	dScore := detailSortScore(decision, nil, now)
+	cScore := detailSortScore(continuity, nil, now)
+	gScore := detailSortScore(general, nil, now)
+
+	if wScore <= dScore {
+		t.Errorf("without intent: warning (%.2f) should > decision (%.2f)", wScore, dScore)
+	}
+	if dScore <= gScore {
+		t.Errorf("without intent: decision (%.2f) should > general (%.2f)", dScore, gScore)
+	}
+
+	// With debug intent: warnings boosted even more, continuity suppressed
+	debugProfile := IntentProfiles[IntentDebug]
+	wDebug := detailSortScore(warning, &debugProfile, now)
+	cDebug := detailSortScore(continuity, &debugProfile, now)
+	gDebug := detailSortScore(general, &debugProfile, now)
+
+	if wDebug <= wScore {
+		t.Errorf("debug intent should boost warnings: %.2f vs %.2f", wDebug, wScore)
+	}
+	if cDebug >= cScore {
+		t.Errorf("debug intent should suppress continuity: %.2f vs %.2f", cDebug, cScore)
+	}
+
+	// With continue intent: continuity boosted
+	contProfile := IntentProfiles[IntentContinue]
+	cCont := detailSortScore(continuity, &contProfile, now)
+	if cCont <= cScore {
+		t.Errorf("continue intent should boost continuity: %.2f vs %.2f", cCont, cScore)
+	}
+
+	_ = gScore
+	_ = gDebug
+}
+
+func TestAssembleContextWithIntent(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Add memories of different types
+	memories := []MemoryInput{
+		{UserMessage: "Don't modify the rate limiter cleanup code", SectorHint: "warning", Salience: 0.9, Type: "warning"},
+		{UserMessage: "Chose SQLite over Postgres for zero-setup", SectorHint: "decision", Salience: 0.8, Type: "decision"},
+		{UserMessage: "In progress: auth refactor, done JWT, remaining refresh", SectorHint: "continuity", Salience: 0.7, Type: "continuity"},
+		{UserMessage: "Auth logic in Nakama RPCs, not middleware", SectorHint: "map", Salience: 0.7, Type: ""},
+	}
+	for _, m := range memories {
+		if err := engine.AddWithOptions(ctx, m, "user1"); err != nil {
+			t.Fatalf("AddWithOptions: %v", err)
+		}
+	}
+
+	// Assemble with debug intent
+	debugBlock, err := engine.AssembleContextWith(ctx, "user1", "fix the bug", 5000, &ContextOpts{Intent: IntentDebug})
+	if err != nil {
+		t.Fatalf("AssembleContextWith debug: %v", err)
+	}
+	if debugBlock.Intent != IntentDebug {
+		t.Errorf("expected intent debug, got %q", debugBlock.Intent)
+	}
+
+	// Assemble with continue intent
+	contBlock, err := engine.AssembleContextWith(ctx, "user1", "resume work", 5000, &ContextOpts{Intent: IntentContinue})
+	if err != nil {
+		t.Fatalf("AssembleContextWith continue: %v", err)
+	}
+	if contBlock.Intent != IntentContinue {
+		t.Errorf("expected intent continue, got %q", contBlock.Intent)
+	}
+
+	// Auto-detect: "session context" should resolve to continue
+	autoBlock, err := engine.AssembleContextWith(ctx, "user1", "session context", 5000, nil)
+	if err != nil {
+		t.Fatalf("AssembleContextWith auto: %v", err)
+	}
+	if autoBlock.Intent != IntentContinue {
+		t.Errorf("expected auto-detected intent continue for 'session context', got %q", autoBlock.Intent)
+	}
+}
+
+func TestSaveAndGetCheckpoints(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Save a checkpoint
+	cp := &Checkpoint{
+		Task:           "auth refactor",
+		Status:         "in_progress",
+		FilesActive:    []string{"auth.go", "middleware.go"},
+		CompletedSteps: []string{"JWT validation", "middleware setup"},
+		RemainingSteps: []string{"refresh tokens", "logout endpoint"},
+	}
+	if err := engine.SaveCheckpoint(ctx, "user1", cp); err != nil {
+		t.Fatalf("SaveCheckpoint: %v", err)
+	}
+
+	// Retrieve it
+	checkpoints, err := engine.GetCheckpoints(ctx, "user1")
+	if err != nil {
+		t.Fatalf("GetCheckpoints: %v", err)
+	}
+	if len(checkpoints) != 1 {
+		t.Fatalf("expected 1 checkpoint, got %d", len(checkpoints))
+	}
+	if checkpoints[0].Task != "auth refactor" {
+		t.Errorf("task = %q, want %q", checkpoints[0].Task, "auth refactor")
+	}
+	if len(checkpoints[0].RemainingSteps) != 2 {
+		t.Errorf("remaining steps = %d, want 2", len(checkpoints[0].RemainingSteps))
+	}
+}
+
+func TestCheckpointSupersession(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Save initial checkpoint
+	cp1 := &Checkpoint{
+		Task:           "auth refactor",
+		Status:         "in_progress",
+		CompletedSteps: []string{"JWT validation"},
+		RemainingSteps: []string{"refresh tokens", "logout"},
+	}
+	if err := engine.SaveCheckpoint(ctx, "user1", cp1); err != nil {
+		t.Fatal(err)
+	}
+
+	// Save updated checkpoint with same task — should supersede
+	cp2 := &Checkpoint{
+		Task:           "auth refactor",
+		Status:         "in_progress",
+		CompletedSteps: []string{"JWT validation", "refresh tokens"},
+		RemainingSteps: []string{"logout"},
+	}
+	if err := engine.SaveCheckpoint(ctx, "user1", cp2); err != nil {
+		t.Fatal(err)
+	}
+
+	// Should only have one checkpoint
+	checkpoints, err := engine.GetCheckpoints(ctx, "user1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(checkpoints) != 1 {
+		t.Errorf("expected 1 checkpoint after supersession, got %d", len(checkpoints))
+	}
+	if len(checkpoints[0].CompletedSteps) != 2 {
+		t.Errorf("completed steps = %d, want 2 (should be updated version)", len(checkpoints[0].CompletedSteps))
+	}
+}
+
+func TestCheckpointFormatForContext(t *testing.T) {
+	cp := &Checkpoint{
+		Task:            "auth refactor",
+		Status:          "blocked",
+		FilesActive:     []string{"auth.go:42-80", "middleware.go"},
+		DecisionPending: "JWT vs session tokens",
+		CompletedSteps:  []string{"JWT validation"},
+		RemainingSteps:  []string{"refresh tokens", "logout"},
+		BlockedOn:       "waiting for API spec",
+	}
+
+	text := cp.FormatForContext()
+	if !strings.Contains(text, "[Checkpoint: auth refactor]") {
+		t.Error("missing checkpoint header")
+	}
+	if !strings.Contains(text, "status=blocked") {
+		t.Error("missing status")
+	}
+	if !strings.Contains(text, "auth.go:42-80") {
+		t.Error("missing files")
+	}
+	if !strings.Contains(text, "JWT vs session tokens") {
+		t.Error("missing pending decision")
+	}
+	if !strings.Contains(text, "waiting for API spec") {
+		t.Error("missing blocked reason")
+	}
+}
+
+func TestCheckpointInAssembleContext(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Save a checkpoint
+	cp := &Checkpoint{
+		Task:           "auth refactor",
+		Status:         "in_progress",
+		RemainingSteps: []string{"logout endpoint"},
+	}
+	engine.SaveCheckpoint(ctx, "user1", cp)
+
+	// Also add a regular memory
+	engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "Chose SQLite over Postgres",
+		SectorHint:  "decision",
+		Salience:    0.8,
+		Type:        "decision",
+	}, "user1")
+
+	// Assemble context
+	block, err := engine.AssembleContext(ctx, "user1", "session context", 5000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Checkpoint should appear in output
+	if !strings.Contains(block.Text, "[Checkpoint: auth refactor]") {
+		t.Error("checkpoint not found in context output")
+	}
+	// Regular memory should also appear
+	if !strings.Contains(block.Text, "SQLite") {
+		t.Error("regular memory not found in context output")
+	}
+	// Checkpoint source should be tracked
+	hasCheckpointSource := false
+	for _, s := range block.Sources {
+		if s.Type == "checkpoint" {
+			hasCheckpointSource = true
+		}
+	}
+	if !hasCheckpointSource {
+		t.Error("checkpoint source not tracked")
+	}
+}

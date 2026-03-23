@@ -159,6 +159,8 @@ func main() {
 		cmdPromote(cfg)
 	case "demote":
 		cmdDemote(cfg)
+	case "checkpoint":
+		cmdCheckpoint(cfg)
 	case "gc":
 		cmdGC(cfg)
 	case "help", "-h", "--help":
@@ -174,16 +176,17 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, `dualmem — dual-path agent memory CLI
 
 Commands:
-  add      Add a memory
-  search   Dual-path search
-  context  Assemble token-budget-aware context (includes code map + diff)
-  map      Generate/view codebase structure map
-  diff     Show changes since last session
-  profile  Get user/project profile sketch
-  status   Memory counts and health
-  promote  Pin a memory to Detail Path
-  demote   Demote a memory to Sketch Path
-  gc       Garbage collect stale/expired memories
+  add         Add a memory
+  search      Dual-path search
+  context     Assemble token-budget-aware context (includes code map + diff)
+  checkpoint  Save/view structured session checkpoints
+  map         Generate/view codebase structure map
+  diff        Show changes since last session
+  profile     Get user/project profile sketch
+  status      Memory counts and health
+  promote     Pin a memory to Detail Path
+  demote      Demote a memory to Sketch Path
+  gc          Garbage collect stale/expired memories
 
 Flags (all commands):
   --ns     Namespace (default: auto-detect from cwd or config)
@@ -340,6 +343,7 @@ func cmdContext(cfg CLIConfig) {
 	fs := flag.NewFlagSet("context", flag.ExitOnError)
 	ns := fs.String("ns", "", "Namespace")
 	budget := fs.Int("budget", 3000, "Token budget")
+	intent := fs.String("intent", "", "Task intent override: debug, continue, feature, explore (default: auto-detect)")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	fs.Parse(os.Args[2:])
 
@@ -357,8 +361,13 @@ func cmdContext(cfg CLIConfig) {
 	}
 	defer engine.Close()
 
+	var opts *dualmem.ContextOpts
+	if *intent != "" {
+		opts = &dualmem.ContextOpts{Intent: dualmem.Intent(*intent)}
+	}
+
 	ctx := context.Background()
-	block, err := engine.AssembleContext(ctx, namespace, query, *budget)
+	block, err := engine.AssembleContextWith(ctx, namespace, query, *budget, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -375,7 +384,11 @@ func cmdContext(cfg CLIConfig) {
 	}
 
 	fmt.Println(block.Text)
-	fmt.Printf("\n(%d tokens, %d sources)\n", block.TokenCount, len(block.Sources))
+	intentLabel := string(block.Intent)
+	if intentLabel == "" {
+		intentLabel = "default"
+	}
+	fmt.Printf("\n(%d tokens, %d sources, intent: %s)\n", block.TokenCount, len(block.Sources), intentLabel)
 }
 
 func cmdProfile(cfg CLIConfig) {
@@ -585,6 +598,101 @@ func cmdGC(cfg CLIConfig) {
 	fmt.Printf("Superseded continuity: %d demoted\n", report.SupersededContinuity)
 	fmt.Printf("Access-cold details:  %d demoted\n", report.AccessColdDetails)
 	fmt.Printf("Total: %d entries cleaned\n", total)
+}
+
+func cmdCheckpoint(cfg CLIConfig) {
+	fs := flag.NewFlagSet("checkpoint", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace")
+	task := fs.String("task", "", "Task description (required for save)")
+	status := fs.String("status", "in_progress", "Status: in_progress, blocked, paused, completed")
+	files := fs.String("files", "", "Comma-separated active files")
+	done := fs.String("done", "", "Comma-separated completed steps")
+	remaining := fs.String("remaining", "", "Comma-separated remaining steps")
+	blocked := fs.String("blocked", "", "What's blocking progress")
+	decision := fs.String("decision", "", "Pending decision")
+	list := fs.Bool("list", false, "List active checkpoints")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	namespace := resolveNamespace(*ns, cfg)
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+
+	if *list {
+		checkpoints, err := engine.GetCheckpoints(ctx, namespace)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		if *jsonOut {
+			json.NewEncoder(os.Stdout).Encode(checkpoints)
+			return
+		}
+		if len(checkpoints) == 0 {
+			fmt.Println("(no checkpoints)")
+			return
+		}
+		for _, cp := range checkpoints {
+			fmt.Println(cp.FormatForContext())
+			fmt.Println()
+		}
+		return
+	}
+
+	if *task == "" {
+		// If no --task, use remaining args
+		*task = strings.Join(fs.Args(), " ")
+	}
+	if *task == "" {
+		fmt.Fprintln(os.Stderr, "error: --task or positional task description required (or use --list)")
+		os.Exit(1)
+	}
+
+	cp := &dualmem.Checkpoint{
+		Task:            *task,
+		Status:          *status,
+		DecisionPending: *decision,
+		BlockedOn:       *blocked,
+	}
+	if *files != "" {
+		for _, f := range strings.Split(*files, ",") {
+			if trimmed := strings.TrimSpace(f); trimmed != "" {
+				cp.FilesActive = append(cp.FilesActive, trimmed)
+			}
+		}
+	}
+	if *done != "" {
+		for _, s := range strings.Split(*done, ",") {
+			if trimmed := strings.TrimSpace(s); trimmed != "" {
+				cp.CompletedSteps = append(cp.CompletedSteps, trimmed)
+			}
+		}
+	}
+	if *remaining != "" {
+		for _, s := range strings.Split(*remaining, ",") {
+			if trimmed := strings.TrimSpace(s); trimmed != "" {
+				cp.RemainingSteps = append(cp.RemainingSteps, trimmed)
+			}
+		}
+	}
+
+	if err := engine.SaveCheckpoint(ctx, namespace, cp); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(cp)
+	} else {
+		fmt.Printf("Checkpoint saved: %s [%s]\n", cp.Task, cp.Status)
+	}
 }
 
 // --- Helpers ---

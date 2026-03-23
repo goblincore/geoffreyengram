@@ -2,6 +2,8 @@ package dualmem
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -137,12 +139,121 @@ type ContextBlock struct {
 	Text       string      // Pre-formatted for LLM prompt injection
 	TokenCount int         // Estimated tokens used (chars/4 heuristic)
 	Sources    []SourceRef // For attribution/debugging
+	Intent     Intent      // Detected or explicit intent used for assembly
 }
 
 // SourceRef traces a context fragment back to its source.
 type SourceRef struct {
 	Type string // "detail", "episode", "arc", "profile"
 	ID   string
+}
+
+// --- Checkpoints ---
+
+// Checkpoint is a structured session handoff record.
+// Stored as JSON in a detail memory with Type="checkpoint".
+type Checkpoint struct {
+	Task            string   `json:"task"`                       // Short description of what was being done
+	Status          string   `json:"status"`                     // "in_progress", "blocked", "paused", "completed"
+	FilesActive     []string `json:"files_active,omitempty"`     // Files being worked on (e.g. "auth.go:42-80")
+	DecisionPending string   `json:"decision_pending,omitempty"` // Specific question/choice being deliberated
+	CompletedSteps  []string `json:"completed_steps,omitempty"`  // What's done
+	RemainingSteps  []string `json:"remaining_steps,omitempty"`  // What's left
+	BlockedOn       string   `json:"blocked_on,omitempty"`       // What's blocking progress
+}
+
+// FormatForContext renders a checkpoint as a compact structured block.
+func (cp *Checkpoint) FormatForContext() string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("[Checkpoint: %s] status=%s", cp.Task, cp.Status))
+	if len(cp.FilesActive) > 0 {
+		sb.WriteString("\n  Files: " + strings.Join(cp.FilesActive, ", "))
+	}
+	if cp.DecisionPending != "" {
+		sb.WriteString("\n  Pending decision: " + cp.DecisionPending)
+	}
+	if len(cp.CompletedSteps) > 0 {
+		sb.WriteString("\n  Done: " + strings.Join(cp.CompletedSteps, "; "))
+	}
+	if len(cp.RemainingSteps) > 0 {
+		sb.WriteString("\n  Remaining: " + strings.Join(cp.RemainingSteps, "; "))
+	}
+	if cp.BlockedOn != "" {
+		sb.WriteString("\n  Blocked on: " + cp.BlockedOn)
+	}
+	return sb.String()
+}
+
+// --- Task intent ---
+
+// Intent represents the detected purpose of a query, used to adjust
+// memory type weights during context assembly.
+type Intent string
+
+const (
+	IntentDefault  Intent = ""
+	IntentDebug    Intent = "debug"
+	IntentContinue Intent = "continue"
+	IntentFeature  Intent = "feature"
+	IntentExplore  Intent = "explore"
+)
+
+// IntentProfile defines per-type weight multipliers for a given intent.
+// Values > 1.0 boost that type, < 1.0 suppress it.
+type IntentProfile struct {
+	Warning    float64
+	Decision   float64
+	Continuity float64
+	Map        float64
+	General    float64
+}
+
+// IntentProfiles maps each intent to its weight multipliers.
+var IntentProfiles = map[Intent]IntentProfile{
+	IntentDebug: {
+		Warning:    2.0,
+		Decision:   1.5,
+		Continuity: 0.5,
+		Map:        1.0,
+		General:    0.8,
+	},
+	IntentContinue: {
+		Warning:    1.0,
+		Decision:   1.0,
+		Continuity: 2.0,
+		Map:        1.5,
+		General:    0.8,
+	},
+	IntentFeature: {
+		Warning:    1.0,
+		Decision:   1.5,
+		Map:        1.5,
+		Continuity: 0.8,
+		General:    1.0,
+	},
+	IntentExplore: {
+		Warning:    0.8,
+		Decision:   1.0,
+		Continuity: 0.5,
+		Map:        2.0,
+		General:    1.2,
+	},
+}
+
+// TypeMultiplier returns the weight multiplier for a given memory type under this profile.
+func (ip IntentProfile) TypeMultiplier(memType string) float64 {
+	switch memType {
+	case "warning":
+		return ip.Warning
+	case "decision":
+		return ip.Decision
+	case "continuity":
+		return ip.Continuity
+	case "map":
+		return ip.Map
+	default:
+		return ip.General
+	}
 }
 
 // --- Garbage collection ---

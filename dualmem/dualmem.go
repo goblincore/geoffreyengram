@@ -10,6 +10,7 @@ package dualmem
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -276,9 +277,26 @@ func (e *Engine) DualSearch(ctx context.Context, userID string, query string, op
 // It retrieves from both paths and formats a structured context block that fits
 // within the given token budget. If Config.RootDir is set, includes structural
 // diffs and code maps before memories.
+// ContextOpts configures AssembleContext behavior.
+type ContextOpts struct {
+	Intent Intent // Explicit intent override (empty = auto-detect from query)
+}
+
 func (e *Engine) AssembleContext(ctx context.Context, userID string, query string, tokenBudget int) (*ContextBlock, error) {
+	return e.AssembleContextWith(ctx, userID, query, tokenBudget, nil)
+}
+
+func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query string, tokenBudget int, opts *ContextOpts) (*ContextBlock, error) {
 	if tokenBudget <= 0 {
 		tokenBudget = 2000
+	}
+
+	// Resolve intent: explicit override > auto-detect > default
+	intent := IntentDefault
+	if opts != nil && opts.Intent != "" {
+		intent = opts.Intent
+	} else {
+		intent = DetectIntent(query)
 	}
 
 	// Embed query FIRST — shared by DualSearch and codemap ranking
@@ -342,6 +360,18 @@ func (e *Engine) AssembleContext(ctx context.Context, userID string, query strin
 		}
 	}
 
+	// 0. Checkpoints — structured session handoffs, rendered first
+	checkpoints, _ := e.GetCheckpoints(ctx, userID)
+	for _, cp := range checkpoints {
+		cpText := cp.FormatForContext()
+		cpTokens := estimateTokens(cpText)
+		if tokensUsed+cpTokens <= tokenBudget {
+			parts = append(parts, cpText)
+			sources = append(sources, SourceRef{Type: "checkpoint", ID: cp.Task})
+			tokensUsed += cpTokens
+		}
+	}
+
 	// 1. Profile sketch (~50 tokens) — always include if available
 	if results.Profile != nil {
 		profileText := formatProfile(results.Profile)
@@ -366,21 +396,22 @@ func (e *Engine) AssembleContext(ctx context.Context, userID string, query strin
 	}
 
 	// 3. Detail memories — sort by type priority (warnings first, then decisions),
-	// with access-recency weighting to sink stale memories.
+	// with access-recency weighting and intent-aware type multipliers.
 	now := time.Now()
+	var intentProfile *IntentProfile
+	if profile, ok := IntentProfiles[intent]; ok {
+		intentProfile = &profile
+	}
+
 	sort.SliceStable(results.DetailMemories, func(i, j int) bool {
-		pi := typePriority(results.DetailMemories[i].Type)
-		pj := typePriority(results.DetailMemories[j].Type)
-		if pi != pj {
-			return pi > pj
-		}
-		// Within same priority tier, boost recently accessed memories.
-		// Warnings (priority 2) are exempt from recency decay.
-		ri := accessRecencyFactor(results.DetailMemories[i].LastAccessedAt, results.DetailMemories[i].Type, now)
-		rj := accessRecencyFactor(results.DetailMemories[j].LastAccessedAt, results.DetailMemories[j].Type, now)
-		return ri > rj
+		si := detailSortScore(results.DetailMemories[i], intentProfile, now)
+		sj := detailSortScore(results.DetailMemories[j], intentProfile, now)
+		return si > sj
 	})
 	for _, dm := range results.DetailMemories {
+		if dm.Type == "checkpoint" {
+			continue // already rendered as structured block above
+		}
 		dmTokens := estimateTokens(dm.Text) + estimateTokens(strings.Join(dm.Files, ", "))
 		if tokensUsed+dmTokens > tokenBudget {
 			break
@@ -421,6 +452,7 @@ func (e *Engine) AssembleContext(ctx context.Context, userID string, query strin
 		Text:       text,
 		TokenCount: tokensUsed,
 		Sources:    sources,
+		Intent:     intent,
 	}, nil
 }
 
@@ -520,6 +552,59 @@ func (e *Engine) recordSessionMarker(namespace string) {
 // GetProfile returns the user's profile sketch.
 func (e *Engine) GetProfile(ctx context.Context, userID string) (*ProfileSketch, error) {
 	return e.sketch.GetProfile(ctx, userID)
+}
+
+// SaveCheckpoint stores a structured checkpoint, auto-superseding any previous
+// checkpoint with the same task name for this user.
+func (e *Engine) SaveCheckpoint(ctx context.Context, userID string, cp *Checkpoint) error {
+	if cp.Task == "" {
+		return fmt.Errorf("dualmem: checkpoint task is required")
+	}
+	if cp.Status == "" {
+		cp.Status = "in_progress"
+	}
+
+	// Serialize checkpoint to JSON
+	cpJSON, err := json.Marshal(cp)
+	if err != nil {
+		return fmt.Errorf("dualmem: marshal checkpoint: %w", err)
+	}
+
+	// Delete previous checkpoints for the same task
+	existing, err := e.store.GetDetailsByType(userID, "checkpoint")
+	if err == nil {
+		for _, dm := range existing {
+			var old Checkpoint
+			if json.Unmarshal([]byte(dm.Text), &old) == nil && old.Task == cp.Task {
+				e.store.DeleteDetail(dm.ID)
+			}
+		}
+	}
+
+	// Store as a high-salience detail memory
+	return e.AddWithOptions(ctx, MemoryInput{
+		UserMessage: string(cpJSON),
+		SectorHint:  "continuity",
+		Salience:    0.8,
+		Type:        "checkpoint",
+	}, userID)
+}
+
+// GetCheckpoints returns all active checkpoints for a user.
+func (e *Engine) GetCheckpoints(ctx context.Context, userID string) ([]Checkpoint, error) {
+	details, err := e.store.GetDetailsByType(userID, "checkpoint")
+	if err != nil {
+		return nil, err
+	}
+
+	var checkpoints []Checkpoint
+	for _, dm := range details {
+		var cp Checkpoint
+		if json.Unmarshal([]byte(dm.Text), &cp) == nil {
+			checkpoints = append(checkpoints, cp)
+		}
+	}
+	return checkpoints, nil
 }
 
 // PromoteToDetail moves a sketch memory (raw or episode) to the Detail Path.
@@ -957,6 +1042,60 @@ func estimateTokens(text string) int {
 
 // typePriority returns sort priority for memory types.
 // Higher = appears first in AssembleContext output.
+// detailSortScore computes a composite sort score for a detail memory.
+// Combines type priority, access recency, and optional intent-based multiplier.
+func detailSortScore(dm DetailMemory, intentProfile *IntentProfile, now time.Time) float64 {
+	base := float64(typePriority(dm.Type))
+	recency := accessRecencyFactor(dm.LastAccessedAt, dm.Type, now)
+	score := (base + 1.0) * recency // +1 so general (priority 0) still has a base
+
+	if intentProfile != nil {
+		score *= intentProfile.TypeMultiplier(dm.Type)
+	}
+
+	return score
+}
+
+// DetectIntent infers task intent from a query string using keyword matching.
+// Returns IntentDefault if no strong signal is found.
+func DetectIntent(query string) Intent {
+	q := strings.ToLower(query)
+
+	// Debug: error investigation, bug fixing, troubleshooting
+	debugKeywords := []string{"fix", "bug", "error", "crash", "fail", "broken", "debug", "issue", "wrong", "trace", "stack", "panic", "nil pointer", "undefined"}
+	for _, kw := range debugKeywords {
+		if strings.Contains(q, kw) {
+			return IntentDebug
+		}
+	}
+
+	// Continue: session resumption, picking up work
+	continueKeywords := []string{"continue", "resume", "pick up", "where we left", "last session", "in progress", "what was i", "session context", "what were we"}
+	for _, kw := range continueKeywords {
+		if strings.Contains(q, kw) {
+			return IntentContinue
+		}
+	}
+
+	// Explore: codebase navigation, understanding
+	exploreKeywords := []string{"where is", "find", "how does", "what does", "explain", "understand", "explore", "navigate", "structure", "overview", "architecture"}
+	for _, kw := range exploreKeywords {
+		if strings.Contains(q, kw) {
+			return IntentExplore
+		}
+	}
+
+	// Feature: building new things
+	featureKeywords := []string{"add", "implement", "create", "build", "new feature", "introduce", "wire up", "integrate", "extend"}
+	for _, kw := range featureKeywords {
+		if strings.Contains(q, kw) {
+			return IntentFeature
+		}
+	}
+
+	return IntentDefault
+}
+
 func typePriority(t string) int {
 	switch t {
 	case "warning":
