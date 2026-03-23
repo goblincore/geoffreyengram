@@ -230,6 +230,23 @@ dualmem map    # print codebase structure without memories
 dualmem diff   # print changes since last session
 ```
 
+## Engram vs DualMem
+
+Both systems share embedding providers and SQLite storage, but they're designed for different problems:
+
+| | **Engram** | **DualMem** |
+|---|---|---|
+| **Designed for** | NPCs, companions, chatbots | Coding agents, multi-agent systems |
+| **Search scoring** | Composite: similarity + salience + recency + entity links | Pure cosine similarity (Detail Path) |
+| **Memory decay** | Exponential decay — old small talk fades naturally | No decay. Fixed-capacity eviction + hierarchical compression |
+| **Entity graph** | Waypoints — mentioning a song surfaces the person you heard it with | Entities stored as metadata only, no associative expansion |
+| **Reflective synthesis** | `Reflect()` creates meta-memories ("they always mention music when stressed") | Not available |
+| **Multimodal** | Text, images, audio in same vector space (Gemini Embedding 2) | Text only |
+| **Compression** | None — every memory at full fidelity | Episodes → arcs → profiles (hierarchical sketch) |
+| **Context assembly** | Manual (you format search results) | `AssembleContext()` with token budget, code maps, stale detection |
+| **Capacity** | Unbounded (decay handles relevance) | Detail: fixed top-K. Sketch: compressed hierarchy |
+| **Best for** | Characters that should feel alive — remembering, forgetting, making associations | Agents that need structured context within tight token budgets |
+
 ## Project Structure
 
 ```
