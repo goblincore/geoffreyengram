@@ -263,6 +263,35 @@ func (s *SQLiteStore) GetDetailMemories(userID string) ([]detailWithVector, erro
 	return results, rows.Err()
 }
 
+func (s *SQLiteStore) GetDetailsByType(userID, memType string) ([]detailWithVector, error) {
+	rows, err := s.db.Query(`
+		SELECT id, user_id, text, embedding, importance_score, sector, entities_json, session_id, salience, created_at, last_accessed_at, access_count, type, files_json
+		FROM detail_memories WHERE user_id = ? AND type = ? ORDER BY created_at DESC`, userID, memType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []detailWithVector
+	for rows.Next() {
+		var d detailWithVector
+		var vecBlob []byte
+		var entitiesJSON, filesJSON, createdAt, lastAccessed string
+		if err := rows.Scan(&d.ID, &d.UserID, &d.Text, &vecBlob, &d.ImportanceScore,
+			&d.Sector, &entitiesJSON, &d.SessionID, &d.Salience,
+			&createdAt, &lastAccessed, &d.AccessCount, &d.Type, &filesJSON); err != nil {
+			return nil, err
+		}
+		d.Vector = decodeVector(vecBlob)
+		d.Entities = decodeEntities(entitiesJSON)
+		d.Files = decodeStringSlice(filesJSON)
+		d.CreatedAt = parseTime(createdAt)
+		d.LastAccessedAt = parseTime(lastAccessed)
+		results = append(results, d)
+	}
+	return results, rows.Err()
+}
+
 func (s *SQLiteStore) GetDetailCount(userID string) (int, error) {
 	var count int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM detail_memories WHERE user_id = ?`, userID).Scan(&count)
@@ -539,6 +568,34 @@ func (s *SQLiteStore) GetArcs(userID string) ([]arcWithVector, error) {
 	rows, err := s.db.Query(`
 		SELECT id, user_id, summary_text, sketched_embedding, entities_json, episode_ids, created_at
 		FROM arcs WHERE user_id = ? ORDER BY created_at DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []arcWithVector
+	for rows.Next() {
+		var a arcWithVector
+		var vecBlob []byte
+		var entitiesJSON, episodeIDsJSON, createdAt string
+		if err := rows.Scan(&a.ID, &a.UserID, &a.SummaryText, &vecBlob, &entitiesJSON, &episodeIDsJSON, &createdAt); err != nil {
+			return nil, err
+		}
+		a.SketchedVector = decodeVector(vecBlob)
+		a.Entities = decodeEntities(entitiesJSON)
+		a.EpisodeIDs = decodeStringSlice(episodeIDsJSON)
+		a.CreatedAt = parseTime(createdAt)
+		results = append(results, a)
+	}
+	return results, rows.Err()
+}
+
+func (s *SQLiteStore) GetExpiredArcs(before time.Time) ([]arcWithVector, error) {
+	rows, err := s.db.Query(`
+		SELECT id, user_id, summary_text, sketched_embedding, entities_json, episode_ids, created_at
+		FROM arcs WHERE expires_at IS NOT NULL AND expires_at <= ?
+		ORDER BY created_at ASC`,
+		before.Format("2006-01-02 15:04:05"))
 	if err != nil {
 		return nil, err
 	}

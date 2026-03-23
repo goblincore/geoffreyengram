@@ -145,6 +145,32 @@ type SourceRef struct {
 	ID   string
 }
 
+// --- Garbage collection ---
+
+// GCOptions configures the GarbageCollect operation.
+type GCOptions struct {
+	DryRun  bool // If true, report what would be done without making changes
+	Verbose bool // If true, log each affected entry
+}
+
+// GCReport summarizes what GarbageCollect did (or would do in dry-run mode).
+type GCReport struct {
+	ExpiredEpisodes     int // Episodes past retention, deleted
+	ExpiredArcs         int // Arcs past retention, deleted
+	StaleDetails        int // Git-stale details, demoted to sketch
+	SupersededContinuity int // Duplicate continuity entries, demoted
+	AccessColdDetails   int // Unaccessed details below importance threshold, demoted
+	Entries             []GCEntry // Individual entries affected (populated when Verbose=true)
+}
+
+// GCEntry describes a single memory affected by GC.
+type GCEntry struct {
+	ID     string
+	Action string // "delete", "demote"
+	Reason string // "expired_episode", "expired_arc", "git_stale", "superseded", "access_cold"
+	Text   string // Truncated content for display
+}
+
 // --- Sector configuration ---
 
 // SectorConfig defines the classification sectors and their behavior.
@@ -270,6 +296,9 @@ type Store interface {
 	UpdateDetailImportance(id string, score float64) error
 	TouchDetail(id string) error
 
+	// Detail Path — filtered queries
+	GetDetailsByType(userID, memType string) ([]detailWithVector, error)
+
 	// Sketch Path — raw staging
 	InsertSketchRaw(userID, content, sector, sessionID string, embedding []float32) error
 	GetUnprocessedRaw(userID string, limit int) ([]sketchRaw, error)
@@ -288,6 +317,7 @@ type Store interface {
 	// Sketch Path — arcs
 	InsertArc(arc *Arc, sketchedEmbedding []float32, userID, embeddingModel string, projectionSeed int64) error
 	GetArcs(userID string) ([]arcWithVector, error)
+	GetExpiredArcs(before time.Time) ([]arcWithVector, error)
 	DeleteArc(id string) error
 
 	// Sketch Path — profiles

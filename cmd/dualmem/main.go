@@ -159,6 +159,8 @@ func main() {
 		cmdPromote(cfg)
 	case "demote":
 		cmdDemote(cfg)
+	case "gc":
+		cmdGC(cfg)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -181,6 +183,7 @@ Commands:
   status   Memory counts and health
   promote  Pin a memory to Detail Path
   demote   Demote a memory to Sketch Path
+  gc       Garbage collect stale/expired memories
 
 Flags (all commands):
   --ns     Namespace (default: auto-detect from cwd or config)
@@ -533,6 +536,55 @@ func cmdDemote(cfg CLIConfig) {
 		os.Exit(1)
 	}
 	fmt.Println("Demoted to Sketch Path")
+}
+
+func cmdGC(cfg CLIConfig) {
+	fs := flag.NewFlagSet("gc", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace")
+	dryRun := fs.Bool("dry-run", false, "Show what would be done without making changes")
+	verbose := fs.Bool("verbose", false, "Show each affected entry")
+	fs.Parse(os.Args[2:])
+
+	namespace := resolveNamespace(*ns, cfg)
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	report, err := engine.GarbageCollect(context.Background(), namespace, dualmem.GCOptions{
+		DryRun:  *dryRun,
+		Verbose: *verbose,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *dryRun {
+		fmt.Println("=== Dry Run (no changes made) ===")
+	}
+
+	if *verbose && len(report.Entries) > 0 {
+		for _, e := range report.Entries {
+			fmt.Printf("  [%s] %s: %s\n", e.Action, e.Reason, e.Text)
+		}
+		fmt.Println()
+	}
+
+	total := report.ExpiredEpisodes + report.ExpiredArcs + report.StaleDetails + report.SupersededContinuity + report.AccessColdDetails
+	if total == 0 {
+		fmt.Println("Nothing to clean up.")
+		return
+	}
+
+	fmt.Printf("Expired episodes:     %d deleted\n", report.ExpiredEpisodes)
+	fmt.Printf("Expired arcs:         %d deleted\n", report.ExpiredArcs)
+	fmt.Printf("Git-stale details:    %d demoted\n", report.StaleDetails)
+	fmt.Printf("Superseded continuity: %d demoted\n", report.SupersededContinuity)
+	fmt.Printf("Access-cold details:  %d demoted\n", report.AccessColdDetails)
+	fmt.Printf("Total: %d entries cleaned\n", total)
 }
 
 // --- Helpers ---

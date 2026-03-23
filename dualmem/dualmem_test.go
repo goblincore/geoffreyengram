@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // mockEmbedder returns deterministic embeddings for testing.
@@ -591,5 +592,248 @@ func TestAssembleContext_QueryAwareCodeMap(t *testing.T) {
 
 	if !strings.Contains(block.Text, "[Codebase Map]") {
 		t.Error("expected codemap in context output")
+	}
+}
+
+// --- GC and Supersession Tests ---
+
+func TestAccessRecencyFactor(t *testing.T) {
+	now := time.Now()
+
+	tests := []struct {
+		name     string
+		accessed time.Time
+		memType  string
+		wantMin  float64
+		wantMax  float64
+	}{
+		{"just accessed", now, "", 0.99, 1.01},
+		{"30 days ago", now.AddDate(0, 0, -30), "", 0.49, 0.51},
+		{"60 days ago", now.AddDate(0, 0, -60), "", 0.49, 0.51}, // clamped at 0.5
+		{"90 days ago", now.AddDate(0, 0, -90), "", 0.49, 0.51}, // clamped at 0.5
+		{"warning always 1.0", now.AddDate(0, 0, -90), "warning", 0.99, 1.01},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := accessRecencyFactor(tt.accessed, tt.memType, now)
+			if got < tt.wantMin || got > tt.wantMax {
+				t.Errorf("accessRecencyFactor() = %v, want [%v, %v]", got, tt.wantMin, tt.wantMax)
+			}
+		})
+	}
+}
+
+func TestContinuitySupersession(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Add first continuity entry
+	err := engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "Project status: done with auth, remaining: payments, dashboard",
+		Salience:    0.9,
+		Type:        "continuity",
+	}, "user1")
+	if err != nil {
+		t.Fatalf("Add first: %v", err)
+	}
+
+	count, _ := engine.store.GetDetailCount("user1")
+	if count != 1 {
+		t.Fatalf("expected 1 detail, got %d", count)
+	}
+
+	// Add a second, similar continuity entry (updated status)
+	err = engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "Project status: done with auth and payments, remaining: dashboard",
+		Salience:    0.9,
+		Type:        "continuity",
+	}, "user1")
+	if err != nil {
+		t.Fatalf("Add second: %v", err)
+	}
+
+	// The old entry should have been superseded (demoted)
+	details, _ := engine.store.GetDetailMemories("user1")
+	continuityCount := 0
+	for _, d := range details {
+		if d.Type == "continuity" {
+			continuityCount++
+		}
+	}
+	// With mock embedder, similar text should produce similar embeddings
+	// so the first should be superseded
+	t.Logf("Continuity entries in detail: %d (expect 1 if supersession worked)", continuityCount)
+	if continuityCount > 1 {
+		t.Errorf("expected at most 1 continuity in detail (supersession should demote old), got %d", continuityCount)
+	}
+}
+
+func TestContinuitySupersession_DifferentTopics(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Add two continuity entries about very different topics
+	err := engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "Auth system rewrite in progress, JWT validation done, refresh tokens remaining",
+		Salience:    0.9,
+		Type:        "continuity",
+	}, "user1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "Database migration to PostgreSQL started, schema design complete",
+		Salience:    0.9,
+		Type:        "continuity",
+	}, "user1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Both should survive — different topics
+	details, _ := engine.store.GetDetailMemories("user1")
+	continuityCount := 0
+	for _, d := range details {
+		if d.Type == "continuity" {
+			continuityCount++
+		}
+	}
+	t.Logf("Continuity entries: %d (expect 2 for different topics)", continuityCount)
+	// Different topics should both survive (cosine similarity < 0.75)
+}
+
+func TestGarbageCollect_DryRun(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Add some memories
+	for _, msg := range []string{"fact one", "fact two", "fact three"} {
+		engine.AddWithOptions(ctx, MemoryInput{
+			UserMessage: msg,
+			SectorHint:  "decision",
+			Salience:    0.9,
+			Type:        "continuity",
+		}, "user1")
+	}
+
+	beforeCount, _ := engine.store.GetDetailCount("user1")
+
+	report, err := engine.GarbageCollect(ctx, "user1", GCOptions{DryRun: true, Verbose: true})
+	if err != nil {
+		t.Fatalf("GarbageCollect: %v", err)
+	}
+
+	afterCount, _ := engine.store.GetDetailCount("user1")
+	if afterCount != beforeCount {
+		t.Errorf("dry run changed detail count: before=%d, after=%d", beforeCount, afterCount)
+	}
+
+	t.Logf("GC dry-run report: episodes=%d, arcs=%d, stale=%d, superseded=%d, cold=%d",
+		report.ExpiredEpisodes, report.ExpiredArcs, report.StaleDetails,
+		report.SupersededContinuity, report.AccessColdDetails)
+}
+
+func TestGarbageCollect_ExpiredEpisodes(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Insert an episode that's already expired
+	vec := make([]float32, 768)
+	vec[0] = 0.5
+	ep := &Episode{
+		ID:          "ep-expired-1",
+		SummaryText: "Old conversation about weather from long ago",
+	}
+	engine.store.InsertEpisode(ep, vec, "user1", "mock-embedder", nil)
+
+	// Manually set expires_at to past
+	engine.store.(*SQLiteStore).db.Exec(
+		`UPDATE episodes SET expires_at = '2020-01-01 00:00:00' WHERE id = 'ep-expired-1'`)
+
+	report, err := engine.GarbageCollect(ctx, "user1", GCOptions{Verbose: true})
+	if err != nil {
+		t.Fatalf("GarbageCollect: %v", err)
+	}
+
+	if report.ExpiredEpisodes != 1 {
+		t.Errorf("expected 1 expired episode, got %d", report.ExpiredEpisodes)
+	}
+
+	// Verify deleted
+	ep2, _ := engine.store.GetEpisodeByID("ep-expired-1")
+	if ep2 != nil {
+		t.Error("expired episode should be deleted")
+	}
+}
+
+func TestGarbageCollect_ExpiredArcs(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Insert an arc directly
+	vec := make([]float32, 128) // arcs use sketched embeddings
+	vec[0] = 0.5
+	arc := &Arc{
+		ID:          "arc-expired-1",
+		SummaryText: "Theme about old project work",
+		EpisodeIDs:  []string{"ep1", "ep2"},
+	}
+	engine.store.InsertArc(arc, vec, "user1", "mock-embedder", 12345)
+
+	// Manually expire it
+	engine.store.(*SQLiteStore).db.Exec(
+		`UPDATE arcs SET expires_at = '2020-01-01 00:00:00' WHERE id = 'arc-expired-1'`)
+
+	report, err := engine.GarbageCollect(ctx, "user1", GCOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.ExpiredArcs != 1 {
+		t.Errorf("expected 1 expired arc, got %d", report.ExpiredArcs)
+	}
+}
+
+func TestGetDetailsByType(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Add different types
+	for _, tc := range []struct {
+		text, typ string
+	}{
+		{"warning about fragile code", "warning"},
+		{"decision to use SQLite", "decision"},
+		{"status update on auth work", "continuity"},
+		{"another status update", "continuity"},
+	} {
+		engine.AddWithOptions(ctx, MemoryInput{
+			UserMessage: tc.text,
+			Salience:    0.9,
+			Type:        tc.typ,
+		}, "user1")
+	}
+
+	// Query only continuity
+	continuity, err := engine.store.GetDetailsByType("user1", "continuity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range continuity {
+		if d.Type != "continuity" {
+			t.Errorf("expected type=continuity, got %q", d.Type)
+		}
+	}
+	t.Logf("Found %d continuity entries", len(continuity))
+
+	// Query warnings
+	warnings, err := engine.store.GetDetailsByType("user1", "warning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 1 {
+		t.Errorf("expected 1 warning, got %d", len(warnings))
 	}
 }

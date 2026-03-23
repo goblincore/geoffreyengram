@@ -196,6 +196,12 @@ func (e *Engine) AddWithOptions(ctx context.Context, input MemoryInput, userID s
 			e.sketch.IngestRaw(ctx, userID, demoted, sector, input.SessionID, nil)
 			e.notifyPipeline()
 		}
+
+		// Continuity supersession: when a new continuity entry is added,
+		// auto-demote older continuity entries about the same topic.
+		if input.Type == "continuity" {
+			e.supersedeContinuity(ctx, userID, dm.ID, embedding)
+		}
 	} else {
 		// Route to Sketch Path
 		if err := e.sketch.IngestRaw(ctx, userID, content, sector, input.SessionID, embedding); err != nil {
@@ -359,9 +365,20 @@ func (e *Engine) AssembleContext(ctx context.Context, userID string, query strin
 		tokensUsed += arcTokens
 	}
 
-	// 3. Detail memories — sort by type priority (warnings first, then decisions)
+	// 3. Detail memories — sort by type priority (warnings first, then decisions),
+	// with access-recency weighting to sink stale memories.
+	now := time.Now()
 	sort.SliceStable(results.DetailMemories, func(i, j int) bool {
-		return typePriority(results.DetailMemories[i].Type) > typePriority(results.DetailMemories[j].Type)
+		pi := typePriority(results.DetailMemories[i].Type)
+		pj := typePriority(results.DetailMemories[j].Type)
+		if pi != pj {
+			return pi > pj
+		}
+		// Within same priority tier, boost recently accessed memories.
+		// Warnings (priority 2) are exempt from recency decay.
+		ri := accessRecencyFactor(results.DetailMemories[i].LastAccessedAt, results.DetailMemories[i].Type, now)
+		rj := accessRecencyFactor(results.DetailMemories[j].LastAccessedAt, results.DetailMemories[j].Type, now)
+		return ri > rj
 	})
 	for _, dm := range results.DetailMemories {
 		dmTokens := estimateTokens(dm.Text) + estimateTokens(strings.Join(dm.Files, ", "))
@@ -720,6 +737,30 @@ func (e *Engine) ReEvaluateSketchRaw(ctx context.Context, userID string, opts *P
 	return promoted, nil
 }
 
+// supersedeContinuity demotes older continuity entries that are semantically
+// similar to the newly added one (cosine similarity > 0.75). This prevents
+// stale "remaining: X" entries from accumulating when X has been completed
+// and a newer continuity entry reflects the updated status.
+func (e *Engine) supersedeContinuity(ctx context.Context, userID, newID string, newEmbedding []float32) {
+	existing, err := e.store.GetDetailsByType(userID, "continuity")
+	if err != nil || len(existing) <= 1 {
+		return
+	}
+
+	const supersessionThreshold = 0.75
+	for _, old := range existing {
+		if old.ID == newID {
+			continue
+		}
+		sim := CosineSimilarity(newEmbedding, old.Vector)
+		if sim >= supersessionThreshold {
+			// Demote the older entry to sketch path
+			e.sketch.IngestRaw(ctx, userID, old.Text, old.Sector, old.SessionID, old.Vector)
+			e.store.DeleteDetail(old.ID)
+		}
+	}
+}
+
 // DemoteFromDetail removes a memory from Detail Path and routes to Sketch.
 func (e *Engine) DemoteFromDetail(ctx context.Context, userID string, memoryID string) error {
 	e.mu.Lock()
@@ -743,6 +784,154 @@ func (e *Engine) DemoteFromDetail(ctx context.Context, userID string, memoryID s
 	}
 
 	return fmt.Errorf("dualmem: memory %s not found in detail path", memoryID)
+}
+
+// GarbageCollect runs comprehensive cleanup of stale, expired, and superseded memories.
+// Steps: expire episodes/arcs, demote git-stale details, supersede duplicate continuity,
+// demote access-cold details.
+func (e *Engine) GarbageCollect(ctx context.Context, userID string, opts GCOptions) (*GCReport, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	report := &GCReport{}
+	now := time.Now()
+
+	// 1. Expire old episodes
+	expired, err := e.store.GetExpiredEpisodes(now)
+	if err == nil {
+		for _, ep := range expired {
+			if opts.Verbose {
+				report.Entries = append(report.Entries, GCEntry{
+					ID: ep.ID, Action: "delete", Reason: "expired_episode",
+					Text: truncateGC(ep.SummaryText, 80),
+				})
+			}
+			if !opts.DryRun {
+				e.store.DeleteEpisode(ep.ID)
+			}
+			report.ExpiredEpisodes++
+		}
+	}
+
+	// 2. Expire old arcs
+	expiredArcs, err := e.store.GetExpiredArcs(now)
+	if err == nil {
+		for _, arc := range expiredArcs {
+			if opts.Verbose {
+				report.Entries = append(report.Entries, GCEntry{
+					ID: arc.ID, Action: "delete", Reason: "expired_arc",
+					Text: truncateGC(arc.SummaryText, 80),
+				})
+			}
+			if !opts.DryRun {
+				e.store.DeleteArc(arc.ID)
+			}
+			report.ExpiredArcs++
+		}
+	}
+
+	// 3. Git-stale detail demotion
+	if e.cfg.RootDir != "" {
+		lastMarker, _ := e.store.GetLatestSessionMarker(userID)
+		diff, _ := ComputeStructuralDiff(e.cfg.RootDir, lastMarker)
+		if diff != nil {
+			staleIDs := DetectStaleMemories(diff, e.store, userID)
+			details, _ := e.store.GetDetailMemories(userID)
+			detailMap := make(map[string]detailWithVector)
+			for _, d := range details {
+				detailMap[d.ID] = d
+			}
+			for _, id := range staleIDs {
+				d, ok := detailMap[id]
+				if !ok {
+					continue
+				}
+				// Don't demote warnings — they're intentional invariants
+				if d.Type == "warning" {
+					continue
+				}
+				if opts.Verbose {
+					report.Entries = append(report.Entries, GCEntry{
+						ID: id, Action: "demote", Reason: "git_stale",
+						Text: truncateGC(d.Text, 80),
+					})
+				}
+				if !opts.DryRun {
+					e.sketch.IngestRaw(ctx, userID, d.Text, d.Sector, d.SessionID, d.Vector)
+					e.store.DeleteDetail(id)
+				}
+				report.StaleDetails++
+			}
+		}
+	}
+
+	// 4. Continuity supersession scan — group by cosine similarity, keep newest per cluster
+	continuity, _ := e.store.GetDetailsByType(userID, "continuity")
+	if len(continuity) > 1 {
+		// Mark which IDs to keep (newest in each similarity cluster)
+		kept := make(map[string]bool)
+		demoted := make(map[string]bool)
+		for i, c := range continuity {
+			if demoted[c.ID] {
+				continue
+			}
+			kept[c.ID] = true
+			for j := i + 1; j < len(continuity); j++ {
+				other := continuity[j]
+				if demoted[other.ID] || kept[other.ID] {
+					continue
+				}
+				sim := CosineSimilarity(c.Vector, other.Vector)
+				if sim >= 0.75 {
+					// c is newer (sorted by created_at DESC), demote other
+					if opts.Verbose {
+						report.Entries = append(report.Entries, GCEntry{
+							ID: other.ID, Action: "demote", Reason: "superseded",
+							Text: truncateGC(other.Text, 80),
+						})
+					}
+					if !opts.DryRun {
+						e.sketch.IngestRaw(ctx, userID, other.Text, other.Sector, other.SessionID, other.Vector)
+						e.store.DeleteDetail(other.ID)
+					}
+					demoted[other.ID] = true
+					report.SupersededContinuity++
+				}
+			}
+		}
+	}
+
+	// 5. Access-cold demotion — details not accessed in 30+ days with importance < 0.8
+	details, _ := e.store.GetDetailMemories(userID)
+	for _, d := range details {
+		if d.Type == "warning" {
+			continue // never demote warnings
+		}
+		daysSinceAccess := now.Sub(d.LastAccessedAt).Hours() / 24
+		if daysSinceAccess >= 30 && d.ImportanceScore < 0.8 {
+			if opts.Verbose {
+				report.Entries = append(report.Entries, GCEntry{
+					ID: d.ID, Action: "demote", Reason: "access_cold",
+					Text: truncateGC(d.Text, 80),
+				})
+			}
+			if !opts.DryRun {
+				e.sketch.IngestRaw(ctx, userID, d.Text, d.Sector, d.SessionID, d.Vector)
+				e.store.DeleteDetail(d.ID)
+			}
+			report.AccessColdDetails++
+		}
+	}
+
+	return report, nil
+}
+
+func truncateGC(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) > max {
+		return s[:max-3] + "..."
+	}
+	return s
 }
 
 // Close shuts down the engine and all background workers.
@@ -791,6 +980,24 @@ func formatTypeLabel(memType, sector string, importance float64) string {
 	default:
 		return fmt.Sprintf("[Memory — %s (importance: %.2f)]", sector, importance)
 	}
+}
+
+// accessRecencyFactor returns a multiplier [0.5, 1.0] based on how recently
+// a memory was accessed. Memories not accessed in 60+ days get 0.5.
+// Warnings are exempt (always return 1.0) since they represent critical invariants.
+func accessRecencyFactor(lastAccessed time.Time, memType string, now time.Time) float64 {
+	if memType == "warning" {
+		return 1.0
+	}
+	days := now.Sub(lastAccessed).Hours() / 24
+	if days <= 0 {
+		return 1.0
+	}
+	factor := 1.0 - (days / 60.0)
+	if factor < 0.5 {
+		factor = 0.5
+	}
+	return factor
 }
 
 func formatProfile(p *ProfileSketch) string {
