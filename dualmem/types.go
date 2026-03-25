@@ -76,6 +76,7 @@ type SearchOpts struct {
 	IncludeSketch  bool               // Include sketch results (default true)
 	TokenBudget    int                // If > 0, limits total context size
 	QueryEmbedding []float32          // Pre-computed query embedding; if non-nil, DualSearch skips embedding
+	MinSimilarity  float64            // If > 0, exclude detail memories below this cosine similarity
 }
 
 // DualSearchResult contains results from both paths.

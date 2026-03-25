@@ -242,6 +242,16 @@ func (e *Engine) DualSearch(ctx context.Context, userID string, query string, op
 	if err != nil {
 		return nil, fmt.Errorf("dualmem: detail search: %w", err)
 	}
+	// Apply minimum similarity threshold if configured
+	if opts.MinSimilarity > 0 {
+		filtered := details[:0]
+		for _, dm := range details {
+			if dm.Similarity >= opts.MinSimilarity {
+				filtered = append(filtered, dm)
+			}
+		}
+		details = filtered
+	}
 	result.DetailMemories = details
 
 	// Sketch Path searches (if sketch is enabled, default true)
@@ -279,7 +289,8 @@ func (e *Engine) DualSearch(ctx context.Context, userID string, query string, op
 // diffs and code maps before memories.
 // ContextOpts configures AssembleContext behavior.
 type ContextOpts struct {
-	Intent Intent // Explicit intent override (empty = auto-detect from query)
+	Intent        Intent  // Explicit intent override (empty = auto-detect from query)
+	MinSimilarity float64 // If > 0, exclude detail memories below this cosine similarity
 }
 
 func (e *Engine) AssembleContext(ctx context.Context, userID string, query string, tokenBudget int) (*ContextBlock, error) {
@@ -309,10 +320,15 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 		}
 	}
 
+	var minSim float64
+	if opts != nil {
+		minSim = opts.MinSimilarity
+	}
 	results, err := e.DualSearch(ctx, userID, query, SearchOpts{
 		Limit:          10,
 		IncludeSketch:  true,
 		QueryEmbedding: queryEmb,
+		MinSimilarity:  minSim,
 	})
 	if err != nil {
 		return nil, err

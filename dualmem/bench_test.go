@@ -15,8 +15,8 @@ type benchResult struct {
 	Scenario     string
 	Query        string
 	Mode         string  // "none", "flat", "dualmem"
-	Precision    float64 // relevant_surfaced / total_surfaced
-	Recall       float64 // relevant_surfaced / total_relevant
+	Precision    float64 // relevant_detail_sources / total_detail_sources
+	Recall       float64 // distinct_expected_found / total_expected
 	NDCG         float64 // normalized discounted cumulative gain
 	TokensUsed   int
 	TokenBudget  int
@@ -50,11 +50,17 @@ type sectorPassthrough struct{}
 
 func (s *sectorPassthrough) Classify(content string) string { return "decision" }
 
-// seedMemories adds all benchmark memories to the engine and returns a tag→text map.
-func seedMemories(t *testing.T, engine *Engine, memories []benchMemory, userID string) map[string]string {
+// idTagMap maps detail memory IDs to benchmark tags.
+type idTagMap struct {
+	idToTag  map[string]string // detail ID → tag
+	tagToID  map[string]string // tag → detail ID
+	tagToText map[string]string // tag → original text
+}
+
+// seedMemories adds all benchmark memories to the engine and builds ID↔tag mappings.
+func seedMemories(t *testing.T, engine *Engine, memories []benchMemory, userID string) *idTagMap {
 	t.Helper()
 	ctx := context.Background()
-	tagToText := make(map[string]string)
 
 	for _, m := range memories {
 		salience := m.Salience
@@ -71,11 +77,29 @@ func seedMemories(t *testing.T, engine *Engine, memories []benchMemory, userID s
 		if err != nil {
 			t.Fatalf("AddWithOptions(%s): %v", m.Tag, err)
 		}
-		if m.Tag != "" {
-			tagToText[m.Tag] = m.Text
+	}
+
+	// Build ID→tag map by retrieving stored details and matching text
+	details, err := engine.store.GetDetailMemories(userID)
+	if err != nil {
+		t.Fatalf("GetDetailMemories: %v", err)
+	}
+
+	m := &idTagMap{
+		idToTag:   make(map[string]string),
+		tagToID:   make(map[string]string),
+		tagToText: make(map[string]string),
+	}
+	for _, d := range details {
+		for _, bm := range memories {
+			if bm.Tag != "" && d.Text == bm.Text {
+				m.idToTag[d.ID] = bm.Tag
+				m.tagToID[bm.Tag] = d.ID
+				m.tagToText[bm.Tag] = bm.Text
+			}
 		}
 	}
-	return tagToText
+	return m
 }
 
 // --- Mode runners ---
@@ -86,65 +110,59 @@ func runNone(query benchQuery) benchResult {
 		Mode:        "none",
 		Query:       query.Query,
 		TokenBudget: query.TokenBudget,
-		// Everything else is zero
 	}
 }
 
 // runFlat does raw cosine-similarity search on Detail memories only — no routing, priority, or budget.
-func runFlat(t *testing.T, engine *Engine, userID string, query benchQuery, tagToText map[string]string) benchResult {
+func runFlat(t *testing.T, engine *Engine, userID string, query benchQuery, m *idTagMap) benchResult {
 	t.Helper()
 	ctx := context.Background()
 
-	// Embed query
 	queryEmb, err := engine.embedder.Embed(ctx, query.Query, "RETRIEVAL_QUERY")
 	if err != nil {
 		t.Fatalf("embed query: %v", err)
 	}
 
-	// Get all details and score by cosine similarity
 	details, err := engine.store.GetDetailMemories(userID)
 	if err != nil {
 		t.Fatalf("GetDetailMemories: %v", err)
 	}
 
 	type scored struct {
-		DetailMemory
+		detailWithVector
 		similarity float64
 	}
 	var results []scored
 	for _, d := range details {
 		sim := CosineSimilarity(queryEmb, d.Vector)
-		dm := d.DetailMemory
-		dm.Similarity = sim
-		results = append(results, scored{dm, sim})
+		results = append(results, scored{d, sim})
 	}
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].similarity > results[j].similarity
 	})
 
-	// Take top 10 (same as DualSearch default) and assemble flat text
+	// Take top 10 with budget constraint
 	limit := 10
 	if len(results) < limit {
 		limit = len(results)
 	}
 
-	var contextTexts []string
+	var surfacedIDs []string
 	tokensUsed := 0
 	for i := 0; i < limit; i++ {
-		text := results[i].Text
-		tokens := estimateTokens(text)
+		tokens := estimateTokens(results[i].Text)
 		if tokensUsed+tokens > query.TokenBudget {
 			break
 		}
-		contextTexts = append(contextTexts, text)
+		surfacedIDs = append(surfacedIDs, results[i].ID)
 		tokensUsed += tokens
 	}
 
-	return evaluateResult("flat", query, contextTexts, tokensUsed, tagToText)
+	return evaluateByIDs("flat", query, surfacedIDs, tokensUsed, m)
 }
 
 // runDualMem uses the full AssembleContext pipeline.
-func runDualMem(t *testing.T, engine *Engine, userID string, query benchQuery, tagToText map[string]string) benchResult {
+func runDualMem(t *testing.T, engine *Engine, userID string, query benchQuery, m *idTagMap) benchResult {
 	t.Helper()
 	ctx := context.Background()
 
@@ -153,27 +171,20 @@ func runDualMem(t *testing.T, engine *Engine, userID string, query benchQuery, t
 		t.Fatalf("AssembleContext: %v", err)
 	}
 
-	// Extract individual memory texts from the block
-	var contextTexts []string
+	// Extract detail source IDs from ContextBlock.Sources
+	var surfacedIDs []string
 	for _, src := range block.Sources {
 		if src.Type == "detail" {
-			// Look up the text by finding it in the block output
-			// We need to match source IDs back to memory texts
+			surfacedIDs = append(surfacedIDs, src.ID)
 		}
 	}
 
-	// Since AssembleContext formats text as joined parts, parse it back.
-	// Each memory appears as a labeled block separated by double newlines.
-	parts := strings.Split(block.Text, "\n\n")
-	for _, part := range parts {
-		contextTexts = append(contextTexts, part)
-	}
-
-	return evaluateResult("dualmem", query, contextTexts, block.TokenCount, tagToText)
+	return evaluateByIDs("dualmem", query, surfacedIDs, block.TokenCount, m)
 }
 
-// evaluateResult computes precision, recall, NDCG, and other metrics.
-func evaluateResult(mode string, query benchQuery, contextTexts []string, tokensUsed int, tagToText map[string]string) benchResult {
+// evaluateByIDs computes precision, recall, NDCG using ID-based matching.
+// Only counts detail memories — structural sections (codemap, diff, profile) are excluded.
+func evaluateByIDs(mode string, query benchQuery, surfacedIDs []string, tokensUsed int, m *idTagMap) benchResult {
 	res := benchResult{
 		Mode:        mode,
 		Query:       query.Query,
@@ -185,49 +196,44 @@ func evaluateResult(mode string, query benchQuery, contextTexts []string, tokens
 		res.TokenUtil = float64(tokensUsed) / float64(query.TokenBudget)
 	}
 
-	// Build reverse map: memory text → tags (for matching)
-	textToTags := make(map[string][]string)
-	for tag, text := range tagToText {
-		textToTags[text] = append(textToTags[text], tag)
-	}
-
-	// Determine which expected/forbidden tags were surfaced
 	expectedSet := toSet(query.ExpectedTags)
 	forbidSet := toSet(query.ForbidTags)
 
-	surfacedTags := []string{}         // ordered list of tags found in context
-	relevantSurfaced := 0              // count of expected tags found
-	irrelevantTokens := 0              // tokens spent on non-relevant content
-	totalSurfacedWithTags := 0         // total surfaced items that matched any tag
+	// Map surfaced IDs to tags
+	var surfacedTags []string
+	relevantCount := 0
+	totalDetailSurfaced := 0
 
-	for _, ct := range contextTexts {
-		tags := findMatchingTags(ct, tagToText)
-		if len(tags) > 0 {
-			totalSurfacedWithTags++
-			for _, tag := range tags {
-				surfacedTags = append(surfacedTags, tag)
-				if expectedSet[tag] {
-					relevantSurfaced++
-				}
-			}
-		} else {
-			irrelevantTokens += estimateTokens(ct)
+	for _, id := range surfacedIDs {
+		tag, ok := m.idToTag[id]
+		if !ok {
+			// Detail memory exists but has no tag (e.g., "filler" memories)
+			totalDetailSurfaced++
+			continue
+		}
+		totalDetailSurfaced++
+		surfacedTags = append(surfacedTags, tag)
+		if expectedSet[tag] {
+			relevantCount++
 		}
 	}
 
-	// Precision: of surfaced tagged memories, how many were expected?
-	if totalSurfacedWithTags > 0 {
-		res.Precision = float64(relevantSurfaced) / float64(totalSurfacedWithTags)
+	// Precision: of detail memories surfaced, how many were expected?
+	if totalDetailSurfaced > 0 {
+		res.Precision = float64(relevantCount) / float64(totalDetailSurfaced)
 	}
 
 	// Recall: of expected tags, how many were surfaced?
 	if len(query.ExpectedTags) > 0 {
-		res.Recall = float64(relevantSurfaced) / float64(len(query.ExpectedTags))
+		res.Recall = float64(relevantCount) / float64(len(query.ExpectedTags))
 	}
 
-	// Budget waste
+	// Budget waste: estimate tokens spent on non-expected memories
 	if tokensUsed > 0 {
-		res.BudgetWaste = float64(irrelevantTokens) / float64(tokensUsed)
+		irrelevantCount := totalDetailSurfaced - relevantCount
+		if totalDetailSurfaced > 0 {
+			res.BudgetWaste = float64(irrelevantCount) / float64(totalDetailSurfaced)
+		}
 	}
 
 	// NDCG: measures ordering quality
@@ -235,27 +241,19 @@ func evaluateResult(mode string, query benchQuery, contextTexts []string, tokens
 
 	// Warning first?
 	if len(surfacedTags) > 0 {
-		// Check if first surfaced tag is a warning-type memory
-		for _, tag := range surfacedTags {
-			text := tagToText[tag]
-			if text != "" {
-				res.WarningFirst = isWarningText(text, tagToText)
-				break
-			}
-		}
+		res.WarningFirst = strings.Contains(surfacedTags[0], "warning")
 	}
 
 	// Order correct?
 	if len(query.OrderedTags) > 0 {
 		res.OrderCorrect = checkOrder(surfacedTags, query.OrderedTags)
 	} else {
-		res.OrderCorrect = true // no order constraint
+		res.OrderCorrect = true
 	}
 
-	// Check forbidden tags
+	// Penalize for forbidden tags
 	for _, tag := range surfacedTags {
 		if forbidSet[tag] {
-			// Penalize precision
 			res.Precision *= 0.5
 		}
 	}
@@ -266,7 +264,6 @@ func evaluateResult(mode string, query benchQuery, contextTexts []string, tokens
 // --- Metrics helpers ---
 
 // computeNDCG computes Normalized Discounted Cumulative Gain.
-// relevantSet defines which tags are relevant (binary relevance).
 func computeNDCG(surfacedTags []string, expectedTags []string) float64 {
 	if len(expectedTags) == 0 || len(surfacedTags) == 0 {
 		return 0
@@ -274,7 +271,6 @@ func computeNDCG(surfacedTags []string, expectedTags []string) float64 {
 
 	expectedSet := toSet(expectedTags)
 
-	// DCG: sum of 1/log2(i+2) for each relevant result at position i
 	dcg := 0.0
 	for i, tag := range surfacedTags {
 		if expectedSet[tag] {
@@ -282,7 +278,6 @@ func computeNDCG(surfacedTags []string, expectedTags []string) float64 {
 		}
 	}
 
-	// Ideal DCG: all relevant results at top positions
 	idcg := 0.0
 	n := len(expectedTags)
 	if n > len(surfacedTags) {
@@ -298,28 +293,7 @@ func computeNDCG(surfacedTags []string, expectedTags []string) float64 {
 	return dcg / idcg
 }
 
-func findMatchingTags(contextText string, tagToText map[string]string) []string {
-	var matches []string
-	for tag, text := range tagToText {
-		if strings.Contains(contextText, text) {
-			matches = append(matches, tag)
-		}
-	}
-	return matches
-}
-
-func isWarningText(text string, tagToText map[string]string) bool {
-	// Check if the tag name contains "warning"
-	for tag, t := range tagToText {
-		if t == text && strings.Contains(tag, "warning") {
-			return true
-		}
-	}
-	return false
-}
-
 func checkOrder(surfaced []string, expected []string) bool {
-	// Check that expected tags appear in the given order within surfaced
 	idx := 0
 	for _, tag := range surfaced {
 		if idx < len(expected) && tag == expected[idx] {
@@ -347,24 +321,20 @@ func TestBench(t *testing.T) {
 		t.Run(scenario.Name, func(t *testing.T) {
 			engine := newBenchEngine(t)
 			userID := "bench-user"
-			tagToText := seedMemories(t, engine, scenario.Memories, userID)
+			m := seedMemories(t, engine, scenario.Memories, userID)
 
 			for _, query := range scenario.Queries {
-				// Mode 1: No memory
 				noneResult := runNone(query)
 				noneResult.Scenario = scenario.Name
 
-				// Mode 2: Flat cosine search
-				flatResult := runFlat(t, engine, userID, query, tagToText)
+				flatResult := runFlat(t, engine, userID, query, m)
 				flatResult.Scenario = scenario.Name
 
-				// Mode 3: Full DualMem
-				dualResult := runDualMem(t, engine, userID, query, tagToText)
+				dualResult := runDualMem(t, engine, userID, query, m)
 				dualResult.Scenario = scenario.Name
 
 				allResults = append(allResults, noneResult, flatResult, dualResult)
 
-				// Log per-query comparison
 				t.Logf("\n  Query: %q", query.Query)
 				t.Logf("  %-8s | Prec: %.2f | Recall: %.2f | NDCG: %.2f | Tokens: %4d/%d | Waste: %.2f | Order: %v",
 					"none", noneResult.Precision, noneResult.Recall, noneResult.NDCG, noneResult.TokensUsed, noneResult.TokenBudget, noneResult.BudgetWaste, noneResult.OrderCorrect)
@@ -376,15 +346,78 @@ func TestBench(t *testing.T) {
 		})
 	}
 
-	// Print aggregate summary
 	t.Log("\n" + formatSummaryTable(allResults))
 
-	// Regression guards: DualMem should beat flat on average
+	// Regression guards
 	dualAvgRecall := avgMetric(allResults, "dualmem", func(r benchResult) float64 { return r.Recall })
 	flatAvgRecall := avgMetric(allResults, "flat", func(r benchResult) float64 { return r.Recall })
 
 	if dualAvgRecall < flatAvgRecall {
 		t.Errorf("DualMem avg recall (%.2f) should be >= flat avg recall (%.2f)", dualAvgRecall, flatAvgRecall)
+	}
+}
+
+// TestMinSimilarity verifies that the MinSimilarity filter actually removes low-similarity results.
+func TestMinSimilarity(t *testing.T) {
+	engine := newBenchEngine(t)
+	ctx := context.Background()
+	userID := "minsim-user"
+
+	// Seed: 1 relevant + 5 unrelated
+	memories := []benchMemory{
+		{Text: "JWT authentication uses RS256 signing with key rotation", Type: "decision", Sector: "decision", Salience: 0.8},
+		{Text: "Docker compose config for local PostgreSQL development", Sector: "map", Salience: 0.4},
+		{Text: "Frontend uses React Router v6 with lazy loading", Sector: "map", Salience: 0.4},
+		{Text: "CSS theme variables in globals.css root scope", Sector: "map", Salience: 0.3},
+		{Text: "Kubernetes manifests in deploy directory with kustomize", Sector: "map", Salience: 0.3},
+		{Text: "README badges for code coverage and Go version", Sector: "map", Salience: 0.2},
+	}
+	for _, m := range memories {
+		salience := m.Salience
+		if salience == 0 {
+			salience = 0.5
+		}
+		engine.AddWithOptions(ctx, MemoryInput{
+			UserMessage: m.Text,
+			SectorHint:  m.Sector,
+			Salience:    salience,
+			Type:        m.Type,
+		}, userID)
+	}
+
+	// Search without threshold
+	noThreshold, err := engine.DualSearch(ctx, userID, "authentication JWT", SearchOpts{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Search with threshold
+	withThreshold, err := engine.DualSearch(ctx, userID, "authentication JWT", SearchOpts{Limit: 10, MinSimilarity: 0.01})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Logf("Without threshold: %d results", len(noThreshold.DetailMemories))
+	for _, dm := range noThreshold.DetailMemories {
+		t.Logf("  sim=%.4f %s", dm.Similarity, dm.Text[:min(60, len(dm.Text))])
+	}
+
+	t.Logf("With threshold (0.01): %d results", len(withThreshold.DetailMemories))
+	for _, dm := range withThreshold.DetailMemories {
+		t.Logf("  sim=%.4f %s", dm.Similarity, dm.Text[:min(60, len(dm.Text))])
+	}
+
+	// With threshold should have fewer or equal results
+	if len(withThreshold.DetailMemories) > len(noThreshold.DetailMemories) {
+		t.Errorf("Threshold should reduce results: got %d > %d",
+			len(withThreshold.DetailMemories), len(noThreshold.DetailMemories))
+	}
+
+	// All results with threshold should meet the minimum
+	for _, dm := range withThreshold.DetailMemories {
+		if dm.Similarity < 0.01 {
+			t.Errorf("Result below threshold: sim=%.4f text=%s", dm.Similarity, dm.Text[:40])
+		}
 	}
 }
 
@@ -417,7 +450,6 @@ func formatSummaryTable(results []benchResult) string {
 			truncate(r.Scenario, 25), r.Mode, r.Precision, r.Recall, r.NDCG, r.TokensUsed, r.BudgetWaste))
 	}
 
-	// Averages
 	sb.WriteString(strings.Repeat("-", 85) + "\n")
 	for _, mode := range []string{"none", "flat", "dualmem"} {
 		avgPrec := avgMetric(results, mode, func(r benchResult) float64 { return r.Precision })
