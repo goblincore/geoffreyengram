@@ -21,10 +21,10 @@ type GeminiSummarizer struct {
 }
 
 // NewGeminiSummarizer creates a summarizer using Gemini Flash.
-// Model defaults to "gemini-2.0-flash" if empty.
+// Model defaults to "gemini-2.5-flash-lite" if empty.
 func NewGeminiSummarizer(apiKey, model string) *GeminiSummarizer {
 	if model == "" {
-		model = "gemini-2.0-flash"
+		model = "gemini-2.5-flash-lite"
 	}
 	return &GeminiSummarizer{
 		apiKey: apiKey,
