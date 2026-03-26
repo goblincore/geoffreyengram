@@ -337,6 +337,54 @@ Vectors are built from FNV-64a seeded basis vectors (+1/-1 binary), combined via
 | Avg NDCG | 0.956 | — |
 | Encode speed | ~600µs/module | ~160µs/module |
 
+### MCP Server — `dualmem-mcp`
+
+An MCP server exposes DualMem's HDC search and memory to Claude Code (or any MCP client). Five tools:
+
+| Tool | Description |
+|------|-------------|
+| `search_codebase` | HDC-ranked file search by natural language query — 1 call replaces grep/glob chains |
+| `get_codemap` | Full structural map (zoom-1 overview + per-module types/entry points/imports) |
+| `search_memory` | Cross-session memory search (decisions, warnings, insights) |
+| `get_context` | Token-budget-aware context assembly (code map + diff + checkpoints + memories) |
+| `save_memory` | Persist decisions, warnings, or continuity notes for future sessions |
+
+```bash
+go install github.com/goblincore/geoffreyengram/cmd/dualmem-mcp@latest
+```
+
+Add to Claude Code settings (`~/.claude/settings.json`):
+```json
+{
+  "mcpServers": {
+    "dualmem": {
+      "command": "dualmem-mcp"
+    }
+  }
+}
+```
+
+The server auto-detects `DUALMEM_ROOT_DIR` from cwd (each Claude Code session spawns its own process). Memories are namespaced by directory name (`claude:<dirname>`).
+
+**Search benchmark** (10-module repo, 6 queries):
+
+| | HDC Search | Grep Chain |
+|---|---|---|
+| Accuracy | **100%** (6/6) | 67% (4/6) |
+| Tool calls | **6** (1/query) | 36 (6/query) |
+| Query latency | ~55µs | — |
+
+### Tree-sitter parsing
+
+Code map extraction uses [gotreesitter](https://github.com/odvcencio/gotreesitter) (pure Go, no CGO) for TypeScript, Python, and Rust. Go parsing uses `go/ast` (stdlib). Each language has tree-sitter S-expression queries for types, entry points, imports, and private identifiers.
+
+| Language | Parser | Types | Entry Points | Imports | Identifiers |
+|----------|--------|-------|-------------|---------|-------------|
+| Go | `go/ast` | exported structs/interfaces | exported functions | import paths | unexported types/functions |
+| TypeScript | tree-sitter | exported classes/interfaces/types | exported functions/consts | import sources | non-exported declarations |
+| Python | tree-sitter | classes | public functions | import/from targets | `_underscore` functions |
+| Rust | tree-sitter | structs/enums/traits | `pub fn` | `use` paths | non-pub functions |
+
 ## Engram vs DualMem
 
 Both systems share embedding providers and SQLite storage, but they're designed for different problems:
@@ -377,8 +425,9 @@ geoffreyengram/
 │   ├── detail.go          # Detail Path (importance scoring, capacity management)
 │   ├── sketch.go          # Sketch Path (episodes, arcs, profiles)
 │   ├── pipeline.go        # Background compression workers
-│   ├── codemap.go         # Codebase scanner (Go AST + TS regex), imports/identifiers extraction
-│   ├── hdc.go             # Hyperdimensional computing encoder (2048-dim, 4-layer: path/symbols/lang/content)
+│   ├── codemap.go         # Codebase scanner (Go AST), HDC encode/search wrappers
+│   ├── parse_treesitter.go # Tree-sitter parsing for TypeScript, Python, Rust
+│   ├── hdc.go             # Hyperdimensional computing encoder (2048-dim, 4-layer)
 │   ├── diff.go            # Git-based structural diffs, stale memory detection
 │   ├── classify_embedding.go  # EmbeddingClassifier (ported from engram)
 │   ├── summarize_gemini.go    # GeminiSummarizer (episode/arc/profile compression)
@@ -386,7 +435,8 @@ geoffreyengram/
 │   └── project.go         # Random projection, cosine similarity
 ├── cmd/
 │   ├── dualmem/           # CLI tool
-│   └── engram-mcp/        # MCP server (5 tools)
+│   ├── dualmem-mcp/       # MCP server (5 tools: search_codebase, get_codemap, search_memory, get_context, save_memory)
+│   └── engram-mcp/        # MCP server (5 tools: remember, recall, reflect, get_session, inspect)
 └── examples/
     ├── chat/              # Local REPL with Ollama
     └── comparison/        # Memory mode comparison + LLM judge
@@ -394,7 +444,7 @@ geoffreyengram/
 
 ## Status
 
-Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 251 tests passing.
+Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 255 tests passing.
 
 ## License
 
