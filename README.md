@@ -271,7 +271,7 @@ Additionally, `AssembleContext` applies access-recency weighting: memories not a
 
 `dualmem context` assembles a token-budget-aware context block for the start of each coding session. It combines four things:
 
-**Code map** — multi-resolution structural summary of the codebase. Zoom-1 is a one-line system overview, zoom-2 is per-module with key types and entry points. Generated via Go AST parsing and TypeScript regex heuristics. Query-aware: module summaries are embedded at scan time, then ranked by cosine similarity to the query at render time. Aggressively filters noise directories (assets, icons, sass, .github, .changeset, etc.). Auto-regenerates when git HEAD changes.
+**Code map** — multi-resolution structural summary of the codebase. Zoom-1 is a one-line system overview, zoom-2 is per-module with key types, entry points, imports, and private identifiers. Generated via Go AST parsing and TypeScript regex heuristics. Query-aware ranking uses **hyperdimensional computing (HDC)** — deterministic 2048-dim vectors encoded from structural signals, no API calls needed. HDC encodes 4 layers per module: path (0.25), symbols (0.40), language (0.15), and content (0.20). The content layer combines identifiers at full weight with imports at 0.8× weight. Benchmarks show 100% top-1 ranking accuracy with the content layer vs 40% without (NDCG 0.956). Aggressively filters noise directories (assets, icons, sass, .github, .changeset, etc.). Auto-regenerates when git HEAD changes.
 
 **Structural diff** — git-based delta since the last session. Shows added/modified/deleted files with elapsed time and branch info. Handles branch switches, rebases, and force-pushes gracefully.
 
@@ -311,6 +311,31 @@ The `map` and `diff` commands are also available standalone:
 dualmem map    # print codebase structure without memories
 dualmem diff   # print changes since last session
 ```
+
+### HDC-powered code map ranking
+
+Code map modules are ranked by relevance using **hyperdimensional computing** (HDC) — inspired by [Glyphh Code](https://github.com/glyphh-ai/glyphh-code). No API calls, no embedding model, fully deterministic.
+
+Each module is encoded as a 2048-dimensional vector from 4 structural layers:
+
+| Layer | Weight | Source | Encoding |
+|-------|--------|--------|----------|
+| **Path** | 0.25 | Directory path tokens | Position-encoded (rotation) |
+| **Symbols** | 0.40 | Exported types + entry points | Bag-of-words |
+| **Language** | 0.15 | Programming language tag | Single basis vector |
+| **Content** | 0.20 | Identifiers (1.0) + imports (0.8) | Weighted bag-of-words |
+
+Vectors are built from FNV-64a seeded basis vectors (+1/-1 binary), combined via HDC bundle (element-wise sum) and normalized to unit length. Queries are encoded the same way — ranking is cosine similarity.
+
+**Why HDC?** Semantic embedding APIs (Gemini, OpenAI) cost money and add latency. HDC is free, instant (~600µs/module), deterministic, and works offline. The content layer — unexported identifiers and import paths — gives HDC enough signal to rank correctly: modules importing `database/sql` rank high for "database" queries, modules with `validateToken` identifiers rank high for "auth" queries.
+
+**Benchmark results:**
+
+| | With content layer | Without |
+|---|---|---|
+| Top-1 accuracy | 100% (5/5) | 40% (2/5) |
+| Avg NDCG | 0.956 | — |
+| Encode speed | ~600µs/module | ~160µs/module |
 
 ## Engram vs DualMem
 
@@ -352,7 +377,8 @@ geoffreyengram/
 │   ├── detail.go          # Detail Path (importance scoring, capacity management)
 │   ├── sketch.go          # Sketch Path (episodes, arcs, profiles)
 │   ├── pipeline.go        # Background compression workers
-│   ├── codemap.go         # Codebase scanner (Go AST + TS regex), query-aware ranking via embeddings
+│   ├── codemap.go         # Codebase scanner (Go AST + TS regex), imports/identifiers extraction
+│   ├── hdc.go             # Hyperdimensional computing encoder (2048-dim, 4-layer: path/symbols/lang/content)
 │   ├── diff.go            # Git-based structural diffs, stale memory detection
 │   ├── classify_embedding.go  # EmbeddingClassifier (ported from engram)
 │   ├── summarize_gemini.go    # GeminiSummarizer (episode/arc/profile compression)
@@ -368,7 +394,7 @@ geoffreyengram/
 
 ## Status
 
-Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 216 tests passing.
+Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 251 tests passing.
 
 ## License
 
