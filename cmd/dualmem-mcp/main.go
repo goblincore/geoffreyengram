@@ -36,11 +36,15 @@ func main() {
 	if rootDir == "" {
 		rootDir, _ = os.Getwd()
 	}
+	rootDir, _ = filepath.Abs(rootDir)
 
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	if apiKey == "" {
 		log.Fatal("dualmem-mcp: GEMINI_API_KEY is required")
 	}
+
+	// Log startup info to stderr (visible in Claude Code MCP logs)
+	fmt.Fprintf(os.Stderr, "dualmem-mcp: root=%s db=%s ns=claude:%s\n", rootDir, dbPath, filepath.Base(rootDir))
 
 	embedder := dualmem.NewGeminiEmbedder(apiKey, 768)
 
