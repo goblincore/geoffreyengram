@@ -476,6 +476,12 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 
 // getOrGenerateCodeMap loads a stored code map or generates one on the fly.
 // Returns the code map and per-module embeddings (for query-aware ranking).
+// GetCodeMap returns the cached code map and HDC module embeddings for a namespace.
+// Regenerates if the git commit has changed. HDC encoding is deterministic (no API calls).
+func (e *Engine) GetCodeMap(ctx context.Context, namespace string) (*CodeMap, map[string][]float32) {
+	return e.getOrGenerateCodeMap(ctx, namespace)
+}
+
 func (e *Engine) getOrGenerateCodeMap(ctx context.Context, namespace string) (*CodeMap, map[string][]float32) {
 	_, currentCommit := GetGitState(e.cfg.RootDir)
 

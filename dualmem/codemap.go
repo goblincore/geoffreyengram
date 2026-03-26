@@ -509,6 +509,33 @@ func HDCEncodeQuery(query string) []float32 {
 	return enc.EncodeQuery(query)
 }
 
+// ModuleResult is a ModuleMap with a similarity score from HDC search.
+type ModuleResult struct {
+	ModuleMap
+	Similarity float64 `json:"similarity"`
+}
+
+// SearchCodeMap ranks modules by HDC similarity to a query string.
+// Returns up to limit results sorted by descending similarity.
+func SearchCodeMap(cm *CodeMap, moduleEmbs map[string][]float32, query string, limit int) []ModuleResult {
+	if cm == nil || len(cm.Zoom2) == 0 {
+		return nil
+	}
+	queryVec := HDCEncodeQuery(query)
+	var results []ModuleResult
+	for _, m := range cm.Zoom2 {
+		sim := CosineSimilarity(queryVec, moduleEmbs[m.Path])
+		results = append(results, ModuleResult{ModuleMap: m, Similarity: sim})
+	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Similarity > results[j].Similarity
+	})
+	if limit > 0 && len(results) > limit {
+		results = results[:limit]
+	}
+	return results
+}
+
 // EmbedCodeMap embeds all module summaries in a code map.
 // Returns nil if embedder is nil (graceful degradation for standalone CLI usage).
 func EmbedCodeMap(ctx context.Context, cm *CodeMap, embedder EmbeddingProvider) (map[string]ModuleEmbedding, error) {

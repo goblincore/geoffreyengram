@@ -323,6 +323,40 @@ fn parse_config() -> Config {
 		rsMod.KeyTypes, rsMod.EntryPoints, rsMod.Imports, rsMod.Identifiers)
 }
 
+func TestSearchCodeMap(t *testing.T) {
+	cm := &CodeMap{
+		Zoom2: []ModuleMap{
+			{Path: "auth/", Language: "go", KeyTypes: []string{"struct AuthService"}, Imports: []string{"crypto/bcrypt"}, Identifiers: []string{"validateToken"}},
+			{Path: "db/", Language: "go", KeyTypes: []string{"struct Pool"}, Imports: []string{"database/sql"}, Identifiers: []string{"execQuery"}},
+			{Path: "api/", Language: "go", KeyTypes: []string{"struct Router"}, Imports: []string{"net/http"}, Identifiers: []string{"handleRequest"}},
+		},
+	}
+	embs := HDCEncodeCodeMap(cm)
+
+	results := SearchCodeMap(cm, embs, "authentication token bcrypt", 2)
+
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	if results[0].Path != "auth/" {
+		t.Errorf("expected auth/ first, got %s (sim=%.4f)", results[0].Path, results[0].Similarity)
+	}
+	if results[0].Similarity <= 0 {
+		t.Error("expected positive similarity for top result")
+	}
+	if results[0].Similarity <= results[1].Similarity {
+		t.Error("expected results sorted by descending similarity")
+	}
+
+	t.Logf("Results: %s (%.4f), %s (%.4f)", results[0].Path, results[0].Similarity, results[1].Path, results[1].Similarity)
+
+	// Test with nil codemap
+	nilResults := SearchCodeMap(nil, nil, "anything", 5)
+	if nilResults != nil {
+		t.Error("expected nil for nil codemap")
+	}
+}
+
 func BenchmarkScanCodebase(b *testing.B) {
 	// Benchmark on the geoffreyengram repo itself
 	for i := 0; i < b.N; i++ {
