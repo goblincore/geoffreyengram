@@ -9,7 +9,6 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -65,9 +64,11 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 
 	// Collect source directories
 	type dirInfo struct {
-		relPath string
-		goFiles []string
-		tsFiles []string
+		relPath  string
+		goFiles  []string
+		tsFiles  []string
+		pyFiles  []string
+		rsFiles  []string
 		allFiles []string
 	}
 	dirs := make(map[string]*dirInfo)
@@ -112,6 +113,10 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 			d.goFiles = append(d.goFiles, filepath.Join(dir, info.Name()))
 		case ".ts", ".tsx":
 			d.tsFiles = append(d.tsFiles, filepath.Join(dir, info.Name()))
+		case ".py":
+			d.pyFiles = append(d.pyFiles, filepath.Join(dir, info.Name()))
+		case ".rs":
+			d.rsFiles = append(d.rsFiles, filepath.Join(dir, info.Name()))
 		}
 		return nil
 	})
@@ -124,7 +129,11 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 		case len(d.goFiles) > 0:
 			mod = parseGoPackage(d.relPath, d.goFiles)
 		case len(d.tsFiles) > 0:
-			mod = parseTypeScriptModule(d.relPath, d.tsFiles)
+			mod = parseTSModule(d.relPath, d.tsFiles)
+		case len(d.pyFiles) > 0:
+			mod = parsePythonModule(d.relPath, d.pyFiles)
+		case len(d.rsFiles) > 0:
+			mod = parseRustModule(d.relPath, d.rsFiles)
 		default:
 			if isInterestingDir(d.relPath) {
 				mod = &ModuleMap{
@@ -278,98 +287,10 @@ func parseGoPackage(relPath string, goFiles []string) *ModuleMap {
 	}
 }
 
-// --- TypeScript regex parser ---
-
-var tsExportPattern = regexp.MustCompile(`export\s+(?:default\s+)?(?:async\s+)?(function|class|interface|type|const|enum)\s+(\w+)`)
-var tsImportPattern = regexp.MustCompile(`(?:import|require)\s*(?:\(?\s*['"])([\w\-\./@]+)`)
-var tsIdentPattern = regexp.MustCompile(`(?:^|[;\s])(?:function|class|const|let|var)\s+([a-z_]\w*)`)
-
-func parseTypeScriptModule(relPath string, tsFiles []string) *ModuleMap {
-	var types []string
-	var entryPoints []string
-	var imports []string
-	var identifiers []string
-	hasIndex := false
-	importSeen := make(map[string]bool)
-	identSeen := make(map[string]bool)
-
-	for _, f := range tsFiles {
-		base := filepath.Base(f)
-		if base == "index.ts" || base == "index.tsx" {
-			hasIndex = true
-			entryPoints = append(entryPoints, base)
-		}
-
-		data, err := os.ReadFile(f)
-		if err != nil {
-			continue
-		}
-		content := string(data)
-
-		matches := tsExportPattern.FindAllStringSubmatch(content, -1)
-		for _, m := range matches {
-			if len(m) >= 3 {
-				kind := m[1]
-				name := m[2]
-				switch kind {
-				case "class", "interface", "type", "enum":
-					types = append(types, fmt.Sprintf("%s %s", kind, name))
-				case "function", "const":
-					if !hasIndex || base != "index.ts" {
-						entryPoints = append(entryPoints, name+"()")
-					}
-				}
-			}
-		}
-
-		// Extract imports
-		impMatches := tsImportPattern.FindAllStringSubmatch(content, -1)
-		for _, m := range impMatches {
-			if len(m) >= 2 && !importSeen[m[1]] {
-				importSeen[m[1]] = true
-				imports = append(imports, m[1])
-			}
-		}
-
-		// Extract private identifiers (lowercase start = unexported by convention)
-		identMatches := tsIdentPattern.FindAllStringSubmatch(content, -1)
-		for _, m := range identMatches {
-			if len(m) >= 2 && !identSeen[m[1]] {
-				identSeen[m[1]] = true
-				identifiers = append(identifiers, m[1])
-			}
-		}
-	}
-
-	if len(types) > 8 {
-		types = types[:8]
-	}
-	if len(entryPoints) > 6 {
-		entryPoints = entryPoints[:6]
-	}
-	if len(imports) > 15 {
-		imports = imports[:15]
-	}
-	if len(identifiers) > 15 {
-		identifiers = identifiers[:15]
-	}
-
-	return &ModuleMap{
-		Path:        relPath + "/",
-		Language:    "typescript",
-		Summary:     fmt.Sprintf("TypeScript module (%d files)", len(tsFiles)),
-		KeyTypes:    types,
-		EntryPoints: entryPoints,
-		FileCount:   len(tsFiles),
-		Imports:     imports,
-		Identifiers: identifiers,
-	}
-}
-
 // --- Zoom-1 synthesizer ---
 
 func synthesizeZoom1(modules []ModuleMap, rootDir string) string {
-	goCount, tsCount, otherCount := 0, 0, 0
+	goCount, tsCount, pyCount, rsCount, otherCount := 0, 0, 0, 0, 0
 	var clis []string
 	var packages []string
 
@@ -384,6 +305,10 @@ func synthesizeZoom1(modules []ModuleMap, rootDir string) string {
 			}
 		case "typescript":
 			tsCount++
+		case "python":
+			pyCount++
+		case "rust":
+			rsCount++
 		default:
 			otherCount++
 		}
@@ -398,6 +323,12 @@ func synthesizeZoom1(modules []ModuleMap, rootDir string) string {
 	}
 	if tsCount > 0 {
 		langs = append(langs, "TypeScript")
+	}
+	if pyCount > 0 {
+		langs = append(langs, "Python")
+	}
+	if rsCount > 0 {
+		langs = append(langs, "Rust")
 	}
 	if len(langs) > 0 {
 		parts = append(parts, strings.Join(langs, "+")+" project")
@@ -512,6 +443,8 @@ func detectLanguage(files []string) string {
 			counts["python"]++
 		case ".js", ".jsx":
 			counts["javascript"]++
+		case ".rs":
+			counts["rust"]++
 		}
 	}
 	best := "other"

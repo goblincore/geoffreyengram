@@ -164,6 +164,172 @@ export const VERSION = "1.0.0"
 	}
 }
 
+func TestScanCodebase_PythonModule(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	pyDir := filepath.Join(tmpDir, "mypackage")
+	os.MkdirAll(pyDir, 0755)
+
+	writeFile(t, pyDir, "service.py", `
+from flask import Flask, request
+import os
+import json
+
+class UserService:
+    def get_user(self, user_id):
+        pass
+
+class AuthProvider:
+    pass
+
+def authenticate(token):
+    pass
+
+def _validate_internal(data):
+    pass
+
+def _helper():
+    pass
+`)
+
+	cm, err := ScanCodebase(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var pyMod *ModuleMap
+	for i := range cm.Zoom2 {
+		if strings.Contains(cm.Zoom2[i].Path, "mypackage") {
+			pyMod = &cm.Zoom2[i]
+			break
+		}
+	}
+	if pyMod == nil {
+		t.Fatal("expected mypackage/ module")
+	}
+
+	if pyMod.Language != "python" {
+		t.Errorf("language = %q, want python", pyMod.Language)
+	}
+
+	// Types: classes
+	typeNames := strings.Join(pyMod.KeyTypes, " ")
+	if !strings.Contains(typeNames, "UserService") {
+		t.Errorf("expected UserService in types, got %v", pyMod.KeyTypes)
+	}
+	if !strings.Contains(typeNames, "AuthProvider") {
+		t.Errorf("expected AuthProvider in types, got %v", pyMod.KeyTypes)
+	}
+
+	// Imports
+	importNames := strings.Join(pyMod.Imports, " ")
+	if !strings.Contains(importNames, "flask") {
+		t.Errorf("expected flask in imports, got %v", pyMod.Imports)
+	}
+	if !strings.Contains(importNames, "os") {
+		t.Errorf("expected os in imports, got %v", pyMod.Imports)
+	}
+
+	// Identifiers: private functions (underscore prefix)
+	identNames := strings.Join(pyMod.Identifiers, " ")
+	if !strings.Contains(identNames, "_validate_internal") {
+		t.Errorf("expected _validate_internal in identifiers, got %v", pyMod.Identifiers)
+	}
+
+	t.Logf("Python module: types=%v entries=%v imports=%v idents=%v",
+		pyMod.KeyTypes, pyMod.EntryPoints, pyMod.Imports, pyMod.Identifiers)
+}
+
+func TestScanCodebase_RustModule(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	rsDir := filepath.Join(tmpDir, "src")
+	os.MkdirAll(rsDir, 0755)
+
+	writeFile(t, rsDir, "lib.rs", `
+use std::collections::HashMap;
+use serde::{Serialize, Deserialize};
+
+pub struct Config {
+    pub name: String,
+    pub port: u16,
+}
+
+pub trait Handler {
+    fn handle(&self);
+}
+
+pub enum Status {
+    Active,
+    Inactive,
+}
+
+pub fn serve(config: Config) {}
+
+fn validate(input: &str) -> bool {
+    true
+}
+
+fn parse_config() -> Config {
+    Config { name: String::new(), port: 8080 }
+}
+`)
+
+	cm, err := ScanCodebase(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var rsMod *ModuleMap
+	for i := range cm.Zoom2 {
+		if strings.Contains(cm.Zoom2[i].Path, "src") {
+			rsMod = &cm.Zoom2[i]
+			break
+		}
+	}
+	if rsMod == nil {
+		t.Fatal("expected src/ module")
+	}
+
+	if rsMod.Language != "rust" {
+		t.Errorf("language = %q, want rust", rsMod.Language)
+	}
+
+	// Types: struct, trait, enum
+	typeNames := strings.Join(rsMod.KeyTypes, " ")
+	if !strings.Contains(typeNames, "Config") {
+		t.Errorf("expected Config in types, got %v", rsMod.KeyTypes)
+	}
+	if !strings.Contains(typeNames, "Handler") {
+		t.Errorf("expected Handler in types, got %v", rsMod.KeyTypes)
+	}
+	if !strings.Contains(typeNames, "Status") {
+		t.Errorf("expected Status in types, got %v", rsMod.KeyTypes)
+	}
+
+	// Imports
+	importNames := strings.Join(rsMod.Imports, " ")
+	if !strings.Contains(importNames, "HashMap") {
+		t.Errorf("expected HashMap in imports, got %v", rsMod.Imports)
+	}
+
+	// Private identifiers
+	identNames := strings.Join(rsMod.Identifiers, " ")
+	if !strings.Contains(identNames, "validate") {
+		t.Errorf("expected validate in identifiers, got %v", rsMod.Identifiers)
+	}
+
+	t.Logf("Rust module: types=%v entries=%v imports=%v idents=%v",
+		rsMod.KeyTypes, rsMod.EntryPoints, rsMod.Imports, rsMod.Identifiers)
+}
+
+func BenchmarkScanCodebase(b *testing.B) {
+	// Benchmark on the geoffreyengram repo itself
+	for i := 0; i < b.N; i++ {
+		ScanCodebase(".")
+	}
+}
+
 func TestRenderAtBudget(t *testing.T) {
 	cm := &CodeMap{
 		Zoom1: "Go project. packages: engine, store. binaries: cmd/cli.",
