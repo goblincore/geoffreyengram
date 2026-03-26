@@ -29,7 +29,7 @@ func main() {
 	dbPath := os.Getenv("DUALMEM_DB_PATH")
 	if dbPath == "" {
 		home, _ := os.UserHomeDir()
-		dbPath = filepath.Join(home, ".dualmem", "memory.db")
+		dbPath = filepath.Join(home, ".local", "share", "dualmem", "memories.db")
 	}
 
 	rootDir := os.Getenv("DUALMEM_ROOT_DIR")
