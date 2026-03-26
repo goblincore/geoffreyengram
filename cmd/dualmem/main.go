@@ -811,8 +811,8 @@ func cmdSearchCode(cfg CLIConfig) {
 		os.Exit(1)
 	}
 
-	embs := dualmem.HDCEncodeCodeMap(cm)
-	results := dualmem.SearchCodeMap(cm, embs, query, *limit)
+	idx := dualmem.BuildCodeIndex(cm)
+	results := dualmem.SearchCodeMap(cm, idx, query, *limit)
 
 	if *jsonOut {
 		json.NewEncoder(os.Stdout).Encode(results)
@@ -820,7 +820,8 @@ func cmdSearchCode(cfg CLIConfig) {
 	}
 
 	for i, r := range results {
-		fmt.Printf("  %d. %-30s sim=%.4f  %s\n", i+1, r.Path, r.Similarity, r.Summary)
+		fmt.Printf("  %d. %-30s score=%.4f (hdc=%.2f kw=%.2f)  %s\n",
+			i+1, r.Path, r.HybridScore, r.Similarity, r.KeywordScore, r.Summary)
 		if len(r.KeyTypes) > 0 {
 			fmt.Printf("     Types: %s\n", strings.Join(r.KeyTypes, ", "))
 		}

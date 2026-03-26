@@ -511,6 +511,160 @@ func TestHDC_ContentLayerNDCG(t *testing.T) {
 	}
 }
 
+// --- BM25 + Hybrid tests ---
+
+func TestBM25Score(t *testing.T) {
+	cm := &CodeMap{
+		Zoom2: []ModuleMap{
+			{Path: "auth/", Language: "go", KeyTypes: []string{"struct AuthService"}, Identifiers: []string{"validateToken", "issueJWT"}},
+			{Path: "db/", Language: "go", KeyTypes: []string{"struct Pool"}, Identifiers: []string{"execQuery", "scanRow"}},
+			{Path: "api/", Language: "go", KeyTypes: []string{"struct Router"}, Identifiers: []string{"handleRequest"}},
+		},
+	}
+	idx := BuildCodeIndex(cm)
+
+	// "auth" query should score auth/ highest
+	authScore := BM25Score(idx, "auth/", []string{"auth", "token", "validate"})
+	dbScore := BM25Score(idx, "db/", []string{"auth", "token", "validate"})
+	if authScore <= dbScore {
+		t.Errorf("expected auth/ (%.4f) > db/ (%.4f) for auth query", authScore, dbScore)
+	}
+	if authScore <= 0 {
+		t.Errorf("expected positive BM25 score for matching module, got %.4f", authScore)
+	}
+	t.Logf("auth query: auth/=%.4f db/=%.4f api/=%.4f", authScore, dbScore, BM25Score(idx, "api/", []string{"auth", "token", "validate"}))
+
+	// "db query exec" should score db/ highest
+	dbQueryScore := BM25Score(idx, "db/", []string{"db", "query", "exec"})
+	authQueryScore := BM25Score(idx, "auth/", []string{"db", "query", "exec"})
+	if dbQueryScore <= authQueryScore {
+		t.Errorf("expected db/ (%.4f) > auth/ (%.4f) for db query", dbQueryScore, authQueryScore)
+	}
+
+	// Zero score for no-match tokens
+	noMatch := BM25Score(idx, "auth/", []string{"zzzyyyxxx"})
+	if noMatch != 0 {
+		t.Errorf("expected 0 for non-matching tokens, got %.4f", noMatch)
+	}
+}
+
+func TestBM25Score_IDF(t *testing.T) {
+	// Modules where "go" appears in all but "unique" appears in only one
+	cm := &CodeMap{
+		Zoom2: []ModuleMap{
+			{Path: "a/", Language: "go", Identifiers: []string{"common", "unique"}},
+			{Path: "b/", Language: "go", Identifiers: []string{"common"}},
+			{Path: "c/", Language: "go", Identifiers: []string{"common"}},
+		},
+	}
+	idx := BuildCodeIndex(cm)
+
+	// IDF for "unique" should be higher than "common"
+	if idx.IDF["unique"] <= idx.IDF["common"] {
+		t.Errorf("expected IDF(unique)=%.4f > IDF(common)=%.4f", idx.IDF["unique"], idx.IDF["common"])
+	}
+	t.Logf("IDF: unique=%.4f common=%.4f", idx.IDF["unique"], idx.IDF["common"])
+}
+
+func TestAdaptiveAlpha(t *testing.T) {
+	// High spread → trust HDC
+	alpha := AdaptiveAlpha([]float64{0.90, 0.80, 0.70})
+	if alpha != alphaMax {
+		t.Errorf("high spread: expected %.2f, got %.2f", alphaMax, alpha)
+	}
+
+	// Low spread → lean on BM25
+	alpha = AdaptiveAlpha([]float64{0.50, 0.495, 0.49})
+	if alpha != alphaMin {
+		t.Errorf("low spread: expected %.2f, got %.2f", alphaMin, alpha)
+	}
+
+	// Mid spread → interpolated
+	alpha = AdaptiveAlpha([]float64{0.50, 0.48, 0.465})
+	if alpha <= alphaMin || alpha >= alphaMax {
+		t.Errorf("mid spread: expected alpha between %.2f and %.2f, got %.2f", alphaMin, alphaMax, alpha)
+	}
+
+	// Single score → max alpha
+	alpha = AdaptiveAlpha([]float64{0.50})
+	if alpha != alphaMax {
+		t.Errorf("single score: expected %.2f, got %.2f", alphaMax, alpha)
+	}
+
+	t.Logf("Alpha: high=%.2f low=%.2f mid=%.2f single=%.2f",
+		AdaptiveAlpha([]float64{0.90, 0.80, 0.70}),
+		AdaptiveAlpha([]float64{0.50, 0.49, 0.48}),
+		AdaptiveAlpha([]float64{0.50, 0.48, 0.465}),
+		AdaptiveAlpha([]float64{0.50}))
+}
+
+func TestBuildCodeIndex(t *testing.T) {
+	cm := &CodeMap{
+		Zoom2: []ModuleMap{
+			{Path: "auth/", Language: "go", KeyTypes: []string{"struct AuthService"}, Identifiers: []string{"validateToken"}},
+			{Path: "db/", Language: "go", KeyTypes: []string{"struct Pool"}, Identifiers: []string{"execQuery"}},
+		},
+	}
+	idx := BuildCodeIndex(cm)
+
+	if idx.NumDocs != 2 {
+		t.Errorf("expected 2 docs, got %d", idx.NumDocs)
+	}
+	if len(idx.HDCVectors) != 2 {
+		t.Errorf("expected 2 HDC vectors, got %d", len(idx.HDCVectors))
+	}
+	if len(idx.TokenFreqs) != 2 {
+		t.Errorf("expected 2 token freq maps, got %d", len(idx.TokenFreqs))
+	}
+	if idx.AvgDocLen <= 0 {
+		t.Errorf("expected positive avg doc len, got %.2f", idx.AvgDocLen)
+	}
+
+	// "auth" token should have tf > 0 for auth/ module
+	if idx.TokenFreqs["auth/"]["auth"] <= 0 {
+		t.Error("expected auth token in auth/ module")
+	}
+	// "validate" should have positive IDF
+	if idx.IDF["validate"] <= 0 {
+		t.Errorf("expected positive IDF for 'validate', got %.4f", idx.IDF["validate"])
+	}
+
+	t.Logf("Index: %d docs, avg_doc_len=%.1f, %d IDF entries", idx.NumDocs, idx.AvgDocLen, len(idx.IDF))
+}
+
+func TestHybridSearch_GeneralQueries(t *testing.T) {
+	// Scenario: general queries that HDC-only struggles with
+	cm := &CodeMap{
+		Zoom2: []ModuleMap{
+			{Path: "cmd/server/", Language: "go", EntryPoints: []string{"main()"}, Identifiers: []string{"run", "setup"}},
+			{Path: "cmd/cli/", Language: "go", EntryPoints: []string{"main()"}, Identifiers: []string{"parseArgs", "execute"}},
+			{Path: "dualmem/", Language: "go", KeyTypes: []string{"struct Engine", "struct Config"}, Identifiers: []string{"New", "Search", "Add"}},
+			{Path: "auth/", Language: "go", KeyTypes: []string{"struct AuthService"}, Identifiers: []string{"validateToken"}},
+		},
+	}
+	idx := BuildCodeIndex(cm)
+
+	// "main entry point" should rank cmd/ modules above others
+	results := SearchCodeMap(cm, idx, "main entry point", 4)
+	if len(results) < 2 {
+		t.Fatalf("expected at least 2 results, got %d", len(results))
+	}
+	top := results[0].Path
+	if top != "cmd/server/" && top != "cmd/cli/" {
+		t.Errorf("expected cmd/ module first for 'main entry point', got %s", top)
+	}
+
+	// "struct Config" should rank dualmem/ first
+	results = SearchCodeMap(cm, idx, "struct Config types", 4)
+	if results[0].Path != "dualmem/" {
+		t.Errorf("expected dualmem/ first for 'struct Config types', got %s", results[0].Path)
+	}
+
+	for _, r := range results {
+		t.Logf("  %-20s hybrid=%.4f hdc=%.4f kw=%.4f", r.Path, r.HybridScore, r.Similarity, r.KeywordScore)
+	}
+}
+
 // --- Benchmarks ---
 
 func BenchmarkHDCEncodeModule(b *testing.B) {

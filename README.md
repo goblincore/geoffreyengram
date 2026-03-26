@@ -146,7 +146,7 @@ Incoming Memory → Importance Scorer
              └─────────────────┘   └─────────────────────┘
 ```
 
-**AssembleContext** is the key method — given a token budget, it assembles a structured context block in priority order: structural diff → code map (query-ranked) → checkpoints → profile → arcs → detail memories → episodes. Returns exactly what fits. **Task-aware**: auto-detects intent from the query (debug, continue, feature, explore) and adjusts memory type weights accordingly — debugging boosts warnings, resuming boosts continuity.
+**AssembleContext** is the key method — given a token budget, it assembles a structured context block in priority order: structural diff → checkpoints (loaded early for file hints) → code map (memory-informed ranking) → profile → arcs → detail memories → episodes. Returns exactly what fits. **Task-aware**: auto-detects intent from the query (debug, continue, feature, explore) and adjusts memory type weights accordingly — debugging boosts warnings, resuming boosts continuity.
 
 ```go
 import "github.com/goblincore/geoffreyengram/dualmem"
@@ -308,7 +308,7 @@ Additionally, `AssembleContext` applies access-recency weighting: memories not a
 
 `dualmem context` assembles a token-budget-aware context block for the start of each coding session. It combines four things:
 
-**Code map** — multi-resolution structural summary of the codebase. Zoom-1 is a one-line system overview, zoom-2 is per-module with key types, entry points, imports, and private identifiers. Generated via Go AST parsing and TypeScript regex heuristics. Query-aware ranking uses **hyperdimensional computing (HDC)** — deterministic 2048-dim vectors encoded from structural signals, no API calls needed. HDC encodes 4 layers per module: path (0.25), symbols (0.40), language (0.15), and content (0.20). The content layer combines identifiers at full weight with imports at 0.8× weight. Benchmarks show 100% top-1 ranking accuracy with the content layer vs 40% without (NDCG 0.956). Aggressively filters noise directories (assets, icons, sass, .github, .changeset, etc.). Auto-regenerates when git HEAD changes.
+**Code map** — multi-resolution structural summary of the codebase. Zoom-1 is a one-line system overview, zoom-2 is per-module with key types, entry points, imports, and private identifiers. Generated via Go AST parsing and TypeScript regex heuristics. Query-aware ranking uses **hyperdimensional computing (HDC)** — deterministic 2048-dim vectors encoded from structural signals, no API calls needed. HDC encodes 4 layers per module: path (0.25), symbols (0.40), language (0.15), and content (0.20). The content layer combines identifiers at full weight with imports at 0.8× weight. **Memory-informed ranking**: checkpoints and recent memories provide file hints that boost relevant modules — if your checkpoint mentions `jwt.go` and `auth.go`, modules containing those paths rank higher even with a generic query. A minimum similarity threshold (0.05) filters modules with near-zero relevance, preventing budget waste on noise. Aggressively filters noise directories (assets, icons, sass, .github, .changeset, etc.). Auto-regenerates when git HEAD changes.
 
 **Structural diff** — git-based delta since the last session. Shows added/modified/deleted files with elapsed time and branch info. Handles branch switches, rebases, and force-pushes gracefully.
 
@@ -366,6 +366,8 @@ Vectors are built from FNV-64a seeded basis vectors (+1/-1 binary), combined via
 
 **Why HDC?** Semantic embedding APIs (Gemini, OpenAI) cost money and add latency. HDC is free, instant (~600µs/module), deterministic, and works offline. The content layer — unexported identifiers and import paths — gives HDC enough signal to rank correctly: modules importing `database/sql` rank high for "database" queries, modules with `validateToken` identifiers rank high for "auth" queries.
 
+**Memory-informed ranking**: For generic session-start queries like "session context", pure HDC similarity has no discriminative power — all modules score equally low. To solve this, `AssembleContext` loads checkpoints and memories before rendering the codemap and extracts file hints. Modules whose paths match these hints get a +0.3 similarity boost. A minimum threshold (0.05) filters modules with near-zero relevance, preventing budget waste. In a 16-module simulated repo, this reduces noise from 16 modules to just the 3-4 relevant ones.
+
 **Benchmark results:**
 
 | | With content layer | Without |
@@ -373,6 +375,11 @@ Vectors are built from FNV-64a seeded basis vectors (+1/-1 binary), combined via
 | Top-1 accuracy | 100% (5/5) | 40% (2/5) |
 | Avg NDCG | 0.956 | — |
 | Encode speed | ~600µs/module | ~160µs/module |
+
+| Codemap relevance | Without memory boost | With memory boost |
+|---|---|---|
+| Relevant modules surfaced | 0-1/3 | 3/3 |
+| Noise modules filtered | 1/16 | 12/16 |
 
 ### MCP Server (optional) — `dualmem-mcp`
 

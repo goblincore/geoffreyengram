@@ -19,6 +19,79 @@ const (
 	hdcWeightContent = 0.20 // identifiers (1.0) + imports (0.8)
 )
 
+// BM25 parameters (Okapi BM25 defaults).
+const (
+	bm25K1 = 1.2
+	bm25B  = 0.75
+)
+
+// Adaptive alpha thresholds: HDC score spread → blend weight.
+// When spread > alphaHighSpread, trust HDC (alpha = alphaMax).
+// When spread < alphaLowSpread, lean on BM25 (alpha = alphaMin).
+const (
+	alphaLowSpread  = 0.02
+	alphaHighSpread = 0.05
+	alphaMin        = 0.4
+	alphaMax        = 0.7
+)
+
+// CodeIndex bundles HDC vectors (dense) with BM25 token data (sparse)
+// for hybrid search. Built once per codebase scan via BuildCodeIndex.
+type CodeIndex struct {
+	HDCVectors map[string][]float32      // module path → HDC vector
+	TokenFreqs map[string]map[string]int // module path → token → term frequency
+	IDF        map[string]float64        // token → IDF score
+	DocLens    map[string]int            // module path → total token count
+	AvgDocLen  float64
+	NumDocs    int
+}
+
+// BM25Score computes the Okapi BM25 score for a module against query tokens.
+func BM25Score(idx *CodeIndex, modulePath string, queryTokens []string) float64 {
+	tf := idx.TokenFreqs[modulePath]
+	if tf == nil {
+		return 0
+	}
+	dl := float64(idx.DocLens[modulePath])
+	var score float64
+	for _, qt := range queryTokens {
+		idf := idx.IDF[qt]
+		if idf == 0 {
+			continue
+		}
+		termFreq := float64(tf[qt])
+		if termFreq == 0 {
+			continue
+		}
+		num := termFreq * (bm25K1 + 1)
+		denom := termFreq + bm25K1*(1-bm25B+bm25B*dl/idx.AvgDocLen)
+		score += idf * num / denom
+	}
+	return score
+}
+
+// AdaptiveAlpha computes the HDC/BM25 blend weight from HDC score spread.
+// sortedScores must be descending. Returns alpha in [alphaMin, alphaMax].
+func AdaptiveAlpha(sortedScores []float64) float64 {
+	if len(sortedScores) < 2 {
+		return alphaMax
+	}
+	rank3 := len(sortedScores) - 1
+	if rank3 > 2 {
+		rank3 = 2
+	}
+	spread := sortedScores[0] - sortedScores[rank3]
+	if spread >= alphaHighSpread {
+		return alphaMax
+	}
+	if spread <= alphaLowSpread {
+		return alphaMin
+	}
+	// Linear interpolation
+	t := (spread - alphaLowSpread) / (alphaHighSpread - alphaLowSpread)
+	return alphaMin + t*(alphaMax-alphaMin)
+}
+
 // HDCEncoder generates hyperdimensional vectors from structural code signals.
 // Vectors are deterministic — same input always produces the same vector.
 type HDCEncoder struct {

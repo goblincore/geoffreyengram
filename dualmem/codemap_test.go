@@ -331,24 +331,26 @@ func TestSearchCodeMap(t *testing.T) {
 			{Path: "api/", Language: "go", KeyTypes: []string{"struct Router"}, Imports: []string{"net/http"}, Identifiers: []string{"handleRequest"}},
 		},
 	}
-	embs := HDCEncodeCodeMap(cm)
+	idx := BuildCodeIndex(cm)
 
-	results := SearchCodeMap(cm, embs, "authentication token bcrypt", 2)
+	results := SearchCodeMap(cm, idx, "authentication token bcrypt", 2)
 
 	if len(results) != 2 {
 		t.Fatalf("expected 2 results, got %d", len(results))
 	}
 	if results[0].Path != "auth/" {
-		t.Errorf("expected auth/ first, got %s (sim=%.4f)", results[0].Path, results[0].Similarity)
+		t.Errorf("expected auth/ first, got %s (hybrid=%.4f)", results[0].Path, results[0].HybridScore)
 	}
-	if results[0].Similarity <= 0 {
-		t.Error("expected positive similarity for top result")
+	if results[0].HybridScore <= 0 {
+		t.Error("expected positive hybrid score for top result")
 	}
-	if results[0].Similarity <= results[1].Similarity {
-		t.Error("expected results sorted by descending similarity")
+	if results[0].HybridScore <= results[1].HybridScore {
+		t.Error("expected results sorted by descending hybrid score")
 	}
 
-	t.Logf("Results: %s (%.4f), %s (%.4f)", results[0].Path, results[0].Similarity, results[1].Path, results[1].Similarity)
+	t.Logf("Results: %s (hybrid=%.4f hdc=%.4f kw=%.4f), %s (hybrid=%.4f hdc=%.4f kw=%.4f)",
+		results[0].Path, results[0].HybridScore, results[0].Similarity, results[0].KeywordScore,
+		results[1].Path, results[1].HybridScore, results[1].Similarity, results[1].KeywordScore)
 
 	// Test with nil codemap
 	nilResults := SearchCodeMap(nil, nil, "anything", 5)
@@ -375,7 +377,7 @@ func TestRenderAtBudget(t *testing.T) {
 	}
 
 	// Tiny budget: zoom-1 only
-	out := cm.RenderAtBudget(30, nil, nil)
+	out := cm.RenderAtBudget(30, nil, nil, nil)
 	if !strings.Contains(out, "Go project") {
 		t.Error("expected zoom-1 in tiny budget")
 	}
@@ -384,7 +386,7 @@ func TestRenderAtBudget(t *testing.T) {
 	}
 
 	// Large budget: zoom-1 + zoom-2
-	out = cm.RenderAtBudget(500, nil, nil)
+	out = cm.RenderAtBudget(500, nil, nil, nil)
 	if !strings.Contains(out, "engine/") {
 		t.Error("expected engine/ in large budget")
 	}
@@ -522,15 +524,15 @@ func TestRenderAtBudget_QueryAware(t *testing.T) {
 		},
 	}
 
-	// Fake embeddings: engine is similar to query, store is not
+	// Fake embeddings: engine is similar to query, store is less so but still above threshold
 	queryEmb := []float32{1.0, 0.0, 0.0}
 	moduleEmbs := map[string][]float32{
 		"engine/":  {0.9, 0.1, 0.0},  // high similarity
-		"store/":   {0.0, 0.0, 1.0},  // low similarity
-		"cmd/cli/": {0.1, 0.9, 0.0},  // medium similarity
+		"store/":   {0.1, 0.0, 0.9},  // low but above 0.05 threshold
+		"cmd/cli/": {0.3, 0.9, 0.0},  // medium similarity
 	}
 
-	out := cm.RenderAtBudget(500, queryEmb, moduleEmbs)
+	out := cm.RenderAtBudget(500, queryEmb, moduleEmbs, nil)
 
 	// Engine should appear before store (higher similarity)
 	engineIdx := strings.Index(out, "engine/")
@@ -553,7 +555,7 @@ func TestRenderAtBudget_FallbackSort(t *testing.T) {
 	}
 
 	// nil embeddings = file count sort
-	out := cm.RenderAtBudget(500, nil, nil)
+	out := cm.RenderAtBudget(500, nil, nil, nil)
 
 	bigIdx := strings.Index(out, "big/")
 	smallIdx := strings.Index(out, "small/")
@@ -562,6 +564,73 @@ func TestRenderAtBudget_FallbackSort(t *testing.T) {
 	}
 	if bigIdx > smallIdx {
 		t.Errorf("expected big/ before small/ (more files) in fallback sort")
+	}
+}
+
+func TestRenderAtBudget_BoostPaths(t *testing.T) {
+	cm := &CodeMap{
+		Zoom1: "TS project.",
+		Zoom2: []ModuleMap{
+			{Path: "src/components/boost-search/", Language: "typescript", Summary: "TypeScript module", FileCount: 2},
+			{Path: "src/auth/jwt/", Language: "typescript", Summary: "TypeScript module", KeyTypes: []string{"class JWTService"}, FileCount: 3},
+			{Path: "src/components/qrcode/", Language: "typescript", Summary: "TypeScript module", FileCount: 4},
+		},
+	}
+
+	// All modules have equal low similarity to the query
+	queryEmb := []float32{1.0, 0.0, 0.0}
+	moduleEmbs := map[string][]float32{
+		"src/components/boost-search/": {0.1, 0.0, 0.0},
+		"src/auth/jwt/":               {0.1, 0.0, 0.0},
+		"src/components/qrcode/":      {0.1, 0.0, 0.0},
+	}
+
+	// Boost jwt-related files (from checkpoint)
+	boostPaths := []string{"jwt.go", "auth.go", "middleware.go"}
+
+	out := cm.RenderAtBudget(500, queryEmb, moduleEmbs, boostPaths)
+
+	jwtIdx := strings.Index(out, "src/auth/jwt/")
+	boostIdx := strings.Index(out, "src/components/boost-search/")
+	if jwtIdx < 0 {
+		t.Fatalf("expected jwt module in output, got: %s", out)
+	}
+	if boostIdx < 0 {
+		t.Fatalf("expected boost-search module in output, got: %s", out)
+	}
+	if jwtIdx > boostIdx {
+		t.Errorf("expected src/auth/jwt/ before src/components/boost-search/ (boosted by file hints), jwt at %d, boost-search at %d", jwtIdx, boostIdx)
+	}
+}
+
+func TestRenderAtBudget_MinSimilarityThreshold(t *testing.T) {
+	cm := &CodeMap{
+		Zoom1: "TS project.",
+		Zoom2: []ModuleMap{
+			{Path: "src/relevant/", Language: "typescript", Summary: "TypeScript module", FileCount: 5},
+			{Path: "src/irrelevant1/", Language: "typescript", Summary: "TypeScript module", FileCount: 3},
+			{Path: "src/irrelevant2/", Language: "typescript", Summary: "TypeScript module", FileCount: 2},
+		},
+	}
+
+	// Only "relevant" has decent similarity; others point away (near-zero cosine)
+	queryEmb := []float32{1.0, 0.0, 0.0}
+	moduleEmbs := map[string][]float32{
+		"src/relevant/":    {0.8, 0.1, 0.0},   // high cosine similarity
+		"src/irrelevant1/": {0.01, 0.99, 0.0},  // nearly orthogonal → cosine ≈ 0.01
+		"src/irrelevant2/": {0.02, 0.0, 0.99},  // nearly orthogonal → cosine ≈ 0.02
+	}
+
+	out := cm.RenderAtBudget(500, queryEmb, moduleEmbs, nil)
+
+	if !strings.Contains(out, "src/relevant/") {
+		t.Errorf("expected relevant module in output, got: %s", out)
+	}
+	if strings.Contains(out, "src/irrelevant1/") {
+		t.Errorf("expected irrelevant1 to be filtered by min threshold, got: %s", out)
+	}
+	if strings.Contains(out, "src/irrelevant2/") {
+		t.Errorf("expected irrelevant2 to be filtered by min threshold, got: %s", out)
 	}
 }
 

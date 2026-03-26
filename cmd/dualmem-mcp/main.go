@@ -151,12 +151,12 @@ func searchCodebaseHandler(engine *dualmem.Engine, ns string) func(context.Conte
 			limit = 10
 		}
 
-		cm, embs := engine.GetCodeMap(ctx, ns)
+		cm, idx := engine.GetCodeMap(ctx, ns)
 		if cm == nil {
 			return textResult("No code map available. Ensure DUALMEM_ROOT_DIR points to a source directory."), nil, nil
 		}
 
-		results := dualmem.SearchCodeMap(cm, embs, input.Query, limit)
+		results := dualmem.SearchCodeMap(cm, idx, input.Query, limit)
 
 		type moduleOut struct {
 			Path        string   `json:"path"`
@@ -195,12 +195,16 @@ func getCodemapHandler(engine *dualmem.Engine, ns string) func(context.Context, 
 			maxTokens = 400
 		}
 
-		cm, embs := engine.GetCodeMap(ctx, ns)
+		cm, idx := engine.GetCodeMap(ctx, ns)
 		if cm == nil {
 			return textResult("No code map available."), nil, nil
 		}
 
-		text := cm.RenderAtBudget(maxTokens, nil, embs)
+		var embs map[string][]float32
+		if idx != nil {
+			embs = idx.HDCVectors
+		}
+		text := cm.RenderAtBudget(maxTokens, nil, embs, nil)
 		return textResult(text), nil, nil
 	}
 }

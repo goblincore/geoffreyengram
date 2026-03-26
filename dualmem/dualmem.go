@@ -358,18 +358,27 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 		}
 	}
 
-	// --- Code map (≤400 tokens, query-aware ranking) ---
+	// --- Load checkpoints early (for file hints) ---
+	checkpoints, _ := e.GetCheckpoints(ctx, userID)
+
+	// --- Code map (≤400 tokens, memory-informed ranking) ---
 	if e.cfg.RootDir != "" && tokenBudget >= 500 {
 		mapBudget := 400
 		if tokenBudget-tokensUsed-200 < mapBudget {
 			mapBudget = tokenBudget - tokensUsed - 200
 		}
 		if mapBudget > 50 {
-			codeMap, moduleEmbs := e.getOrGenerateCodeMap(ctx, userID)
+			codeMap, codeIdx := e.getOrGenerateCodeMap(ctx, userID)
 			if codeMap != nil {
 				// Codemap uses HDC vectors — encode query with HDC for matching dimensions
 				codemapQuery := HDCEncodeQuery(query)
-				mapText := codeMap.RenderAtBudget(mapBudget, codemapQuery, moduleEmbs)
+				var moduleEmbs map[string][]float32
+				if codeIdx != nil {
+					moduleEmbs = codeIdx.HDCVectors
+				}
+				// Extract file hints from checkpoints and memories to boost relevant modules
+				boostPaths := extractFileHints(checkpoints, results.DetailMemories)
+				mapText := codeMap.RenderAtBudget(mapBudget, codemapQuery, moduleEmbs, boostPaths)
 				mapTokens := estimateTokens(mapText)
 				parts = append(parts, "[Codebase Map]\n"+mapText)
 				sources = append(sources, SourceRef{Type: "codemap", ID: userID})
@@ -378,8 +387,7 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 		}
 	}
 
-	// 0. Checkpoints — structured session handoffs, rendered first
-	checkpoints, _ := e.GetCheckpoints(ctx, userID)
+	// 0. Checkpoints — structured session handoffs, rendered after codemap
 	for _, cp := range checkpoints {
 		cpText := cp.FormatForContext()
 		cpTokens := estimateTokens(cpText)
@@ -474,15 +482,46 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 	}, nil
 }
 
+// extractFileHints collects file paths from checkpoints and detail memories
+// to boost codemap modules that are relevant to ongoing work.
+func extractFileHints(checkpoints []Checkpoint, memories []DetailMemory) []string {
+	seen := make(map[string]bool)
+	var hints []string
+
+	for _, cp := range checkpoints {
+		for _, f := range cp.FilesActive {
+			// Strip line ranges (e.g., "auth.go:42-80" → "auth.go")
+			if idx := strings.Index(f, ":"); idx > 0 {
+				f = f[:idx]
+			}
+			f = strings.TrimSpace(f)
+			if f != "" && !seen[f] {
+				seen[f] = true
+				hints = append(hints, f)
+			}
+		}
+	}
+	for _, dm := range memories {
+		for _, f := range dm.Files {
+			f = strings.TrimSpace(f)
+			if f != "" && !seen[f] {
+				seen[f] = true
+				hints = append(hints, f)
+			}
+		}
+	}
+	return hints
+}
+
 // getOrGenerateCodeMap loads a stored code map or generates one on the fly.
 // Returns the code map and per-module embeddings (for query-aware ranking).
-// GetCodeMap returns the cached code map and HDC module embeddings for a namespace.
-// Regenerates if the git commit has changed. HDC encoding is deterministic (no API calls).
-func (e *Engine) GetCodeMap(ctx context.Context, namespace string) (*CodeMap, map[string][]float32) {
+// GetCodeMap returns the cached code map and hybrid CodeIndex for a namespace.
+// Regenerates if the git commit has changed. Encoding is deterministic (no API calls).
+func (e *Engine) GetCodeMap(ctx context.Context, namespace string) (*CodeMap, *CodeIndex) {
 	return e.getOrGenerateCodeMap(ctx, namespace)
 }
 
-func (e *Engine) getOrGenerateCodeMap(ctx context.Context, namespace string) (*CodeMap, map[string][]float32) {
+func (e *Engine) getOrGenerateCodeMap(ctx context.Context, namespace string) (*CodeMap, *CodeIndex) {
 	_, currentCommit := GetGitState(e.cfg.RootDir)
 
 	stored, _ := e.store.GetCodeMap(namespace)
@@ -497,7 +536,7 @@ func (e *Engine) getOrGenerateCodeMap(ctx context.Context, namespace string) (*C
 			GeneratedAt: stored.GeneratedAt,
 			GitCommit:   stored.GitCommit,
 		}
-		return cm, HDCEncodeCodeMap(cm)
+		return cm, BuildCodeIndex(cm)
 	}
 
 	// Regenerate
@@ -510,7 +549,7 @@ func (e *Engine) getOrGenerateCodeMap(ctx context.Context, namespace string) (*C
 
 	e.store.UpsertCodeMap(namespace, e.cfg.RootDir, cm.Zoom1, cm.MarshalZoom2(), cm.GitCommit)
 
-	return cm, HDCEncodeCodeMap(cm)
+	return cm, BuildCodeIndex(cm)
 }
 
 func flattenEmbeddings(embs map[string]ModuleEmbedding) map[string][]float32 {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"go/ast"
+	"math"
 	"go/parser"
 	"go/token"
 	"os"
@@ -361,8 +362,9 @@ func synthesizeZoom1(modules []ModuleMap, rootDir string) string {
 
 // RenderAtBudget formats the code map within a token budget.
 // When queryEmbedding and moduleEmbeddings are provided, sorts by similarity.
+// boostPaths optionally boost modules whose paths contain any of the given strings.
 // Otherwise falls back to file count (largest first).
-func (cm *CodeMap) RenderAtBudget(maxTokens int, queryEmbedding []float32, moduleEmbeddings map[string][]float32) string {
+func (cm *CodeMap) RenderAtBudget(maxTokens int, queryEmbedding []float32, moduleEmbeddings map[string][]float32, boostPaths []string) string {
 	var sb strings.Builder
 
 	sb.WriteString(cm.Zoom1)
@@ -375,31 +377,88 @@ func (cm *CodeMap) RenderAtBudget(maxTokens int, queryEmbedding []float32, modul
 	sorted := make([]ModuleMap, len(cm.Zoom2))
 	copy(sorted, cm.Zoom2)
 
+	// Build a set of normalized boost path segments for matching
+	boostSet := make(map[string]bool, len(boostPaths))
+	for _, bp := range boostPaths {
+		// Normalize: extract base filename without extension, lowercase
+		base := strings.TrimSuffix(filepath.Base(bp), filepath.Ext(bp))
+		if base != "" && base != "." {
+			boostSet[strings.ToLower(base)] = true
+		}
+		// Also keep the directory path for prefix matching
+		dir := filepath.Dir(bp)
+		if dir != "" && dir != "." {
+			boostSet[strings.ToLower(dir)] = true
+		}
+	}
+
+	const (
+		boostFactor       float64 = 0.3
+		minSimilarityThreshold    = 0.05
+	)
+
 	if queryEmbedding != nil && moduleEmbeddings != nil {
-		sort.Slice(sorted, func(i, j int) bool {
-			simI := CosineSimilarity(queryEmbedding, moduleEmbeddings[sorted[i].Path])
-			simJ := CosineSimilarity(queryEmbedding, moduleEmbeddings[sorted[j].Path])
-			return simI > simJ
+		// Compute effective scores with boost
+		type scored struct {
+			mod   ModuleMap
+			score float64
+		}
+		scoredMods := make([]scored, len(sorted))
+		for i, m := range sorted {
+			sim := float64(CosineSimilarity(queryEmbedding, moduleEmbeddings[m.Path]))
+			if len(boostSet) > 0 && moduleMatchesBoost(m.Path, boostSet) {
+				sim += boostFactor
+			}
+			scoredMods[i] = scored{mod: m, score: sim}
+		}
+		sort.Slice(scoredMods, func(i, j int) bool {
+			return scoredMods[i].score > scoredMods[j].score
 		})
+
+		sb.WriteString("\n")
+		for _, sm := range scoredMods {
+			if sm.score < minSimilarityThreshold {
+				break // skip low-relevance modules
+			}
+			line := formatModuleMapLine(sm.mod)
+			lineTokens := estimateTokensStr(line)
+			if tokensUsed+lineTokens > maxTokens {
+				break
+			}
+			sb.WriteString("\n")
+			sb.WriteString(line)
+			tokensUsed += lineTokens
+		}
 	} else {
 		sort.Slice(sorted, func(i, j int) bool {
 			return sorted[i].FileCount > sorted[j].FileCount
 		})
-	}
 
-	sb.WriteString("\n")
-	for _, m := range sorted {
-		line := formatModuleMapLine(m)
-		lineTokens := estimateTokensStr(line)
-		if tokensUsed+lineTokens > maxTokens {
-			break
-		}
 		sb.WriteString("\n")
-		sb.WriteString(line)
-		tokensUsed += lineTokens
+		for _, m := range sorted {
+			line := formatModuleMapLine(m)
+			lineTokens := estimateTokensStr(line)
+			if tokensUsed+lineTokens > maxTokens {
+				break
+			}
+			sb.WriteString("\n")
+			sb.WriteString(line)
+			tokensUsed += lineTokens
+		}
 	}
 
 	return sb.String()
+}
+
+// moduleMatchesBoost checks if a module path contains any of the boost path segments.
+func moduleMatchesBoost(modulePath string, boostSet map[string]bool) bool {
+	lowerPath := strings.ToLower(modulePath)
+	for bp := range boostSet {
+		if strings.Contains(lowerPath, bp) {
+			return true
+		}
+	}
+	return false
 }
 
 func formatModuleMapLine(m ModuleMap) string {
@@ -509,15 +568,159 @@ func HDCEncodeQuery(query string) []float32 {
 	return enc.EncodeQuery(query)
 }
 
-// ModuleResult is a ModuleMap with a similarity score from HDC search.
+// ModuleResult is a ModuleMap with similarity scores from hybrid search.
 type ModuleResult struct {
 	ModuleMap
-	Similarity float64 `json:"similarity"`
+	Similarity   float64 `json:"similarity"`    // HDC cosine score
+	KeywordScore float64 `json:"keyword_score"`  // BM25 score
+	HybridScore  float64 `json:"hybrid_score"`   // blended final score
 }
 
-// SearchCodeMap ranks modules by HDC similarity to a query string.
-// Returns up to limit results sorted by descending similarity.
-func SearchCodeMap(cm *CodeMap, moduleEmbs map[string][]float32, query string, limit int) []ModuleResult {
+// BuildCodeIndex produces a CodeIndex with both HDC vectors and BM25 token data.
+// This is the primary precomputation entry point for hybrid search.
+func BuildCodeIndex(cm *CodeMap) *CodeIndex {
+	if cm == nil || len(cm.Zoom2) == 0 {
+		return &CodeIndex{}
+	}
+
+	idx := &CodeIndex{
+		HDCVectors: HDCEncodeCodeMap(cm),
+		TokenFreqs: make(map[string]map[string]int, len(cm.Zoom2)),
+		DocLens:    make(map[string]int, len(cm.Zoom2)),
+		NumDocs:    len(cm.Zoom2),
+	}
+
+	// Build per-module token frequencies
+	df := make(map[string]int) // document frequency per token
+	totalLen := 0
+	for _, m := range cm.Zoom2 {
+		tf := make(map[string]int)
+		// Tokenize all module fields using the same tokenizer as HDC
+		for _, tok := range hdcTokenize(m.Path) {
+			tf[tok]++
+		}
+		for _, kt := range m.KeyTypes {
+			for _, tok := range hdcTokenizeSymbol(kt) {
+				tf[tok]++
+			}
+		}
+		for _, ep := range m.EntryPoints {
+			for _, tok := range hdcTokenizeSymbol(ep) {
+				tf[tok]++
+			}
+		}
+		for _, ident := range m.Identifiers {
+			for _, tok := range hdcTokenize(ident) {
+				tf[tok]++
+			}
+		}
+		for _, imp := range m.Imports {
+			for _, tok := range hdcTokenize(imp) {
+				tf[tok]++
+			}
+		}
+
+		docLen := 0
+		for tok, count := range tf {
+			docLen += count
+			_ = count // used above
+			df[tok]++
+		}
+		idx.TokenFreqs[m.Path] = tf
+		idx.DocLens[m.Path] = docLen
+		totalLen += docLen
+	}
+
+	// Compute IDF: log(1 + (N - df + 0.5) / (df + 0.5))
+	idx.IDF = make(map[string]float64, len(df))
+	n := float64(idx.NumDocs)
+	for tok, freq := range df {
+		idx.IDF[tok] = math.Log(1 + (n-float64(freq)+0.5)/(float64(freq)+0.5))
+	}
+
+	if idx.NumDocs > 0 {
+		idx.AvgDocLen = float64(totalLen) / float64(idx.NumDocs)
+	}
+
+	return idx
+}
+
+// SearchCodeMap ranks modules by hybrid HDC+BM25 similarity to a query string.
+// Returns up to limit results sorted by descending hybrid score.
+func SearchCodeMap(cm *CodeMap, idx *CodeIndex, query string, limit int) []ModuleResult {
+	if cm == nil || len(cm.Zoom2) == 0 || idx == nil {
+		return nil
+	}
+
+	queryVec := HDCEncodeQuery(query)
+	queryTokens := hdcTokenize(query)
+
+	// Score all modules
+	type scored struct {
+		module ModuleMap
+		hdc    float64
+		bm25   float64
+	}
+	items := make([]scored, 0, len(cm.Zoom2))
+	hdcScores := make([]float64, 0, len(cm.Zoom2))
+	maxBM25 := 0.0
+
+	for _, m := range cm.Zoom2 {
+		hdc := CosineSimilarity(queryVec, idx.HDCVectors[m.Path])
+		bm25 := BM25Score(idx, m.Path, queryTokens)
+		items = append(items, scored{module: m, hdc: hdc, bm25: bm25})
+		hdcScores = append(hdcScores, hdc)
+		if bm25 > maxBM25 {
+			maxBM25 = bm25
+		}
+	}
+
+	// Sort HDC scores descending for adaptive alpha
+	sortedHDC := make([]float64, len(hdcScores))
+	copy(sortedHDC, hdcScores)
+	sort.Float64s(sortedHDC)
+	// Reverse to descending
+	for i, j := 0, len(sortedHDC)-1; i < j; i, j = i+1, j-1 {
+		sortedHDC[i], sortedHDC[j] = sortedHDC[j], sortedHDC[i]
+	}
+
+	alpha := AdaptiveAlpha(sortedHDC)
+
+	// If no BM25 signal, use pure HDC
+	if maxBM25 == 0 {
+		alpha = 1.0
+	}
+
+	// Blend and build results
+	results := make([]ModuleResult, 0, len(items))
+	for _, s := range items {
+		hdcNorm := (s.hdc + 1) / 2 // [-1,1] → [0,1]
+		bm25Norm := 0.0
+		if maxBM25 > 0 {
+			bm25Norm = s.bm25 / maxBM25
+		}
+		hybrid := alpha*hdcNorm + (1-alpha)*bm25Norm
+
+		results = append(results, ModuleResult{
+			ModuleMap:    s.module,
+			Similarity:   s.hdc,
+			KeywordScore: s.bm25,
+			HybridScore:  hybrid,
+		})
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].HybridScore > results[j].HybridScore
+	})
+	if limit > 0 && len(results) > limit {
+		results = results[:limit]
+	}
+	return results
+}
+
+// SearchCodeMapCompat is a backward-compatible shim that accepts raw HDC vectors.
+// Uses HDC-only scoring (no BM25 blend).
+func SearchCodeMapCompat(cm *CodeMap, moduleEmbs map[string][]float32, query string, limit int) []ModuleResult {
 	if cm == nil || len(cm.Zoom2) == 0 {
 		return nil
 	}
@@ -525,10 +728,10 @@ func SearchCodeMap(cm *CodeMap, moduleEmbs map[string][]float32, query string, l
 	var results []ModuleResult
 	for _, m := range cm.Zoom2 {
 		sim := CosineSimilarity(queryVec, moduleEmbs[m.Path])
-		results = append(results, ModuleResult{ModuleMap: m, Similarity: sim})
+		results = append(results, ModuleResult{ModuleMap: m, Similarity: sim, HybridScore: sim})
 	}
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Similarity > results[j].Similarity
+		return results[i].HybridScore > results[j].HybridScore
 	})
 	if limit > 0 && len(results) > limit {
 		results = results[:limit]
