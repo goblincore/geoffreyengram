@@ -7,6 +7,32 @@ Cognitive memory engine for AI agents. Two systems in one Go library:
 
 Pure Go, SQLite (no CGO), single binary.
 
+## Quickstart — DualMem CLI
+
+```bash
+# Install
+go install github.com/goblincore/geoffreyengram/cmd/dualmem@latest
+export GEMINI_API_KEY=your-key  # add to ~/.zshrc
+
+# Save memories
+dualmem add --text "Auth uses JWT, not sessions" --type decision
+dualmem add --text "Don't touch rateLimiter cleanup()" --type warning --salience 0.9
+
+# Search memories
+dualmem search "authentication" --limit 5
+
+# Code search (HDC-powered, no API calls, instant)
+dualmem search-code "authentication middleware"
+
+# Session context (code map + diff + memories, token-budgeted)
+dualmem context "fix the auth bug" --budget 3000
+
+# Codebase structure
+dualmem map
+```
+
+For Claude Code integration, copy [`docs/example-claude-md.md`](docs/example-claude-md.md) into your `~/.claude/CLAUDE.md`.
+
 ## Engram — Character Memory
 
 For NPCs and companion AI that should remember players across sessions.
@@ -144,14 +170,25 @@ block, _ := engine.AssembleContext(ctx, "claude:my-project", "database choice", 
 go install github.com/goblincore/geoffreyengram/cmd/dualmem@latest
 export GEMINI_API_KEY=your-key
 
+# Memory
 dualmem add --text "Auth uses JWT, not sessions" --type decision --salience 0.9
 dualmem search "database" --limit 5
+
+# Code search (HDC-powered — no API calls, instant)
+dualmem search-code "authentication middleware"
+dualmem search-code "database connection pooling" --limit 5 --json
+
+# Context assembly
 dualmem context "auth system" --budget 3000             # memories + code map + diff
 dualmem context "fix the bug" --intent debug            # explicit intent override
+
+# Session management
 dualmem checkpoint --task "auth refactor" --status in_progress --files "auth.go" --done "JWT" --remaining "refresh,logout"
 dualmem checkpoint --list                               # view active checkpoints
 dualmem map                                             # codebase structure map
 dualmem diff                                            # changes since last session
+
+# Maintenance
 dualmem promote --id <memory-id>                        # move sketch → detail
 dualmem promote --all --type warning                    # batch re-evaluate all raw sketch entries
 dualmem demote --id <memory-id>                         # move detail → sketch
@@ -163,7 +200,7 @@ dualmem status
 
 ### Claude Code integration
 
-Copy [`docs/example-claude-md.md`](docs/example-claude-md.md) into your `~/.claude/CLAUDE.md` to give Claude Code cross-session memory. It teaches the agent to automatically load context at session start, save decisions/warnings/checkpoints during work, and search memory before exploring the codebase.
+Copy [`docs/example-claude-md.md`](docs/example-claude-md.md) into your `~/.claude/CLAUDE.md` to give Claude Code cross-session memory. It teaches the agent to automatically load context at session start, save decisions/warnings/checkpoints during work, search memory before exploring, and use `search-code` for HDC-powered file discovery.
 
 ### Memory types
 
@@ -337,36 +374,18 @@ Vectors are built from FNV-64a seeded basis vectors (+1/-1 binary), combined via
 | Avg NDCG | 0.956 | — |
 | Encode speed | ~600µs/module | ~160µs/module |
 
-### MCP Server — `dualmem-mcp`
+### MCP Server (optional) — `dualmem-mcp`
 
-An MCP server exposes DualMem's HDC search and memory to Claude Code (or any MCP client). Five tools:
-
-| Tool | Description |
-|------|-------------|
-| `search_codebase` | HDC-ranked file search by natural language query — 1 call replaces grep/glob chains |
-| `get_codemap` | Full structural map (zoom-1 overview + per-module types/entry points/imports) |
-| `search_memory` | Cross-session memory search (decisions, warnings, insights) |
-| `get_context` | Token-budget-aware context assembly (code map + diff + checkpoints + memories) |
-| `save_memory` | Persist decisions, warnings, or continuity notes for future sessions |
+An MCP server is also available for environments that prefer MCP tools over CLI. The CLI is recommended for Claude Code (lower token overhead), but the MCP server works with any MCP client.
 
 ```bash
 go install github.com/goblincore/geoffreyengram/cmd/dualmem-mcp@latest
+claude mcp add dualmem -s user -- dualmem-mcp
 ```
 
-Add to Claude Code settings (`~/.claude/settings.json`):
-```json
-{
-  "mcpServers": {
-    "dualmem": {
-      "command": "dualmem-mcp"
-    }
-  }
-}
-```
+Tools: `search_codebase`, `get_codemap`, `search_memory`, `get_context`, `save_memory`. Auto-detects project root from cwd.
 
-The server auto-detects `DUALMEM_ROOT_DIR` from cwd (each Claude Code session spawns its own process). Memories are namespaced by directory name (`claude:<dirname>`).
-
-**Search benchmark** (10-module repo, 6 queries):
+**Search benchmark** (HDC search via CLI or MCP, 10-module repo, 6 queries):
 
 | | HDC Search | Grep Chain |
 |---|---|---|

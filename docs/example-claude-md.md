@@ -79,6 +79,13 @@ Before grepping/globbing for files related to a feature, search memory first —
 ~/go/bin/dualmem search "<feature or concept>" --limit 5
 ```
 
+### Code search (HDC-powered)
+Find relevant modules by natural language query — uses hyperdimensional computing, no API calls, instant:
+```
+~/go/bin/dualmem search-code "<natural language query>"
+```
+Returns modules ranked by structural similarity (path, symbols, imports, identifiers). Useful for fuzzy queries where you don't know what to grep for ("where does auth happen?", "what handles codebase scanning?"). For exact symbol lookup, grep is still better.
+
 ---
 
 ## Optional: Disable built-in MEMORY.md
@@ -92,3 +99,16 @@ If you want DualMem to be the only memory system (recommended to avoid duplicati
 
 Use **dualmem** exclusively for all cross-session memory.
 ```
+
+---
+
+## Optional: MCP Server
+
+If you prefer MCP tools over CLI (trades token efficiency for discoverability):
+
+```bash
+go install github.com/goblincore/geoffreyengram/cmd/dualmem-mcp@latest
+claude mcp add dualmem -s user -- dualmem-mcp
+```
+
+Tools: `search_codebase`, `get_codemap`, `search_memory`, `get_context`, `save_memory`.
