@@ -367,7 +367,9 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 		if mapBudget > 50 {
 			codeMap, moduleEmbs := e.getOrGenerateCodeMap(ctx, userID)
 			if codeMap != nil {
-				mapText := codeMap.RenderAtBudget(mapBudget, queryEmb, moduleEmbs)
+				// Codemap uses HDC vectors — encode query with HDC for matching dimensions
+				codemapQuery := HDCEncodeQuery(query)
+				mapText := codeMap.RenderAtBudget(mapBudget, codemapQuery, moduleEmbs)
 				mapTokens := estimateTokens(mapText)
 				parts = append(parts, "[Codebase Map]\n"+mapText)
 				sources = append(sources, SourceRef{Type: "codemap", ID: userID})
@@ -478,9 +480,8 @@ func (e *Engine) getOrGenerateCodeMap(ctx context.Context, namespace string) (*C
 	_, currentCommit := GetGitState(e.cfg.RootDir)
 
 	stored, _ := e.store.GetCodeMap(namespace)
-	storedEmbs, storedModel, _ := e.store.GetCodeMapEmbeddings(namespace)
 
-	// Use cache if git commit matches and embedding model matches
+	// Use cache if git commit matches
 	if stored != nil && stored.GitCommit == currentCommit && currentCommit != "" {
 		cm := &CodeMap{
 			Namespace:   stored.Namespace,
@@ -490,17 +491,7 @@ func (e *Engine) getOrGenerateCodeMap(ctx context.Context, namespace string) (*C
 			GeneratedAt: stored.GeneratedAt,
 			GitCommit:   stored.GitCommit,
 		}
-		if storedModel == e.embedder.ModelName() && len(storedEmbs) > 0 {
-			return cm, storedEmbs
-		}
-		// Re-embed with current model
-		embs, err := EmbedCodeMap(ctx, cm, e.embedder)
-		if err == nil && embs != nil {
-			flat := flattenEmbeddings(embs)
-			e.store.UpsertCodeMapEmbeddings(namespace, embs, e.embedder.ModelName())
-			return cm, flat
-		}
-		return cm, nil
+		return cm, HDCEncodeCodeMap(cm)
 	}
 
 	// Regenerate
@@ -513,14 +504,7 @@ func (e *Engine) getOrGenerateCodeMap(ctx context.Context, namespace string) (*C
 
 	e.store.UpsertCodeMap(namespace, e.cfg.RootDir, cm.Zoom1, cm.MarshalZoom2(), cm.GitCommit)
 
-	embs, err := EmbedCodeMap(ctx, cm, e.embedder)
-	if err == nil && embs != nil {
-		flat := flattenEmbeddings(embs)
-		e.store.UpsertCodeMapEmbeddings(namespace, embs, e.embedder.ModelName())
-		return cm, flat
-	}
-
-	return cm, nil
+	return cm, HDCEncodeCodeMap(cm)
 }
 
 func flattenEmbeddings(embs map[string]ModuleEmbedding) map[string][]float32 {

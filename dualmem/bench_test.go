@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // benchResult holds metrics for a single scenario × query × mode evaluation.
@@ -469,4 +471,212 @@ func truncate(s string, max int) string {
 		return s[:max-3] + "..."
 	}
 	return s
+}
+
+// --- Live benchmark with real Gemini Embedding 2 ---
+
+// newLiveBenchEngine creates a test engine with real Gemini Embedding 2.
+// Requires GEMINI_API_KEY env var.
+func newLiveBenchEngine(t *testing.T) *Engine {
+	t.Helper()
+	apiKey := os.Getenv("GEMINI_API_KEY")
+	if apiKey == "" {
+		t.Skip("GEMINI_API_KEY not set — skipping live benchmark")
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "bench-live.db")
+	engine, err := New(Config{
+		SQLitePath:        dbPath,
+		EmbeddingProvider: NewGeminiEmbedder(apiKey, 768, WithGeminiModel("gemini-embedding-2-preview")),
+		Classifier:        &sectorPassthrough{},
+		EntityExtractor:   &mockExtractor{},
+		MaxDetailPerUser:  200,
+		ImportanceTheta:   0.65,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { engine.Close() })
+	return engine
+}
+
+// TestBenchLive runs all benchmark scenarios with real Gemini Embedding 2 embeddings.
+// This test requires GEMINI_API_KEY and makes real API calls.
+// Run with: go test ./dualmem/ -v -run TestBenchLive -count=1
+func TestBenchLive(t *testing.T) {
+	apiKey := os.Getenv("GEMINI_API_KEY")
+	if apiKey == "" {
+		t.Skip("GEMINI_API_KEY not set — skipping live benchmark")
+	}
+
+	scenarios := benchScenarios()
+	var allResults []benchResult
+
+	for _, scenario := range scenarios {
+		t.Run(scenario.Name, func(t *testing.T) {
+			// Fresh engine per scenario (isolated DB)
+			engine := newLiveBenchEngine(t)
+			userID := "bench-live"
+
+			// Seed with rate limiting to avoid API throttling
+			m := seedMemoriesLive(t, engine, scenario.Memories, userID)
+
+			for _, query := range scenario.Queries {
+				// Small delay between queries
+				time.Sleep(200 * time.Millisecond)
+
+				noneResult := runNone(query)
+				noneResult.Scenario = scenario.Name
+
+				flatResult := runFlat(t, engine, userID, query, m)
+				flatResult.Scenario = scenario.Name
+
+				dualResult := runDualMem(t, engine, userID, query, m)
+				dualResult.Scenario = scenario.Name
+
+				allResults = append(allResults, noneResult, flatResult, dualResult)
+
+				t.Logf("\n  Query: %q", query.Query)
+				logResult(t, "none", noneResult)
+				logResult(t, "flat", flatResult)
+				logResult(t, "dualmem", dualResult)
+
+				// Also log similarity scores for debugging
+				logSimilarities(t, engine, userID, query.Query, m)
+			}
+		})
+	}
+
+	t.Log("\n" + formatSummaryTable(allResults))
+
+	// Log improvement over flat
+	dualPrec := avgMetric(allResults, "dualmem", func(r benchResult) float64 { return r.Precision })
+	flatPrec := avgMetric(allResults, "flat", func(r benchResult) float64 { return r.Precision })
+	dualNDCG := avgMetric(allResults, "dualmem", func(r benchResult) float64 { return r.NDCG })
+	flatNDCG := avgMetric(allResults, "flat", func(r benchResult) float64 { return r.NDCG })
+
+	t.Logf("\n=== DualMem vs Flat (Live Embeddings) ===")
+	t.Logf("Precision: dualmem=%.3f flat=%.3f (delta=%.3f)", dualPrec, flatPrec, dualPrec-flatPrec)
+	t.Logf("NDCG:      dualmem=%.3f flat=%.3f (delta=%.3f)", dualNDCG, flatNDCG, dualNDCG-flatNDCG)
+}
+
+// TestBenchLiveMinSimilarity tests the effect of MinSimilarity threshold with real embeddings.
+func TestBenchLiveMinSimilarity(t *testing.T) {
+	apiKey := os.Getenv("GEMINI_API_KEY")
+	if apiKey == "" {
+		t.Skip("GEMINI_API_KEY not set — skipping live MinSimilarity test")
+	}
+
+	engine := newLiveBenchEngine(t)
+	userID := "minsim-live"
+	ctx := context.Background()
+
+	// Use the Noise Resistance scenario — 2 relevant + 25 noisy
+	scenario := scenarioNoiseResistance()
+	_ = seedMemoriesLive(t, engine, scenario.Memories, userID)
+
+	query := "WebSocket connection handling"
+
+	// Test different thresholds
+	thresholds := []float64{0, 0.1, 0.2, 0.3, 0.4, 0.5}
+	for _, thresh := range thresholds {
+		time.Sleep(200 * time.Millisecond)
+		results, err := engine.DualSearch(ctx, userID, query, SearchOpts{
+			Limit:         10,
+			MinSimilarity: thresh,
+		})
+		if err != nil {
+			t.Fatalf("DualSearch(thresh=%.1f): %v", thresh, err)
+		}
+
+		t.Logf("MinSimilarity=%.1f → %d results:", thresh, len(results.DetailMemories))
+		for _, dm := range results.DetailMemories {
+			relevant := strings.Contains(dm.Text, "WebSocket")
+			marker := " "
+			if relevant {
+				marker = "✓"
+			}
+			t.Logf("  %s sim=%.4f %s", marker, dm.Similarity, dm.Text[:min(70, len(dm.Text))])
+		}
+	}
+}
+
+// seedMemoriesLive is like seedMemories but adds a small delay between inserts
+// to avoid hitting Gemini API rate limits.
+func seedMemoriesLive(t *testing.T, engine *Engine, memories []benchMemory, userID string) *idTagMap {
+	t.Helper()
+	ctx := context.Background()
+
+	for i, m := range memories {
+		salience := m.Salience
+		if salience == 0 {
+			salience = 0.5
+		}
+		err := engine.AddWithOptions(ctx, MemoryInput{
+			UserMessage: m.Text,
+			SectorHint:  m.Sector,
+			Salience:    salience,
+			Type:        m.Type,
+			Files:       m.Files,
+		}, userID)
+		if err != nil {
+			t.Fatalf("AddWithOptions(%s): %v", m.Tag, err)
+		}
+
+		// Rate limit: ~10 req/s should be fine for Gemini free tier
+		if i > 0 && i%5 == 0 {
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+
+	// Build ID→tag map
+	details, err := engine.store.GetDetailMemories(userID)
+	if err != nil {
+		t.Fatalf("GetDetailMemories: %v", err)
+	}
+
+	m := &idTagMap{
+		idToTag:   make(map[string]string),
+		tagToID:   make(map[string]string),
+		tagToText: make(map[string]string),
+	}
+	for _, d := range details {
+		for _, bm := range memories {
+			if bm.Tag != "" && d.Text == bm.Text {
+				m.idToTag[d.ID] = bm.Tag
+				m.tagToID[bm.Tag] = d.ID
+				m.tagToText[bm.Tag] = bm.Text
+			}
+		}
+	}
+	return m
+}
+
+// logResult logs a benchmark result line.
+func logResult(t *testing.T, mode string, r benchResult) {
+	t.Helper()
+	t.Logf("  %-8s | Prec: %.2f | Recall: %.2f | NDCG: %.2f | Tokens: %4d/%d | Waste: %.2f | Order: %v",
+		mode, r.Precision, r.Recall, r.NDCG, r.TokensUsed, r.TokenBudget, r.BudgetWaste, r.OrderCorrect)
+}
+
+// logSimilarities logs cosine similarity scores for all detail memories against the query.
+// Helps debug what real embeddings look like.
+func logSimilarities(t *testing.T, engine *Engine, userID, query string, m *idTagMap) {
+	t.Helper()
+	ctx := context.Background()
+
+	results, err := engine.DualSearch(ctx, userID, query, SearchOpts{Limit: 20})
+	if err != nil {
+		t.Logf("  [similarity debug] DualSearch error: %v", err)
+		return
+	}
+
+	t.Logf("  Similarity scores (query: %q):", query)
+	for _, dm := range results.DetailMemories {
+		tag := m.idToTag[dm.ID]
+		if tag == "" {
+			tag = "(untagged)"
+		}
+		t.Logf("    sim=%.4f [%-20s] %s", dm.Similarity, tag, dm.Text[:min(60, len(dm.Text))])
+	}
 }

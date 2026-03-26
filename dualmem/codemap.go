@@ -27,12 +27,14 @@ type CodeMap struct {
 
 // ModuleMap is a zoom-2 entry: one package or meaningful directory.
 type ModuleMap struct {
-	Path        string   `json:"path"`         // Relative path from root
-	Language    string   `json:"language"`      // "go", "typescript", "other"
-	Summary     string   `json:"summary"`       // Human-readable description
-	KeyTypes    []string `json:"key_types"`     // Important exported types/interfaces
-	EntryPoints []string `json:"entry_points"`  // main funcs, handler registrations
+	Path        string   `json:"path"`                    // Relative path from root
+	Language    string   `json:"language"`                 // "go", "typescript", "other"
+	Summary     string   `json:"summary"`                  // Human-readable description
+	KeyTypes    []string `json:"key_types"`                // Important exported types/interfaces
+	EntryPoints []string `json:"entry_points"`             // main funcs, handler registrations
 	FileCount   int      `json:"file_count"`
+	Imports     []string `json:"imports,omitempty"`        // External package imports
+	Identifiers []string `json:"identifiers,omitempty"`   // Unexported/private identifiers (content vocabulary)
 }
 
 // Skip patterns for directory scanning.
@@ -178,8 +180,12 @@ func parseGoPackage(relPath string, goFiles []string) *ModuleMap {
 
 	var types []string
 	var entryPoints []string
+	var imports []string
+	var identifiers []string
 	var pkgName string
 	isMain := false
+	importSeen := make(map[string]bool)
+	identSeen := make(map[string]bool)
 
 	for name, pkg := range pkgs {
 		pkgName = name
@@ -191,16 +197,33 @@ func parseGoPackage(relPath string, goFiles []string) *ModuleMap {
 			for _, decl := range file.Decls {
 				switch d := decl.(type) {
 				case *ast.GenDecl:
-					for _, spec := range d.Specs {
-						if ts, ok := spec.(*ast.TypeSpec); ok && ts.Name.IsExported() {
-							kind := "type"
-							switch ts.Type.(type) {
-							case *ast.InterfaceType:
-								kind = "interface"
-							case *ast.StructType:
-								kind = "struct"
+					if d.Tok == token.IMPORT {
+						for _, spec := range d.Specs {
+							if imp, ok := spec.(*ast.ImportSpec); ok {
+								path := strings.Trim(imp.Path.Value, `"`)
+								if !importSeen[path] {
+									importSeen[path] = true
+									imports = append(imports, path)
+								}
 							}
-							types = append(types, fmt.Sprintf("%s %s", kind, ts.Name.Name))
+						}
+					}
+					for _, spec := range d.Specs {
+						if ts, ok := spec.(*ast.TypeSpec); ok {
+							if ts.Name.IsExported() {
+								kind := "type"
+								switch ts.Type.(type) {
+								case *ast.InterfaceType:
+									kind = "interface"
+								case *ast.StructType:
+									kind = "struct"
+								}
+								types = append(types, fmt.Sprintf("%s %s", kind, ts.Name.Name))
+							} else if !identSeen[ts.Name.Name] {
+								// Unexported type — content vocabulary
+								identSeen[ts.Name.Name] = true
+								identifiers = append(identifiers, ts.Name.Name)
+							}
 						}
 					}
 				case *ast.FuncDecl:
@@ -209,6 +232,10 @@ func parseGoPackage(relPath string, goFiles []string) *ModuleMap {
 					} else if d.Name.IsExported() && d.Recv == nil {
 						// Top-level exported functions (not methods)
 						entryPoints = append(entryPoints, d.Name.Name+"()")
+					} else if !d.Name.IsExported() && d.Recv == nil && !identSeen[d.Name.Name] {
+						// Unexported top-level function — content vocabulary
+						identSeen[d.Name.Name] = true
+						identifiers = append(identifiers, d.Name.Name)
 					}
 				}
 			}
@@ -221,6 +248,12 @@ func parseGoPackage(relPath string, goFiles []string) *ModuleMap {
 	}
 	if len(entryPoints) > 6 {
 		entryPoints = entryPoints[:6]
+	}
+	if len(imports) > 15 {
+		imports = imports[:15]
+	}
+	if len(identifiers) > 15 {
+		identifiers = identifiers[:15]
 	}
 
 	displayPath := relPath + "/"
@@ -240,17 +273,25 @@ func parseGoPackage(relPath string, goFiles []string) *ModuleMap {
 		KeyTypes:    types,
 		EntryPoints: entryPoints,
 		FileCount:   len(goFiles),
+		Imports:     imports,
+		Identifiers: identifiers,
 	}
 }
 
 // --- TypeScript regex parser ---
 
 var tsExportPattern = regexp.MustCompile(`export\s+(?:default\s+)?(?:async\s+)?(function|class|interface|type|const|enum)\s+(\w+)`)
+var tsImportPattern = regexp.MustCompile(`(?:import|require)\s*(?:\(?\s*['"])([\w\-\./@]+)`)
+var tsIdentPattern = regexp.MustCompile(`(?:^|[;\s])(?:function|class|const|let|var)\s+([a-z_]\w*)`)
 
 func parseTypeScriptModule(relPath string, tsFiles []string) *ModuleMap {
 	var types []string
 	var entryPoints []string
+	var imports []string
+	var identifiers []string
 	hasIndex := false
+	importSeen := make(map[string]bool)
+	identSeen := make(map[string]bool)
 
 	for _, f := range tsFiles {
 		base := filepath.Base(f)
@@ -280,6 +321,24 @@ func parseTypeScriptModule(relPath string, tsFiles []string) *ModuleMap {
 				}
 			}
 		}
+
+		// Extract imports
+		impMatches := tsImportPattern.FindAllStringSubmatch(content, -1)
+		for _, m := range impMatches {
+			if len(m) >= 2 && !importSeen[m[1]] {
+				importSeen[m[1]] = true
+				imports = append(imports, m[1])
+			}
+		}
+
+		// Extract private identifiers (lowercase start = unexported by convention)
+		identMatches := tsIdentPattern.FindAllStringSubmatch(content, -1)
+		for _, m := range identMatches {
+			if len(m) >= 2 && !identSeen[m[1]] {
+				identSeen[m[1]] = true
+				identifiers = append(identifiers, m[1])
+			}
+		}
 	}
 
 	if len(types) > 8 {
@@ -287,6 +346,12 @@ func parseTypeScriptModule(relPath string, tsFiles []string) *ModuleMap {
 	}
 	if len(entryPoints) > 6 {
 		entryPoints = entryPoints[:6]
+	}
+	if len(imports) > 15 {
+		imports = imports[:15]
+	}
+	if len(identifiers) > 15 {
+		identifiers = identifiers[:15]
 	}
 
 	return &ModuleMap{
@@ -296,6 +361,8 @@ func parseTypeScriptModule(relPath string, tsFiles []string) *ModuleMap {
 		KeyTypes:    types,
 		EntryPoints: entryPoints,
 		FileCount:   len(tsFiles),
+		Imports:     imports,
+		Identifiers: identifiers,
 	}
 }
 
@@ -486,6 +553,27 @@ func moduleToSummaryText(m ModuleMap) string {
 		sb.WriteString(strings.Join(m.EntryPoints, ", "))
 	}
 	return sb.String()
+}
+
+// HDCEncodeCodeMap produces HDC embeddings for all modules in a CodeMap.
+// Deterministic, no API calls — instant local encoding.
+// Returns nil if the code map has no modules.
+func HDCEncodeCodeMap(cm *CodeMap) map[string][]float32 {
+	if len(cm.Zoom2) == 0 {
+		return nil
+	}
+	enc := NewHDCEncoder()
+	result := make(map[string][]float32, len(cm.Zoom2))
+	for _, m := range cm.Zoom2 {
+		result[m.Path] = enc.EncodeModule(m)
+	}
+	return result
+}
+
+// HDCEncodeQuery produces an HDC vector for a query string.
+func HDCEncodeQuery(query string) []float32 {
+	enc := NewHDCEncoder()
+	return enc.EncodeQuery(query)
 }
 
 // EmbedCodeMap embeds all module summaries in a code map.
