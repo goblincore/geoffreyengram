@@ -149,6 +149,8 @@ func main() {
 		cmdContext(cfg)
 	case "map":
 		cmdMap(cfg)
+	case "search-code":
+		cmdSearchCode(cfg)
 	case "diff":
 		cmdDiff(cfg)
 	case "profile":
@@ -779,6 +781,54 @@ func cmdMap(cfg CLIConfig) {
 		}
 		if len(m.EntryPoints) > 0 {
 			fmt.Printf("    Entry: %s\n", strings.Join(m.EntryPoints, ", "))
+		}
+	}
+}
+
+// --- Search-code command ---
+
+func cmdSearchCode(cfg CLIConfig) {
+	fs := flag.NewFlagSet("search-code", flag.ExitOnError)
+	root := fs.String("root", "", "Project root (default: cwd)")
+	limit := fs.Int("limit", 10, "Max results")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	query := strings.Join(fs.Args(), " ")
+	if query == "" {
+		fmt.Fprintln(os.Stderr, "usage: dualmem search-code <query>")
+		os.Exit(1)
+	}
+
+	rootDir := *root
+	if rootDir == "" {
+		rootDir, _ = os.Getwd()
+	}
+
+	cm, err := dualmem.ScanCodebase(rootDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	embs := dualmem.HDCEncodeCodeMap(cm)
+	results := dualmem.SearchCodeMap(cm, embs, query, *limit)
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(results)
+		return
+	}
+
+	for i, r := range results {
+		fmt.Printf("  %d. %-30s sim=%.4f  %s\n", i+1, r.Path, r.Similarity, r.Summary)
+		if len(r.KeyTypes) > 0 {
+			fmt.Printf("     Types: %s\n", strings.Join(r.KeyTypes, ", "))
+		}
+		if len(r.EntryPoints) > 0 {
+			fmt.Printf("     Entry: %s\n", strings.Join(r.EntryPoints, ", "))
+		}
+		if len(r.Imports) > 0 && len(r.Imports) <= 8 {
+			fmt.Printf("     Imports: %s\n", strings.Join(r.Imports, ", "))
 		}
 	}
 }
