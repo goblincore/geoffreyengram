@@ -130,7 +130,10 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 		case len(d.goFiles) > 0:
 			mod = parseGoPackage(d.relPath, d.goFiles)
 		case len(d.tsFiles) > 0:
-			mod = parseTSModule(d.relPath, d.tsFiles)
+			// TypeScript: split significant files into own modules
+			mods := parseTSModuleSplit(d.relPath, d.tsFiles)
+			modules = append(modules, mods...)
+			continue
 		case len(d.pyFiles) > 0:
 			mod = parsePythonModule(d.relPath, d.pyFiles)
 		case len(d.rsFiles) > 0:

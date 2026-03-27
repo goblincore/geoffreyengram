@@ -1,13 +1,30 @@
 package dualmem
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	ts "github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammars"
 )
+
+// Thresholds for promoting a file to its own module entry.
+const (
+	significantExportThreshold = 5   // ≥5 exported symbols (types + entry points)
+	significantLineThreshold   = 300 // ≥300 lines of code
+)
+
+// fileSignificance holds the classification result for a single source file.
+type fileSignificance struct {
+	path          string // absolute path
+	baseName      string // e.g. "boosts.ts"
+	exportCount   int    // types + entry points
+	lineCount     int
+	isSignificant bool
+}
 
 // langConfig holds tree-sitter queries and extraction logic per language.
 type langConfig struct {
@@ -40,9 +57,10 @@ var (
 			`(function_declaration name: (identifier) @ident)`,
 			`(lexical_declaration (variable_declarator name: (identifier) @ident))`,
 		}, "\n"),
-		isExported: func(nodeText string, src []byte, node *ts.Node) bool {
-			return false // identQuery matches are always non-exported
-		},
+		// isExported is nil for TypeScript because:
+		// - entryQuery already constrains to export_statement (pre-filtered)
+		// - identQuery dedup relies on entrySeen check in parseWithTreeSitter
+		isExported: nil,
 	}
 
 	pyConfig = langConfig{
@@ -106,6 +124,122 @@ func parseTSModule(relPath string, files []string) *ModuleMap {
 		mod.Summary = fmt.Sprintf("TypeScript module (%d files)", len(files))
 	}
 	return mod
+}
+
+// classifyFileSignificance checks whether a single file is significant enough
+// to warrant its own module entry (rather than being grouped with the directory).
+func classifyFileSignificance(filePath string, cfg *langConfig) fileSignificance {
+	sig := fileSignificance{
+		path:     filePath,
+		baseName: filepath.Base(filePath),
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return sig
+	}
+	sig.lineCount = bytes.Count(data, []byte("\n")) + 1
+
+	if cfg.lang == nil {
+		sig.isSignificant = sig.lineCount >= significantLineThreshold
+		return sig
+	}
+
+	parser := ts.NewParser(cfg.lang)
+	tree, err := parser.Parse(data)
+	if err != nil {
+		sig.isSignificant = sig.lineCount >= significantLineThreshold
+		return sig
+	}
+	defer tree.Release()
+	root := tree.RootNode()
+
+	// Count exported types
+	if cfg.typeQuery != "" {
+		extractCaptures(root, cfg.lang, data, cfg.typeQuery, func(text string, node *ts.Node) {
+			sig.exportCount++
+		})
+	}
+	// Count exported entry points
+	if cfg.entryQuery != "" {
+		extractCaptures(root, cfg.lang, data, cfg.entryQuery, func(text string, node *ts.Node) {
+			// For TS, entryQuery only matches exports, so no isExported check needed.
+			// For other langs, apply the filter.
+			if cfg.isExported != nil && !cfg.isExported(text, data, node) {
+				return
+			}
+			sig.exportCount++
+		})
+	}
+
+	sig.isSignificant = sig.exportCount >= significantExportThreshold || sig.lineCount >= significantLineThreshold
+	return sig
+}
+
+// parseTSModuleSplit parses TypeScript files, splitting significant files into
+// their own modules. Files below the significance threshold are grouped into
+// a directory-level module as before.
+func parseTSModuleSplit(relPath string, files []string) []ModuleMap {
+	ensureLangs()
+	cfg := &tsLangConfig
+
+	// Single file — no splitting needed
+	if len(files) <= 1 {
+		mod := parseWithTreeSitter(relPath, files, cfg)
+		if mod != nil {
+			mod.Summary = fmt.Sprintf("TypeScript module (%d files)", len(files))
+			return []ModuleMap{*mod}
+		}
+		return nil
+	}
+
+	// Classify each file
+	var significant []fileSignificance
+	var restFiles []string
+	for _, f := range files {
+		sig := classifyFileSignificance(f, cfg)
+		if sig.isSignificant {
+			significant = append(significant, sig)
+		} else {
+			restFiles = append(restFiles, f)
+		}
+	}
+
+	// If none are significant, fall back to directory-level grouping
+	if len(significant) == 0 {
+		mod := parseWithTreeSitter(relPath, files, cfg)
+		if mod != nil {
+			mod.Summary = fmt.Sprintf("TypeScript module (%d files)", len(files))
+			return []ModuleMap{*mod}
+		}
+		return nil
+	}
+
+	var modules []ModuleMap
+
+	// Each significant file gets its own module
+	for _, sig := range significant {
+		ext := filepath.Ext(sig.baseName)
+		nameNoExt := strings.TrimSuffix(sig.baseName, ext)
+		filePath := relPath + "/" + nameNoExt
+		mod := parseWithTreeSitter(filePath, []string{sig.path}, cfg)
+		if mod != nil {
+			mod.Summary = fmt.Sprintf("TypeScript file (%d lines, %d exports)", sig.lineCount, sig.exportCount)
+			mod.FileCount = 1
+			modules = append(modules, *mod)
+		}
+	}
+
+	// Remaining files form the "rest" directory module
+	if len(restFiles) > 0 {
+		mod := parseWithTreeSitter(relPath, restFiles, cfg)
+		if mod != nil {
+			mod.Summary = fmt.Sprintf("TypeScript module (%d files)", len(restFiles))
+			modules = append(modules, *mod)
+		}
+	}
+
+	return modules
 }
 
 // parsePythonModule parses Python files using tree-sitter.

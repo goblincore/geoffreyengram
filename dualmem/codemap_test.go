@@ -634,6 +634,221 @@ func TestRenderAtBudget_MinSimilarityThreshold(t *testing.T) {
 	}
 }
 
+func TestClassifyFileSignificance(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 5 exports → significant
+	writeFile(t, tmpDir, "many-exports.ts", `
+export function useCreate() { return null }
+export function useDelete() { return null }
+export function useUpdate() { return null }
+export function useSearch() { return null }
+export function useList() { return null }
+`)
+	// 4 exports → not significant (below threshold)
+	writeFile(t, tmpDir, "few-exports.ts", `
+export function useA() { return null }
+export function useB() { return null }
+export function useC() { return null }
+export function useD() { return null }
+`)
+	// 300+ lines but few exports → significant by line count
+	var bigContent strings.Builder
+	bigContent.WriteString("export function onlyExport() {}\n")
+	for i := 0; i < 310; i++ {
+		fmt.Fprintf(&bigContent, "const line%d = %d\n", i, i)
+	}
+	writeFile(t, tmpDir, "big-file.ts", bigContent.String())
+
+	ensureLangs()
+	cfg := &tsLangConfig
+
+	cases := []struct {
+		file       string
+		wantSig    bool
+		wantExport int
+	}{
+		{"many-exports.ts", true, 5},
+		{"few-exports.ts", false, 4},
+		{"big-file.ts", true, 1},
+	}
+
+	for _, tc := range cases {
+		sig := classifyFileSignificance(filepath.Join(tmpDir, tc.file), cfg)
+		if sig.isSignificant != tc.wantSig {
+			t.Errorf("%s: isSignificant = %v, want %v (exports=%d, lines=%d)",
+				tc.file, sig.isSignificant, tc.wantSig, sig.exportCount, sig.lineCount)
+		}
+		if sig.exportCount != tc.wantExport {
+			t.Errorf("%s: exportCount = %d, want %d", tc.file, sig.exportCount, tc.wantExport)
+		}
+	}
+}
+
+func TestFileLevelSplitting_MonorepoSearch(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// --- mutations/ directory: mixed significance ---
+	mutDir := filepath.Join(tmpDir, "react-query", "mutations")
+	os.MkdirAll(mutDir, 0755)
+
+	// boosts.ts — significant (8 exports, domain-relevant identifiers)
+	var boostsContent strings.Builder
+	boostsContent.WriteString(`import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { LearnCard } from '@learncard/types'
+
+`)
+	boostHooks := []string{
+		"useShareBoostMutation", "useCreateBoost", "useCreateChildBoost",
+		"useManageSelfAssignedSkillsBoost", "useEditBoostMeta",
+		"useDeleteManagedBoostMutation", "useDeleteEarnedBoostMutation",
+		"useSendBoostCredential",
+	}
+	for _, hook := range boostHooks {
+		fmt.Fprintf(&boostsContent, `export const %s = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (args: any) => {
+      // send credential boost issue logic
+      return null
+    },
+    onSuccess: () => queryClient.invalidateQueries()
+  })
+}
+
+`, hook)
+	}
+	// Pad to 300+ lines with helper functions
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&boostsContent, "function boostHelper%d(data: any) { return data }\n", i)
+	}
+	writeFile(t, mutDir, "boosts.ts", boostsContent.String())
+
+	// Small files — not significant
+	writeFile(t, mutDir, "firebase.ts", `
+export function initFirebase() { return null }
+export function signOut() { return null }
+`)
+	writeFile(t, mutDir, "index.ts", `export { useCreateBoost } from './boosts'`)
+
+	// --- Noise directories (typical UI components) ---
+	uiDir := filepath.Join(tmpDir, "components", "ai-passport")
+	os.MkdirAll(uiDir, 0755)
+	writeFile(t, uiDir, "AiPassport.tsx", `
+export function AiPassport() { return null }
+export interface PersonalizedQuestionEnum {}
+`)
+
+	settingsDir := filepath.Join(tmpDir, "components", "network-settings")
+	os.MkdirAll(settingsDir, 0755)
+	writeFile(t, settingsDir, "NetworkSettings.tsx", `
+export function NetworkSettings() { return null }
+export class NetworkSettingsState {}
+`)
+
+	resumeDir := filepath.Join(tmpDir, "components", "resume-builder")
+	os.MkdirAll(resumeDir, 0755)
+	writeFile(t, resumeDir, "ResumeBuilder.tsx", `
+export function ResumeBuilder() { return null }
+export class ResumeFieldSource {}
+`)
+
+	// --- Scan and verify splitting ---
+	cm, err := ScanCodebase(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Log("Modules found:")
+	for _, m := range cm.Zoom2 {
+		t.Logf("  %s — %s (types=%v, entries=%v)", m.Path, m.Summary, m.KeyTypes, m.EntryPoints)
+	}
+
+	// Verify boosts got its own module
+	var boostsMod *ModuleMap
+	var restMod *ModuleMap
+	for i := range cm.Zoom2 {
+		if strings.HasSuffix(cm.Zoom2[i].Path, "boosts/") {
+			boostsMod = &cm.Zoom2[i]
+		}
+		if cm.Zoom2[i].Path == "react-query/mutations/" {
+			restMod = &cm.Zoom2[i]
+		}
+	}
+
+	if boostsMod == nil {
+		t.Fatal("expected boosts to get its own module")
+	}
+	if boostsMod.FileCount != 1 {
+		t.Errorf("boosts module file count = %d, want 1", boostsMod.FileCount)
+	}
+	if !strings.Contains(boostsMod.Summary, "TypeScript file") {
+		t.Errorf("boosts summary = %q, want 'TypeScript file ...'", boostsMod.Summary)
+	}
+
+	// Rest module should contain the small files
+	if restMod == nil {
+		t.Fatal("expected rest module for small files in mutations/")
+	}
+	if restMod.FileCount != 2 { // firebase.ts + index.ts
+		t.Errorf("rest module file count = %d, want 2", restMod.FileCount)
+	}
+
+	// --- Search ranking test ---
+	idx := BuildCodeIndex(cm)
+	results := SearchCodeMap(cm, idx, "send credential boost issue", 9)
+
+	t.Log("Search results for 'send credential boost issue':")
+	for i, r := range results {
+		t.Logf("  rank %d: %s (hybrid=%.4f hdc=%.4f kw=%.4f)", i, r.Path, r.HybridScore, r.Similarity, r.KeywordScore)
+	}
+
+	boostsRank := -1
+	for i, r := range results {
+		if strings.Contains(r.Path, "boosts") {
+			boostsRank = i
+			break
+		}
+	}
+	if boostsRank < 0 || boostsRank >= 3 {
+		t.Errorf("expected boosts module in top 3, got rank %d", boostsRank)
+	}
+}
+
+func BenchmarkScanCodebase_WithSplitting(b *testing.B) {
+	tmpDir := b.TempDir()
+
+	// Create a mock monorepo with ~50 directories, some with significant files
+	for i := 0; i < 20; i++ {
+		dir := filepath.Join(tmpDir, fmt.Sprintf("components/module-%d", i))
+		os.MkdirAll(dir, 0755)
+		os.WriteFile(filepath.Join(dir, "index.tsx"), []byte(fmt.Sprintf(`
+export function Component%d() { return null }
+`, i)), 0644)
+	}
+
+	// A few directories with significant files
+	for i := 0; i < 5; i++ {
+		dir := filepath.Join(tmpDir, fmt.Sprintf("services/service-%d", i))
+		os.MkdirAll(dir, 0755)
+
+		var big strings.Builder
+		for j := 0; j < 8; j++ {
+			fmt.Fprintf(&big, "export function handler%d_%d() { return null }\n", i, j)
+		}
+		for j := 0; j < 300; j++ {
+			fmt.Fprintf(&big, "const val%d_%d = %d\n", i, j, j)
+		}
+		os.WriteFile(filepath.Join(dir, "handlers.ts"), []byte(big.String()), 0644)
+		os.WriteFile(filepath.Join(dir, "utils.ts"), []byte("export function util() {}\n"), 0644)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ScanCodebase(tmpDir)
+	}
+}
+
 func TestCodeMapEmbeddings_StoreRoundTrip(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	store, err := NewSQLiteStore(dbPath)
