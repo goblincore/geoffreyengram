@@ -268,6 +268,52 @@ func (ip IntentProfile) TypeMultiplier(memType string) float64 {
 	}
 }
 
+// --- Knowledge documents ---
+
+// KnowledgeDoc is a synthesized concept document, created by clustering and
+// summarizing related detail memories. Think of it as one section of an
+// auto-generated AGENTS.md — coherent prose about a system or concept.
+type KnowledgeDoc struct {
+	ID         string    `json:"id"`
+	Namespace  string    `json:"namespace"`
+	Topic      string    `json:"topic"`       // short identifier: "hdc-encoder", "auth-middleware"
+	Content    string    `json:"content"`     // synthesized markdown prose
+	Files      []string  `json:"files"`       // associated file paths
+	SourceIDs  []string  `json:"source_ids"`  // detail memory IDs that were synthesized
+	Embedding  []float32 `json:"-"`           // 768-dim for relevance ranking
+	TokenCount int       `json:"token_count"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// FormatForContext renders a knowledge doc as a labeled context section.
+func (kd *KnowledgeDoc) FormatForContext() string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("[Knowledge: %s]\n", kd.Topic))
+	sb.WriteString(kd.Content)
+	if len(kd.Files) > 0 {
+		sb.WriteString("\n  Files: " + strings.Join(kd.Files, ", "))
+	}
+	return sb.String()
+}
+
+// SynthesizeOpts configures the Synthesize operation.
+type SynthesizeOpts struct {
+	Force  bool   // Re-synthesize all docs regardless of staleness
+	Topic  string // Only synthesize this specific topic (empty = all)
+	DryRun bool   // Report what would be done without making changes
+}
+
+// SynthesizeResult describes what Synthesize produced.
+type SynthesizeResult struct {
+	Created  []KnowledgeDoc // newly created docs
+	Updated  []KnowledgeDoc // re-synthesized existing docs
+	Skipped  int            // docs already fresh
+	Orphaned int            // memories that didn't cluster (< 3 in group)
+	Warnings []string
+	DryRun   bool
+}
+
 // --- Import graph / clustering ---
 
 // ImportGraph represents import relationships between code modules.
@@ -490,6 +536,14 @@ type Store interface {
 	UpsertCodeMapEmbeddings(namespace string, embeddings map[string]ModuleEmbedding, embeddingModel string) error
 	GetCodeMapEmbeddings(namespace string) (map[string][]float32, string, error)
 	DeleteCodeMapEmbeddings(namespace string) error
+
+	// Knowledge documents
+	UpsertKnowledgeDoc(doc *KnowledgeDoc, embedding []float32) error
+	GetKnowledgeDocs(namespace string) ([]KnowledgeDoc, error)
+	GetKnowledgeDocByTopic(namespace, topic string) (*KnowledgeDoc, error)
+	DeleteKnowledgeDoc(namespace, topic string) error
+	// GetUncoveredMemories returns detail memories whose IDs are NOT in any knowledge doc's source_ids.
+	GetUncoveredMemories(namespace string) ([]detailWithVector, error)
 
 	// Session markers
 	InsertSessionMarker(marker *SessionMarker) error

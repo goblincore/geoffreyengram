@@ -170,6 +170,24 @@ func (s *SQLiteStore) migrate() error {
 		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (5)`)
 	}
 
+	if version < 6 {
+		s.db.Exec(`CREATE TABLE IF NOT EXISTS knowledge_docs (
+			id              TEXT PRIMARY KEY,
+			namespace       TEXT NOT NULL,
+			topic           TEXT NOT NULL,
+			content         TEXT NOT NULL,
+			files_json      TEXT DEFAULT '[]',
+			source_ids_json TEXT DEFAULT '[]',
+			embedding       BLOB,
+			token_count     INTEGER DEFAULT 0,
+			created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+			updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+			UNIQUE(namespace, topic)
+		)`)
+		s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_kdocs_ns ON knowledge_docs(namespace)`)
+		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (6)`)
+	}
+
 	return nil
 }
 
@@ -818,6 +836,139 @@ func (s *SQLiteStore) GetLatestSessionMarker(namespace string) (*SessionMarker, 
 	}
 	sm.Timestamp, _ = time.Parse("2006-01-02 15:04:05", createdAt)
 	return &sm, nil
+}
+
+// --- Knowledge documents ---
+
+func (s *SQLiteStore) UpsertKnowledgeDoc(doc *KnowledgeDoc, embedding []float32) error {
+	filesJSON, _ := json.Marshal(doc.Files)
+	sourceJSON, _ := json.Marshal(doc.SourceIDs)
+	var embBlob []byte
+	if len(embedding) > 0 {
+		embBlob = encodeVector(embedding)
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO knowledge_docs (id, namespace, topic, content, files_json, source_ids_json, embedding, token_count, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(namespace, topic) DO UPDATE SET
+			content = excluded.content,
+			files_json = excluded.files_json,
+			source_ids_json = excluded.source_ids_json,
+			embedding = excluded.embedding,
+			token_count = excluded.token_count,
+			updated_at = excluded.updated_at`,
+		doc.ID, doc.Namespace, doc.Topic, doc.Content, string(filesJSON), string(sourceJSON),
+		embBlob, doc.TokenCount, doc.CreatedAt.Format(time.RFC3339), doc.UpdatedAt.Format(time.RFC3339))
+	return err
+}
+
+func (s *SQLiteStore) GetKnowledgeDocs(namespace string) ([]KnowledgeDoc, error) {
+	rows, err := s.db.Query(`
+		SELECT id, namespace, topic, content, files_json, source_ids_json, embedding, token_count, created_at, updated_at
+		FROM knowledge_docs WHERE namespace = ? ORDER BY updated_at DESC`, namespace)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var docs []KnowledgeDoc
+	for rows.Next() {
+		doc, err := scanKnowledgeDoc(rows)
+		if err != nil {
+			return nil, err
+		}
+		docs = append(docs, doc)
+	}
+	return docs, rows.Err()
+}
+
+func (s *SQLiteStore) GetKnowledgeDocByTopic(namespace, topic string) (*KnowledgeDoc, error) {
+	row := s.db.QueryRow(`
+		SELECT id, namespace, topic, content, files_json, source_ids_json, embedding, token_count, created_at, updated_at
+		FROM knowledge_docs WHERE namespace = ? AND topic = ?`, namespace, topic)
+
+	var doc KnowledgeDoc
+	var filesJSON, sourceJSON string
+	var embBlob []byte
+	var createdStr, updatedStr string
+	err := row.Scan(&doc.ID, &doc.Namespace, &doc.Topic, &doc.Content, &filesJSON, &sourceJSON,
+		&embBlob, &doc.TokenCount, &createdStr, &updatedStr)
+	if err != nil {
+		return nil, err
+	}
+	json.Unmarshal([]byte(filesJSON), &doc.Files)
+	json.Unmarshal([]byte(sourceJSON), &doc.SourceIDs)
+	if len(embBlob) > 0 {
+		doc.Embedding = decodeVector(embBlob)
+	}
+	doc.CreatedAt, _ = time.Parse(time.RFC3339, createdStr)
+	doc.UpdatedAt, _ = time.Parse(time.RFC3339, updatedStr)
+	return &doc, nil
+}
+
+func (s *SQLiteStore) DeleteKnowledgeDoc(namespace, topic string) error {
+	_, err := s.db.Exec(`DELETE FROM knowledge_docs WHERE namespace = ? AND topic = ?`, namespace, topic)
+	return err
+}
+
+func (s *SQLiteStore) GetUncoveredMemories(namespace string) ([]detailWithVector, error) {
+	// Get all source IDs from knowledge docs
+	rows, err := s.db.Query(`SELECT source_ids_json FROM knowledge_docs WHERE namespace = ?`, namespace)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	coveredIDs := make(map[string]bool)
+	for rows.Next() {
+		var sourceJSON string
+		if err := rows.Scan(&sourceJSON); err != nil {
+			return nil, err
+		}
+		var ids []string
+		json.Unmarshal([]byte(sourceJSON), &ids)
+		for _, id := range ids {
+			coveredIDs[id] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Get all detail memories for the namespace, filter out covered ones
+	all, err := s.GetDetailMemories(namespace)
+	if err != nil {
+		return nil, err
+	}
+
+	var uncovered []detailWithVector
+	for _, dm := range all {
+		if !coveredIDs[dm.ID] {
+			uncovered = append(uncovered, dm)
+		}
+	}
+	return uncovered, nil
+}
+
+// scanKnowledgeDoc reads a KnowledgeDoc from a sql.Rows cursor.
+func scanKnowledgeDoc(rows *sql.Rows) (KnowledgeDoc, error) {
+	var doc KnowledgeDoc
+	var filesJSON, sourceJSON string
+	var embBlob []byte
+	var createdStr, updatedStr string
+	err := rows.Scan(&doc.ID, &doc.Namespace, &doc.Topic, &doc.Content, &filesJSON, &sourceJSON,
+		&embBlob, &doc.TokenCount, &createdStr, &updatedStr)
+	if err != nil {
+		return doc, err
+	}
+	json.Unmarshal([]byte(filesJSON), &doc.Files)
+	json.Unmarshal([]byte(sourceJSON), &doc.SourceIDs)
+	if len(embBlob) > 0 {
+		doc.Embedding = decodeVector(embBlob)
+	}
+	doc.CreatedAt, _ = time.Parse(time.RFC3339, createdStr)
+	doc.UpdatedAt, _ = time.Parse(time.RFC3339, updatedStr)
+	return doc, nil
 }
 
 // --- Lifecycle ---

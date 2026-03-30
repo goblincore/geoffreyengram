@@ -402,7 +402,31 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 		}
 	}
 
-	// 1. Profile sketch (~50 tokens) — always include if available
+	// 1. Knowledge docs — synthesized concept documents, ranked by query relevance.
+	// These replace raw memories for topics that have been synthesized.
+	coveredIDs := make(map[string]bool)
+	kdocs, _ := e.GetKnowledgeDocs(ctx, userID, query, queryEmb, 0)
+	if len(kdocs) > 0 {
+		// Budget: knowledge docs get up to 60% of remaining budget
+		kdocBudget := (tokenBudget - tokensUsed) * 60 / 100
+		kdocUsed := 0
+		for _, kd := range kdocs {
+			kdTokens := estimateTokens(kd.FormatForContext())
+			if kdocUsed+kdTokens > kdocBudget {
+				break
+			}
+			parts = append(parts, kd.FormatForContext())
+			sources = append(sources, SourceRef{Type: "knowledge", ID: kd.Topic})
+			tokensUsed += kdTokens
+			kdocUsed += kdTokens
+			// Mark source memories as covered so they don't duplicate
+			for _, id := range kd.SourceIDs {
+				coveredIDs[id] = true
+			}
+		}
+	}
+
+	// 2. Profile sketch (~50 tokens) — always include if available
 	if results.Profile != nil {
 		profileText := formatProfile(results.Profile)
 		profileTokens := estimateTokens(profileText)
@@ -413,7 +437,7 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 		}
 	}
 
-	// 2. Narrative arcs (~100-200 tokens each)
+	// 3. Narrative arcs (~100-200 tokens each)
 	for _, arc := range results.Arcs {
 		arcText := arc.SummaryText
 		arcTokens := estimateTokens(arcText)
@@ -425,8 +449,8 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 		tokensUsed += arcTokens
 	}
 
-	// 3. Detail memories — sort by type priority (warnings first, then decisions),
-	// with access-recency weighting and intent-aware type multipliers.
+	// 4. Detail memories — only uncovered ones (not already in a knowledge doc).
+	// Sorted by type priority with access-recency weighting and intent-aware multipliers.
 	now := time.Now()
 	var intentProfile *IntentProfile
 	if profile, ok := IntentProfiles[intent]; ok {
@@ -441,6 +465,9 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 	for _, dm := range results.DetailMemories {
 		if dm.Type == "checkpoint" {
 			continue // already rendered as structured block above
+		}
+		if coveredIDs[dm.ID] {
+			continue // already covered by a knowledge doc
 		}
 		dmTokens := estimateTokens(dm.Text) + estimateTokens(strings.Join(dm.Files, ", "))
 		if tokensUsed+dmTokens > tokenBudget {
@@ -459,7 +486,7 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 		tokensUsed += dmTokens
 	}
 
-	// 4. Recent episodes (if budget remains)
+	// 5. Recent episodes (if budget remains)
 	for _, ep := range results.Episodes {
 		epText := ep.SummaryText
 		epTokens := estimateTokens(epText)
@@ -1326,6 +1353,258 @@ func (e *Engine) SeedMemories(ctx context.Context, userID string, force bool, dr
 	}
 
 	return result, nil
+}
+
+// --- Knowledge documents ---
+
+// Synthesize clusters related memories and creates/updates knowledge docs.
+// Each doc is a coherent, concept-oriented document synthesized by LLM.
+func (e *Engine) Synthesize(ctx context.Context, namespace string, opts *SynthesizeOpts) (*SynthesizeResult, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if opts == nil {
+		opts = &SynthesizeOpts{}
+	}
+
+	result := &SynthesizeResult{DryRun: opts.DryRun}
+
+	// Get text generator
+	gen, ok := e.cfg.Summarizer.(TextGenerator)
+	if !ok && !opts.DryRun {
+		return nil, fmt.Errorf("dualmem: summarizer does not support GenerateText (need GeminiSummarizer)")
+	}
+
+	// Load existing docs
+	existingDocs, err := e.store.GetKnowledgeDocs(namespace)
+	if err != nil {
+		return nil, fmt.Errorf("dualmem: get knowledge docs: %w", err)
+	}
+
+	// If synthesizing a specific topic, handle that case
+	if opts.Topic != "" {
+		return e.synthesizeTopic(ctx, gen, namespace, opts.Topic, existingDocs, opts)
+	}
+
+	// Load all detail memories (excluding checkpoints and seeds)
+	allMemories, err := e.store.GetDetailMemories(namespace)
+	if err != nil {
+		return nil, fmt.Errorf("dualmem: get memories: %w", err)
+	}
+
+	var eligible []detailWithVector
+	for _, dm := range allMemories {
+		if dm.Type != "checkpoint" && dm.Type != "seed" {
+			eligible = append(eligible, dm)
+		}
+	}
+
+	if len(eligible) == 0 {
+		return result, nil
+	}
+
+	// Cluster memories
+	clusters, orphaned := clusterMemories(eligible, existingDocs, 3)
+	result.Orphaned = orphaned
+
+	if opts.DryRun {
+		for _, c := range clusters {
+			result.Created = append(result.Created, KnowledgeDoc{
+				Topic:     c.topic,
+				Files:     c.files,
+				SourceIDs: memoryIDs(c.members),
+			})
+		}
+		return result, nil
+	}
+
+	// Synthesize each cluster
+	for _, cluster := range clusters {
+		// Check if existing doc exists for this topic
+		var existingDoc *KnowledgeDoc
+		for i, doc := range existingDocs {
+			if doc.Topic == cluster.topic {
+				existingDoc = &existingDocs[i]
+				break
+			}
+		}
+
+		// Skip if not force and doc exists and isn't stale
+		if existingDoc != nil && !opts.Force && !isDocStale(existingDoc, eligible) {
+			result.Skipped++
+			continue
+		}
+
+		doc, err := synthesizeDoc(ctx, gen, e.embedder, cluster, namespace)
+		if err != nil {
+			result.Warnings = append(result.Warnings, err.Error())
+			continue
+		}
+
+		// Preserve original creation time if updating
+		if existingDoc != nil {
+			doc.ID = existingDoc.ID
+			doc.CreatedAt = existingDoc.CreatedAt
+		}
+
+		if err := e.store.UpsertKnowledgeDoc(doc, doc.Embedding); err != nil {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("store %q: %v", doc.Topic, err))
+			continue
+		}
+
+		if existingDoc != nil {
+			result.Updated = append(result.Updated, *doc)
+		} else {
+			result.Created = append(result.Created, *doc)
+		}
+	}
+
+	return result, nil
+}
+
+// synthesizeTopic re-synthesizes a single topic.
+func (e *Engine) synthesizeTopic(ctx context.Context, gen TextGenerator, namespace, topic string, existingDocs []KnowledgeDoc, opts *SynthesizeOpts) (*SynthesizeResult, error) {
+	result := &SynthesizeResult{DryRun: opts.DryRun}
+
+	var targetDoc *KnowledgeDoc
+	for i, doc := range existingDocs {
+		if doc.Topic == topic {
+			targetDoc = &existingDocs[i]
+			break
+		}
+	}
+	if targetDoc == nil {
+		return nil, fmt.Errorf("dualmem: no knowledge doc with topic %q", topic)
+	}
+
+	// Load source memories
+	allMemories, err := e.store.GetDetailMemories(namespace)
+	if err != nil {
+		return nil, fmt.Errorf("dualmem: get memories: %w", err)
+	}
+
+	sourceSet := make(map[string]bool)
+	for _, id := range targetDoc.SourceIDs {
+		sourceSet[id] = true
+	}
+
+	var sources []detailWithVector
+	for _, dm := range allMemories {
+		if sourceSet[dm.ID] {
+			sources = append(sources, dm)
+		}
+	}
+
+	// Also add new memories that overlap by files
+	for _, dm := range allMemories {
+		if !sourceSet[dm.ID] && dm.Type != "checkpoint" && dm.Type != "seed" {
+			if filesOverlap(dm.Files, targetDoc.Files) >= 2 {
+				sources = append(sources, dm)
+				sourceSet[dm.ID] = true
+			}
+		}
+	}
+
+	if len(sources) == 0 {
+		return result, nil
+	}
+
+	if opts.DryRun {
+		result.Updated = append(result.Updated, KnowledgeDoc{
+			Topic:     topic,
+			Files:     targetDoc.Files,
+			SourceIDs: memoryIDs(sources),
+		})
+		return result, nil
+	}
+
+	cluster := memoryCluster{
+		topic:   topic,
+		files:   mergeFiles(targetDoc.Files, collectFiles(sources)),
+		members: sources,
+	}
+
+	doc, err := synthesizeDoc(ctx, gen, e.embedder, cluster, namespace)
+	if err != nil {
+		return nil, err
+	}
+	doc.ID = targetDoc.ID
+	doc.CreatedAt = targetDoc.CreatedAt
+
+	if err := e.store.UpsertKnowledgeDoc(doc, doc.Embedding); err != nil {
+		return nil, fmt.Errorf("dualmem: store %q: %w", topic, err)
+	}
+
+	result.Updated = append(result.Updated, *doc)
+	return result, nil
+}
+
+// GetKnowledgeDocs returns docs ranked by relevance to query.
+func (e *Engine) GetKnowledgeDocs(ctx context.Context, namespace, query string, queryEmb []float32, limit int) ([]KnowledgeDoc, error) {
+	docs, err := e.store.GetKnowledgeDocs(namespace)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(queryEmb) > 0 && len(docs) > 0 {
+		// Rank by cosine similarity to query
+		type scored struct {
+			doc   KnowledgeDoc
+			score float64
+		}
+		var ranked []scored
+		for _, doc := range docs {
+			sim := 0.0
+			if len(doc.Embedding) > 0 {
+				sim = CosineSimilarity(queryEmb, doc.Embedding)
+			}
+			ranked = append(ranked, scored{doc, sim})
+		}
+		sort.Slice(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
+
+		docs = make([]KnowledgeDoc, 0, len(ranked))
+		for _, r := range ranked {
+			docs = append(docs, r.doc)
+		}
+	}
+
+	if limit > 0 && len(docs) > limit {
+		docs = docs[:limit]
+	}
+	return docs, nil
+}
+
+// ListKnowledgeDocs returns all docs for a namespace.
+func (e *Engine) ListKnowledgeDocs(ctx context.Context, namespace string) ([]KnowledgeDoc, error) {
+	return e.store.GetKnowledgeDocs(namespace)
+}
+
+// DeleteKnowledgeDoc removes a doc by topic (source memories preserved).
+func (e *Engine) DeleteKnowledgeDoc(ctx context.Context, namespace, topic string) error {
+	return e.store.DeleteKnowledgeDoc(namespace, topic)
+}
+
+func memoryIDs(memories []detailWithVector) []string {
+	ids := make([]string, len(memories))
+	for i, m := range memories {
+		ids[i] = m.ID
+	}
+	return ids
+}
+
+func collectFiles(memories []detailWithVector) []string {
+	set := make(map[string]bool)
+	for _, m := range memories {
+		for _, f := range m.Files {
+			set[f] = true
+		}
+	}
+	result := make([]string, 0, len(set))
+	for f := range set {
+		result = append(result, f)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func formatProfile(p *ProfileSketch) string {

@@ -168,6 +168,10 @@ func main() {
 		cmdGC(cfg)
 	case "seed":
 		cmdSeed(cfg)
+	case "synthesize":
+		cmdSynthesize(cfg)
+	case "docs":
+		cmdDocs(cfg)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -192,6 +196,8 @@ Commands:
   promote     Pin a memory to Detail Path
   demote      Demote a memory to Sketch Path
   seed        Auto-generate semantic context memories from code structure
+  synthesize  Cluster memories into knowledge docs (concept-oriented summaries)
+  docs        List/show/delete/export knowledge docs
   gc          Garbage collect stale/expired memories
 
 Flags (all commands):
@@ -944,6 +950,187 @@ func cmdSeed(cfg CLIConfig) {
 		fmt.Printf("%d. [%s] %s\n", i+1, dm.Sector, truncate(dm.Text, 120))
 		if len(dm.Files) > 0 {
 			fmt.Printf("   Files: %s\n", strings.Join(dm.Files, ", "))
+		}
+	}
+}
+
+func cmdSynthesize(cfg CLIConfig) {
+	fs := flag.NewFlagSet("synthesize", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace")
+	force := fs.Bool("force", false, "Re-synthesize all docs regardless of staleness")
+	topic := fs.String("topic", "", "Only synthesize this specific topic")
+	dryRun := fs.Bool("dry-run", false, "Show what would be done without writing")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	namespace := resolveNamespace(*ns, cfg)
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+	result, err := engine.Synthesize(ctx, namespace, &dualmem.SynthesizeOpts{
+		Force:  *force,
+		Topic:  *topic,
+		DryRun: *dryRun,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(result)
+		return
+	}
+
+	if *dryRun {
+		fmt.Printf("Dry run: %d docs would be created, %d orphaned memories\n\n", len(result.Created), result.Orphaned)
+		for _, doc := range result.Created {
+			fmt.Printf("  Topic: %s (%d source memories)\n", doc.Topic, len(doc.SourceIDs))
+			if len(doc.Files) > 0 {
+				fmt.Printf("  Files: %s\n", strings.Join(doc.Files, ", "))
+			}
+			fmt.Println()
+		}
+		return
+	}
+
+	if len(result.Warnings) > 0 {
+		for _, w := range result.Warnings {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		}
+		fmt.Fprintln(os.Stderr)
+	}
+
+	fmt.Printf("Created: %d, Updated: %d, Skipped: %d, Orphaned: %d\n",
+		len(result.Created), len(result.Updated), result.Skipped, result.Orphaned)
+
+	for _, doc := range result.Created {
+		fmt.Printf("  + %s (%d tokens, %d sources)\n", doc.Topic, doc.TokenCount, len(doc.SourceIDs))
+	}
+	for _, doc := range result.Updated {
+		fmt.Printf("  ~ %s (%d tokens, %d sources)\n", doc.Topic, doc.TokenCount, len(doc.SourceIDs))
+	}
+}
+
+func cmdDocs(cfg CLIConfig) {
+	fs := flag.NewFlagSet("docs", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	namespace := resolveNamespace(*ns, cfg)
+	args := fs.Args()
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+
+	// Subcommands: show <topic>, delete <topic>, export [--dir path]
+	subcmd := ""
+	if len(args) > 0 {
+		subcmd = args[0]
+	}
+
+	switch subcmd {
+	case "show":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "usage: dualmem docs show <topic>\n")
+			os.Exit(1)
+		}
+		doc, err := engine.ListKnowledgeDocs(ctx, namespace)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		topic := args[1]
+		for _, d := range doc {
+			if d.Topic == topic {
+				if *jsonOut {
+					json.NewEncoder(os.Stdout).Encode(d)
+				} else {
+					fmt.Printf("[Knowledge: %s]\n\n%s\n", d.Topic, d.Content)
+					if len(d.Files) > 0 {
+						fmt.Printf("\nFiles: %s\n", strings.Join(d.Files, ", "))
+					}
+					fmt.Printf("Sources: %d memories | Tokens: %d | Updated: %s\n",
+						len(d.SourceIDs), d.TokenCount, d.UpdatedAt.Format("2006-01-02 15:04"))
+				}
+				return
+			}
+		}
+		fmt.Fprintf(os.Stderr, "no knowledge doc with topic %q\n", topic)
+		os.Exit(1)
+
+	case "delete":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "usage: dualmem docs delete <topic>\n")
+			os.Exit(1)
+		}
+		if err := engine.DeleteKnowledgeDoc(ctx, namespace, args[1]); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Deleted knowledge doc %q (source memories preserved)\n", args[1])
+
+	case "export":
+		dir := ".claude/knowledge"
+		if len(args) > 1 {
+			dir = args[1]
+		}
+		docs, err := engine.ListKnowledgeDocs(ctx, namespace)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		if len(docs) == 0 {
+			fmt.Println("No knowledge docs to export")
+			return
+		}
+		os.MkdirAll(dir, 0755)
+		for _, d := range docs {
+			path := filepath.Join(dir, d.Topic+".md")
+			content := fmt.Sprintf("# %s\n\n%s\n", d.Topic, d.Content)
+			if len(d.Files) > 0 {
+				content += fmt.Sprintf("\n## Files\n%s\n", strings.Join(d.Files, ", "))
+			}
+			os.WriteFile(path, []byte(content), 0644)
+			fmt.Printf("  %s\n", path)
+		}
+		fmt.Printf("\nExported %d docs to %s/\n", len(docs), dir)
+
+	default:
+		// List all docs
+		docs, err := engine.ListKnowledgeDocs(ctx, namespace)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+
+		if *jsonOut {
+			json.NewEncoder(os.Stdout).Encode(docs)
+			return
+		}
+
+		if len(docs) == 0 {
+			fmt.Println("No knowledge docs. Run 'dualmem synthesize' to create them.")
+			return
+		}
+
+		fmt.Printf("Knowledge docs (%d):\n\n", len(docs))
+		for _, d := range docs {
+			fmt.Printf("  %-30s %4d tokens  %2d sources  updated %s\n",
+				d.Topic, d.TokenCount, len(d.SourceIDs), d.UpdatedAt.Format("2006-01-02"))
 		}
 	}
 }
