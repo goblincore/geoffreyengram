@@ -287,6 +287,45 @@ dualmem seed --json
 
 Seed memories rank below organic memories (salience 0.5 vs 0.7 default) and are weighted by intent — `explore` boosts seeds (1.2×), `debug` suppresses them (0.6×). They appear in `context` output with a `[Codebase Context — cluster-name]` label. As you build organic memories, seeds naturally fall in priority.
 
+### Knowledge documents — synthesized context
+
+Over time, individual memories accumulate — "auth uses JWT", "refresh tokens in Redis", "rate limiter skips nil check". Instead of serving these as a flat list, `dualmem synthesize` clusters related memories and uses an LLM to produce coherent, concept-oriented documents — like auto-generated AGENTS.md sections.
+
+```bash
+# Preview what would be synthesized
+dualmem synthesize --dry-run
+
+# Synthesize knowledge docs from memory clusters
+dualmem synthesize
+
+# Re-synthesize all docs regardless of staleness
+dualmem synthesize --force
+
+# Synthesize across all namespaces (for cron jobs)
+dualmem synthesize --all
+```
+
+Clustering works in three phases: (1) match to existing docs by file overlap, (2) group remaining memories by shared files (≥2), (3) group by semantic similarity (cosine ≥0.55). Groups of ≥3 memories become docs. Synthesis uses the existing `TextGenerator` interface (Gemini Flash).
+
+Knowledge docs appear in `context` output as `[Knowledge: topic]` sections before individual memories. Memories already covered by a doc are suppressed to avoid duplication:
+
+```
+[Knowledge: auth-middleware]
+The auth system uses JWT tokens validated in middleware.go. Refresh tokens
+are stored in Redis with a 7-day TTL. Warning: the rate limiter cleanup()
+skips nil check intentionally for the hot path.
+  Files: auth.go, middleware.go
+```
+
+Docs are re-synthesized when source memories are updated. Browse and manage docs:
+
+```bash
+dualmem docs                      # list all docs with topic, tokens, source count
+dualmem docs show <topic>         # read a specific doc
+dualmem docs delete <topic>       # remove a doc (source memories preserved)
+dualmem docs export [--dir path]  # export as markdown files
+```
+
 ### Promote / demote
 
 Memories can be moved between paths. Promote moves a sketch memory (raw entry or episode) to the Detail Path; demote does the reverse.
@@ -487,7 +526,8 @@ geoffreyengram/
 │   ├── diff.go            # Git-based structural diffs, stale memory detection
 │   ├── classify_embedding.go  # EmbeddingClassifier (ported from engram)
 │   ├── summarize_gemini.go    # GeminiSummarizer (episode/arc/profile compression)
-│   ├── store_sqlite.go    # SQLite backend (migrations v1-v5)
+│   ├── knowledge.go       # Knowledge doc synthesis (clustering, prompts, staleness)
+│   ├── store_sqlite.go    # SQLite backend (migrations v1-v6)
 │   └── project.go         # Random projection, cosine similarity
 ├── cmd/
 │   ├── dualmem/           # CLI tool
@@ -500,7 +540,7 @@ geoffreyengram/
 
 ## Status
 
-Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 236 tests passing.
+Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 253 tests passing.
 
 ## License
 
