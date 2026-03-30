@@ -73,6 +73,38 @@ func loadConfig() CLIConfig {
 	return cfg
 }
 
+// filterFlags returns only flag arguments (--flag value) from args, for flag.Parse.
+func filterFlags(args []string) []string {
+	var flags []string
+	for i := 0; i < len(args); i++ {
+		if strings.HasPrefix(args[i], "-") {
+			flags = append(flags, args[i])
+			// If this flag takes a value (not --flag=value form), include next arg
+			if !strings.Contains(args[i], "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+				flags = append(flags, args[i])
+			}
+		}
+	}
+	return flags
+}
+
+// positionalArgs returns only non-flag arguments from args.
+func positionalArgs(args []string) []string {
+	var pos []string
+	for i := 0; i < len(args); i++ {
+		if strings.HasPrefix(args[i], "-") {
+			// Skip flag and its value
+			if !strings.Contains(args[i], "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+			}
+		} else {
+			pos = append(pos, args[i])
+		}
+	}
+	return pos
+}
+
 func resolveNamespace(flagNS string, cfg CLIConfig) string {
 	if flagNS != "" {
 		return flagNS
@@ -1022,10 +1054,11 @@ func cmdDocs(cfg CLIConfig) {
 	fs := flag.NewFlagSet("docs", flag.ExitOnError)
 	ns := fs.String("ns", "", "Namespace")
 	jsonOut := fs.Bool("json", false, "JSON output")
-	fs.Parse(os.Args[2:])
+	// Parse all args so --ns can appear anywhere (before or after subcommand)
+	fs.Parse(filterFlags(os.Args[2:]))
 
 	namespace := resolveNamespace(*ns, cfg)
-	args := fs.Args()
+	args := positionalArgs(os.Args[2:])
 
 	engine, err := newEngine(cfg)
 	if err != nil {

@@ -63,13 +63,23 @@ func clusterMemories(memories []detailWithVector, existingDocs []KnowledgeDoc, m
 
 	newClusters := clusterByFileOverlap(unassigned, 2)
 
-	// Phase 3: Within each new cluster that's still small, try to absorb nearby
-	// unassigned memories by semantic similarity
+	// Phase 3: Only mark file-overlap clusters as assigned if they have ≥2 members.
+	// Singletons (no file overlap) fall through to semantic clustering.
 	for _, nc := range newClusters {
-		for _, m := range nc.members {
-			assigned[m.ID] = true
+		if len(nc.members) >= 2 {
+			for _, m := range nc.members {
+				assigned[m.ID] = true
+			}
 		}
 	}
+	// Drop singleton new clusters — they'll be handled by semantic clustering or remain orphaned
+	var multiNewClusters []memoryCluster
+	for _, nc := range newClusters {
+		if len(nc.members) >= 2 {
+			multiNewClusters = append(multiNewClusters, nc)
+		}
+	}
+	newClusters = multiNewClusters
 
 	// Remaining truly unassigned — try semantic grouping
 	var stillUnassigned []detailWithVector
@@ -79,7 +89,7 @@ func clusterMemories(memories []detailWithVector, existingDocs []KnowledgeDoc, m
 		}
 	}
 
-	semanticClusters := clusterBySimilarity(stillUnassigned, 0.7)
+	semanticClusters := clusterBySimilarity(stillUnassigned, 0.55)
 	for _, sc := range semanticClusters {
 		for _, m := range sc.members {
 			assigned[m.ID] = true
