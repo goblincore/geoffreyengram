@@ -216,8 +216,10 @@ func (dp *DetailPath) Search(ctx context.Context, queryEmbedding []float32, user
 	seen := make(map[string]bool)
 
 	// Phase 1 — identifier pre-filter: if the query contains specific identifiers
-	// (e.g. "LC-1663", "PR-42"), guarantee all memories containing those strings
-	// are included regardless of cosine similarity ranking.
+	// (e.g. "LC-1663", "PR-42"), return only memories that match those identifiers.
+	// This prevents cosine fill from padding results with unrelated tickets/IDs.
+	// Falls through to phase 2 only if no identifier matches are found.
+	identifierMatched := false
 	if queryText != "" {
 		identifiers := extractIdentifiers(queryText)
 		if len(identifiers) > 0 {
@@ -230,6 +232,7 @@ func (dp *DetailPath) Search(ctx context.Context, queryEmbedding []float32, user
 						topM = append(topM, dm)
 						seen[dm.ID] = true
 						dp.store.TouchDetail(dm.ID)
+						identifierMatched = true
 						break
 					}
 				}
@@ -237,19 +240,23 @@ func (dp *DetailPath) Search(ctx context.Context, queryEmbedding []float32, user
 		}
 	}
 
-	// Phase 2 — cosine/hybrid fill: top-M by hybrid score, skipping already-included
-	for _, r := range results {
-		if len(topM) >= limit {
-			break
+	// Phase 2 — cosine/hybrid fill: only runs when no identifier matches were found.
+	// When the query has a specific ID (LC-1663), we return only those memories.
+	// When the query is semantic ("auth system"), we fill by hybrid score as usual.
+	if !identifierMatched {
+		for _, r := range results {
+			if len(topM) >= limit {
+				break
+			}
+			if seen[r.ID] {
+				continue
+			}
+			dm := r.DetailMemory
+			dm.Similarity = r.similarity
+			topM = append(topM, dm)
+			seen[dm.ID] = true
+			dp.store.TouchDetail(dm.ID)
 		}
-		if seen[r.ID] {
-			continue
-		}
-		dm := r.DetailMemory
-		dm.Similarity = r.similarity
-		topM = append(topM, dm)
-		seen[dm.ID] = true
-		dp.store.TouchDetail(dm.ID)
 	}
 
 	// High-salience guarantee: inject up to 2 high-salience memories
