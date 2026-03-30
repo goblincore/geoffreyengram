@@ -447,7 +447,7 @@ Both systems share embedding providers and SQLite storage, but they're designed 
 | | **Engram** | **DualMem** |
 |---|---|---|
 | **Designed for** | NPCs, companions, chatbots | Coding agents, multi-agent systems |
-| **Search scoring** | Composite: similarity + salience + recency + entity links | Pure cosine similarity (Detail Path) |
+| **Search scoring** | Composite: similarity + salience + recency + entity links | Hybrid cosine + keyword (Detail Path): exact identifier matches (e.g. "LC-1663") get a strong boost via `AdaptiveAlpha` blending |
 | **Memory decay** | Exponential decay — old small talk fades naturally | Garbage collection (expiry, supersession, access-cold demotion) + hierarchical compression |
 | **Entity graph** | Waypoints — mentioning a song surfaces the person you heard it with | Entities stored as metadata only, no associative expansion |
 | **Reflective synthesis** | `Reflect()` creates meta-memories ("they always mention music when stressed") | Not available |
@@ -499,7 +499,7 @@ geoffreyengram/
 
 ## Status
 
-Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 231 tests passing.
+Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 236 tests passing.
 
 ## License
 
