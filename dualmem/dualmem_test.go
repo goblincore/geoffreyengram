@@ -922,10 +922,10 @@ func TestDetailSortScoreWithIntent(t *testing.T) {
 	general := DetailMemory{Type: "", LastAccessedAt: recent}
 
 	// Without intent: warnings > decisions/continuity > general
-	wScore := detailSortScore(warning, nil, now)
-	dScore := detailSortScore(decision, nil, now)
-	cScore := detailSortScore(continuity, nil, now)
-	gScore := detailSortScore(general, nil, now)
+	wScore := detailSortScore(warning, nil, now, "")
+	dScore := detailSortScore(decision, nil, now, "")
+	cScore := detailSortScore(continuity, nil, now, "")
+	gScore := detailSortScore(general, nil, now, "")
 
 	if wScore <= dScore {
 		t.Errorf("without intent: warning (%.2f) should > decision (%.2f)", wScore, dScore)
@@ -936,9 +936,9 @@ func TestDetailSortScoreWithIntent(t *testing.T) {
 
 	// With debug intent: warnings boosted even more, continuity suppressed
 	debugProfile := IntentProfiles[IntentDebug]
-	wDebug := detailSortScore(warning, &debugProfile, now)
-	cDebug := detailSortScore(continuity, &debugProfile, now)
-	gDebug := detailSortScore(general, &debugProfile, now)
+	wDebug := detailSortScore(warning, &debugProfile, now, "")
+	cDebug := detailSortScore(continuity, &debugProfile, now, "")
+	gDebug := detailSortScore(general, &debugProfile, now, "")
 
 	if wDebug <= wScore {
 		t.Errorf("debug intent should boost warnings: %.2f vs %.2f", wDebug, wScore)
@@ -949,7 +949,7 @@ func TestDetailSortScoreWithIntent(t *testing.T) {
 
 	// With continue intent: continuity boosted
 	contProfile := IntentProfiles[IntentContinue]
-	cCont := detailSortScore(continuity, &contProfile, now)
+	cCont := detailSortScore(continuity, &contProfile, now, "")
 	if cCont <= cScore {
 		t.Errorf("continue intent should boost continuity: %.2f vs %.2f", cCont, cScore)
 	}

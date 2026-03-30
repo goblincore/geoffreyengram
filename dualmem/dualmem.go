@@ -238,7 +238,7 @@ func (e *Engine) DualSearch(ctx context.Context, userID string, query string, op
 	if limit <= 0 {
 		limit = 5
 	}
-	details, err := e.detail.Search(ctx, queryEmb, userID, limit)
+	details, err := e.detail.Search(ctx, queryEmb, userID, limit, opts.QueryText)
 	if err != nil {
 		return nil, fmt.Errorf("dualmem: detail search: %w", err)
 	}
@@ -329,6 +329,7 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 		IncludeSketch:  true,
 		QueryEmbedding: queryEmb,
 		MinSimilarity:  minSim,
+		QueryText:      query,
 	})
 	if err != nil {
 		return nil, err
@@ -433,8 +434,8 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 	}
 
 	sort.SliceStable(results.DetailMemories, func(i, j int) bool {
-		si := detailSortScore(results.DetailMemories[i], intentProfile, now)
-		sj := detailSortScore(results.DetailMemories[j], intentProfile, now)
+		si := detailSortScore(results.DetailMemories[i], intentProfile, now, query)
+		sj := detailSortScore(results.DetailMemories[j], intentProfile, now, query)
 		return si > sj
 	})
 	for _, dm := range results.DetailMemories {
@@ -1091,14 +1092,29 @@ func estimateTokens(text string) int {
 // typePriority returns sort priority for memory types.
 // Higher = appears first in AssembleContext output.
 // detailSortScore computes a composite sort score for a detail memory.
-// Combines type priority, access recency, and optional intent-based multiplier.
-func detailSortScore(dm DetailMemory, intentProfile *IntentProfile, now time.Time) float64 {
+// Combines type priority, access recency, optional intent-based multiplier,
+// and a keyword boost when queryText is provided. Memories that contain exact
+// identifier matches (e.g. "LC-1663") are boosted 3x to surface them above
+// type-priority and recency ordering.
+func detailSortScore(dm DetailMemory, intentProfile *IntentProfile, now time.Time, queryText string) float64 {
 	base := float64(typePriority(dm.Type))
 	recency := accessRecencyFactor(dm.LastAccessedAt, dm.Type, now)
 	score := (base + 1.0) * recency // +1 so general (priority 0) still has a base
 
 	if intentProfile != nil {
 		score *= intentProfile.TypeMultiplier(dm.Type)
+	}
+
+	// Keyword boost: exact identifier match in memory text floats it to the top
+	if queryText != "" {
+		ids := extractIdentifiers(queryText)
+		textLower := strings.ToLower(dm.Text)
+		for _, id := range ids {
+			if strings.Contains(textLower, strings.ToLower(id)) {
+				score *= 3.0
+				break
+			}
+		}
 	}
 
 	return score
