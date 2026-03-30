@@ -172,7 +172,8 @@ export GEMINI_API_KEY=your-key
 
 # Memory
 dualmem add --text "Auth uses JWT, not sessions" --type decision --salience 0.9
-dualmem search "database" --limit 5
+dualmem search "database" --limit 5          # semantic: cosine+keyword hybrid
+dualmem search "LC-1663"                     # identifier: returns only LC-1663 memories
 
 # Code search (HDC-powered — no API calls, instant)
 dualmem search-code "authentication middleware"
@@ -447,7 +448,7 @@ Both systems share embedding providers and SQLite storage, but they're designed 
 | | **Engram** | **DualMem** |
 |---|---|---|
 | **Designed for** | NPCs, companions, chatbots | Coding agents, multi-agent systems |
-| **Search scoring** | Composite: similarity + salience + recency + entity links | Hybrid cosine + keyword (Detail Path): exact identifier matches (e.g. "LC-1663") get a strong boost via `AdaptiveAlpha` blending |
+| **Search scoring** | Composite: similarity + salience + recency + entity links | Two-phase hybrid (Detail Path): exact identifier matches (e.g. "LC-1663", "PR-42") are pre-filtered and returned exclusively; semantic queries use cosine+keyword blending via `AdaptiveAlpha` |
 | **Memory decay** | Exponential decay — old small talk fades naturally | Garbage collection (expiry, supersession, access-cold demotion) + hierarchical compression |
 | **Entity graph** | Waypoints — mentioning a song surfaces the person you heard it with | Entities stored as metadata only, no associative expansion |
 | **Reflective synthesis** | `Reflect()` creates meta-memories ("they always mention music when stressed") | Not available |
