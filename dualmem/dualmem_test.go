@@ -855,6 +855,13 @@ func TestDetectIntent(t *testing.T) {
 		{"resume the auth refactor", IntentContinue},
 		{"pick up where we left off", IntentContinue},
 		{"session context", IntentContinue},
+		{"what next", IntentContinue},
+		{"what's next for this project", IntentContinue},
+		{"next step", IntentContinue},
+		{"what should I work on", IntentContinue},
+		{"todo", IntentContinue},
+		{"status", IntentContinue},
+		{"progress", IntentContinue},
 
 		// Explore
 		{"where is the embedding logic", IntentExplore},

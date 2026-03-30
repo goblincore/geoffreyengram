@@ -634,6 +634,50 @@ func TestRenderAtBudget_MinSimilarityThreshold(t *testing.T) {
 	}
 }
 
+func TestRenderAtBudget_BoostOnly(t *testing.T) {
+	cm := &CodeMap{
+		Zoom1: "TS project.",
+		Zoom2: []ModuleMap{
+			{Path: "src/auth/", Language: "typescript", Summary: "Auth module", KeyTypes: []string{"AuthService"}, FileCount: 5},
+			{Path: "src/api/", Language: "typescript", Summary: "API endpoints", FileCount: 3},
+			{Path: "src/utils/", Language: "typescript", Summary: "Utilities", FileCount: 4},
+			{Path: "src/tests/", Language: "typescript", Summary: "Test helpers", FileCount: 2},
+		},
+	}
+
+	// Vague query produces low-signal HDC vectors — all modules score similarly
+	queryEmb := []float32{0.5, 0.5, 0.5}
+	moduleEmbs := map[string][]float32{
+		"src/auth/":  {0.4, 0.5, 0.6},
+		"src/api/":   {0.5, 0.4, 0.6},
+		"src/utils/": {0.6, 0.5, 0.4},
+		"src/tests/": {0.5, 0.6, 0.4},
+	}
+
+	// Checkpoint references auth files only
+	boostPaths := []string{"auth.ts", "jwt.ts"}
+
+	// With boostOnly=true, only boosted modules should appear
+	out := cm.RenderAtBudget(500, queryEmb, moduleEmbs, boostPaths, true)
+
+	if !strings.Contains(out, "src/auth/") {
+		t.Errorf("expected boosted module src/auth/ in output, got: %s", out)
+	}
+	// Non-boosted modules should NOT appear
+	if strings.Contains(out, "src/utils/") {
+		t.Errorf("expected src/utils/ to be excluded in boost-only mode, got: %s", out)
+	}
+	if strings.Contains(out, "src/tests/") {
+		t.Errorf("expected src/tests/ to be excluded in boost-only mode, got: %s", out)
+	}
+
+	// Without boostOnly, all modules with sufficient similarity should appear
+	outNormal := cm.RenderAtBudget(500, queryEmb, moduleEmbs, boostPaths)
+	if !strings.Contains(outNormal, "src/utils/") && !strings.Contains(outNormal, "src/tests/") {
+		t.Errorf("expected non-boosted modules in normal mode, got: %s", outNormal)
+	}
+}
+
 func TestClassifyFileSignificance(t *testing.T) {
 	tmpDir := t.TempDir()
 

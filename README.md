@@ -224,7 +224,7 @@ dualmem add --type continuity --text "Done: JWT. Remaining: refresh tokens" --fi
 | Intent | Trigger keywords | Boosts | Suppresses |
 |--------|-----------------|--------|------------|
 | `debug` | fix, bug, error, crash, fail, debug | warnings (2x), decisions (1.5x) | continuity (0.5x) |
-| `continue` | continue, resume, pick up, session context | continuity (2x), maps (1.5x) | general (0.8x) |
+| `continue` | continue, resume, pick up, session context, what next, next step, status, progress, todo | continuity (2x), maps (1.5x) | general (0.8x) |
 | `feature` | add, implement, create, build | decisions (1.5x), maps (1.5x) | continuity (0.8x) |
 | `explore` | where is, how does, explain, architecture | maps (2x), general (1.2x) | continuity (0.5x) |
 
@@ -395,6 +395,8 @@ Vectors are built from FNV-64a seeded basis vectors (+1/-1 binary), combined via
 
 **Memory-informed ranking**: For generic session-start queries like "session context", pure HDC similarity has no discriminative power — all modules score equally low. To solve this, `AssembleContext` loads checkpoints and memories before rendering the codemap and extracts file hints. Modules whose paths match these hints get a +0.3 similarity boost. A minimum threshold (0.05) filters modules with near-zero relevance, preventing budget waste. In a 16-module simulated repo, this reduces noise from 16 modules to just the 3-4 relevant ones.
 
+**Boost-only mode for vague queries**: When intent is `continue` (e.g. "what next", "status", "what should I work on") and checkpoint/memory file hints exist, the codemap switches to boost-only mode — it shows *only* modules referenced in active checkpoints and recent memories, suppressing everything else entirely. This prevents the HDC vectors from producing arbitrary rankings on semantically empty queries, and focuses the codemap token budget on the files you were actually working on.
+
 **Benchmark results:**
 
 | | With content layer | Without |
@@ -497,7 +499,7 @@ geoffreyengram/
 
 ## Status
 
-Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 255 tests passing.
+Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 231 tests passing.
 
 ## License
 

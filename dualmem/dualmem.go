@@ -378,7 +378,10 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 				}
 				// Extract file hints from checkpoints and memories to boost relevant modules
 				boostPaths := extractFileHints(checkpoints, results.DetailMemories)
-				mapText := codeMap.RenderAtBudget(mapBudget, codemapQuery, moduleEmbs, boostPaths)
+				// For continue intent (vague queries like "what next"), use boost-only mode:
+				// show only modules referenced by checkpoints/memories instead of noisy HDC ranking
+				useBoostOnly := intent == IntentContinue && len(boostPaths) > 0
+				mapText := codeMap.RenderAtBudget(mapBudget, codemapQuery, moduleEmbs, boostPaths, useBoostOnly)
 				mapTokens := estimateTokens(mapText)
 				parts = append(parts, "[Codebase Map]\n"+mapText)
 				sources = append(sources, SourceRef{Type: "codemap", ID: userID})
@@ -1114,8 +1117,8 @@ func DetectIntent(query string) Intent {
 		}
 	}
 
-	// Continue: session resumption, picking up work
-	continueKeywords := []string{"continue", "resume", "pick up", "where we left", "last session", "in progress", "what was i", "session context", "what were we"}
+	// Continue: session resumption, picking up work, status checks
+	continueKeywords := []string{"continue", "resume", "pick up", "where we left", "last session", "in progress", "what was i", "session context", "what were we", "what next", "what's next", "next step", "what should", "todo", "status", "progress"}
 	for _, kw := range continueKeywords {
 		if strings.Contains(q, kw) {
 			return IntentContinue

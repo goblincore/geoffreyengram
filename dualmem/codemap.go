@@ -366,8 +366,10 @@ func synthesizeZoom1(modules []ModuleMap, rootDir string) string {
 // RenderAtBudget formats the code map within a token budget.
 // When queryEmbedding and moduleEmbeddings are provided, sorts by similarity.
 // boostPaths optionally boost modules whose paths contain any of the given strings.
+// When boostOnly is true, only modules matching boostPaths are shown (ignores query similarity).
+// This is useful for vague queries like "what next" where HDC similarity is noise.
 // Otherwise falls back to file count (largest first).
-func (cm *CodeMap) RenderAtBudget(maxTokens int, queryEmbedding []float32, moduleEmbeddings map[string][]float32, boostPaths []string) string {
+func (cm *CodeMap) RenderAtBudget(maxTokens int, queryEmbedding []float32, moduleEmbeddings map[string][]float32, boostPaths []string, boostOnly ...bool) string {
 	var sb strings.Builder
 
 	sb.WriteString(cm.Zoom1)
@@ -400,7 +402,38 @@ func (cm *CodeMap) RenderAtBudget(maxTokens int, queryEmbedding []float32, modul
 		minSimilarityThreshold    = 0.05
 	)
 
-	if queryEmbedding != nil && moduleEmbeddings != nil {
+	useBoostOnly := len(boostOnly) > 0 && boostOnly[0] && len(boostSet) > 0
+
+	if useBoostOnly {
+		// Boost-only mode: show only modules matching checkpoint/memory files.
+		// Used for vague queries where HDC similarity is meaningless noise.
+		type scored struct {
+			mod   ModuleMap
+			score float64
+		}
+		var scoredMods []scored
+		for _, m := range sorted {
+			if moduleMatchesBoost(m.Path, boostSet) {
+				scoredMods = append(scoredMods, scored{mod: m, score: 1.0})
+			}
+		}
+		// Sort boosted modules by file count (most significant first)
+		sort.Slice(scoredMods, func(i, j int) bool {
+			return scoredMods[i].mod.FileCount > scoredMods[j].mod.FileCount
+		})
+
+		sb.WriteString("\n")
+		for _, sm := range scoredMods {
+			line := formatModuleMapLine(sm.mod)
+			lineTokens := estimateTokensStr(line)
+			if tokensUsed+lineTokens > maxTokens {
+				break
+			}
+			sb.WriteString("\n")
+			sb.WriteString(line)
+			tokensUsed += lineTokens
+		}
+	} else if queryEmbedding != nil && moduleEmbeddings != nil {
 		// Compute effective scores with boost
 		type scored struct {
 			mod   ModuleMap
