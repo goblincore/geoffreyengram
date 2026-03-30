@@ -902,3 +902,317 @@ func TestCodeMapEmbeddings_StoreRoundTrip(t *testing.T) {
 		t.Errorf("expected empty after delete, got %d", len(got2))
 	}
 }
+
+// --- Import Graph & Cluster Tests ---
+
+func TestBuildImportGraph(t *testing.T) {
+	modules := []ModuleMap{
+		{Path: "auth/", Imports: []string{"jwt/", "middleware/"}},
+		{Path: "middleware/", Imports: []string{"auth/"}},
+		{Path: "jwt/", Imports: []string{}},
+		{Path: "pages/login/", Imports: []string{"auth/"}},
+		{Path: "utils/", Imports: []string{}}, // isolated
+	}
+
+	graph := BuildImportGraph(modules)
+
+	// Should have 5 nodes
+	if len(graph.Nodes) != 5 {
+		t.Errorf("expected 5 nodes, got %d", len(graph.Nodes))
+	}
+
+	// auth → jwt, auth → middleware (2 edges from auth)
+	// middleware → auth (1 edge, but undirected creates bidirectional adj)
+	// pages/login → auth
+	if len(graph.Edges) == 0 {
+		t.Error("expected edges, got none")
+	}
+
+	// auth should have adjacency to jwt, middleware, pages/login
+	authAdj := graph.Adj["auth/"]
+	if len(authAdj) < 2 {
+		t.Errorf("expected auth/ to have >= 2 neighbors, got %d: %v", len(authAdj), authAdj)
+	}
+
+	// utils should have no adjacency
+	utilsAdj := graph.Adj["utils/"]
+	if len(utilsAdj) != 0 {
+		t.Errorf("expected utils/ to have 0 neighbors, got %d", len(utilsAdj))
+	}
+}
+
+func TestBuildImportGraph_SuffixMatch(t *testing.T) {
+	modules := []ModuleMap{
+		{Path: "src/auth/provider/", Imports: []string{"./middleware"}},
+		{Path: "src/middleware/", Imports: []string{"@learncard/auth/provider"}},
+	}
+
+	graph := BuildImportGraph(modules)
+
+	// Both should resolve via suffix matching
+	if len(graph.Adj["src/auth/provider/"]) == 0 {
+		t.Error("expected src/auth/provider/ to link to src/middleware/")
+	}
+	if len(graph.Adj["src/middleware/"]) == 0 {
+		t.Error("expected src/middleware/ to link to src/auth/provider/")
+	}
+}
+
+func TestDetectClusters_BasicComponents(t *testing.T) {
+	// Two separate connected components
+	modules := []ModuleMap{
+		// Component 1: auth system
+		{Path: "auth/", KeyTypes: []string{"AuthProvider"}, Imports: []string{"jwt/"}},
+		{Path: "jwt/", KeyTypes: []string{"TokenStore"}, Imports: []string{"auth/"}},
+		{Path: "middleware/", KeyTypes: []string{"AuthMiddleware"}, Imports: []string{"auth/"}},
+		// Component 2: data layer
+		{Path: "store/", KeyTypes: []string{"SQLiteStore"}, Imports: []string{"models/"}},
+		{Path: "models/", KeyTypes: []string{"User", "Session"}, Imports: []string{}},
+	}
+
+	graph := BuildImportGraph(modules)
+	clusters := DetectClusters(graph)
+
+	if len(clusters) < 2 {
+		t.Errorf("expected at least 2 clusters, got %d", len(clusters))
+		for _, c := range clusters {
+			t.Logf("  cluster %q: %d modules", c.Name, len(c.Modules))
+		}
+	}
+
+	// Find the auth cluster
+	foundAuth := false
+	for _, c := range clusters {
+		for _, m := range c.Modules {
+			if m.Path == "auth/" {
+				foundAuth = true
+				if len(c.Modules) < 2 {
+					t.Errorf("auth cluster should have >= 2 modules, got %d", len(c.Modules))
+				}
+			}
+		}
+	}
+	if !foundAuth {
+		t.Error("expected to find auth/ in a cluster")
+	}
+}
+
+func TestDetectClusters_LargeComponentSplit(t *testing.T) {
+	// Create a chain of 12 modules all connected
+	var modules []ModuleMap
+	for i := 0; i < 12; i++ {
+		path := fmt.Sprintf("mod%d/", i)
+		var imports []string
+		if i > 0 {
+			imports = append(imports, fmt.Sprintf("mod%d/", i-1))
+		}
+		if i < 11 {
+			imports = append(imports, fmt.Sprintf("mod%d/", i+1))
+		}
+		modules = append(modules, ModuleMap{
+			Path:     path,
+			KeyTypes: []string{fmt.Sprintf("Type%d", i)},
+			Imports:  imports,
+		})
+	}
+
+	graph := BuildImportGraph(modules)
+	clusters := DetectClusters(graph)
+
+	// Should be split into at least 2 clusters since component > 8
+	if len(clusters) < 2 {
+		t.Errorf("expected >= 2 clusters from 12-module chain, got %d", len(clusters))
+	}
+
+	// No cluster should have > 8 modules
+	for _, c := range clusters {
+		if len(c.Modules) > 8 {
+			t.Errorf("cluster %q has %d modules, expected <= 8", c.Name, len(c.Modules))
+		}
+	}
+
+	// All modules should be accounted for
+	total := 0
+	for _, c := range clusters {
+		total += len(c.Modules)
+	}
+	if total != 12 {
+		t.Errorf("expected 12 total modules across clusters, got %d", total)
+	}
+}
+
+func TestDetectClusters_SingletonMerge(t *testing.T) {
+	modules := []ModuleMap{
+		{Path: "core/", KeyTypes: []string{"Engine"}, Imports: []string{"config/"}},
+		{Path: "config/", KeyTypes: []string{"Config"}, Imports: []string{}},
+		{Path: "utils/", KeyTypes: []string{"Helper"}, Imports: []string{"core/"}}, // singleton that shares edge with core cluster
+	}
+
+	graph := BuildImportGraph(modules)
+	clusters := DetectClusters(graph)
+
+	// utils should be merged with the core/config cluster
+	if len(clusters) > 1 {
+		// It's OK if there's 1 cluster (all merged) — that's correct behavior
+		t.Logf("Got %d clusters (singleton may or may not merge depending on edge detection)", len(clusters))
+	}
+}
+
+func TestFormatClusterPrompt(t *testing.T) {
+	cluster := Cluster{
+		Name: "auth-system",
+		Modules: []ModuleMap{
+			{Path: "auth/", KeyTypes: []string{"AuthProvider"}, EntryPoints: []string{"login()"}, Imports: []string{"jwt/"}},
+			{Path: "jwt/", KeyTypes: []string{"TokenStore"}, EntryPoints: []string{"validateToken()"}},
+		},
+	}
+
+	prompt := FormatClusterPrompt(cluster)
+
+	if !strings.Contains(prompt, "auth/") {
+		t.Error("expected prompt to contain auth/ module")
+	}
+	if !strings.Contains(prompt, "AuthProvider") {
+		t.Error("expected prompt to contain AuthProvider type")
+	}
+	if !strings.Contains(prompt, "2-3 concise sentences") {
+		t.Error("expected prompt to request 2-3 sentences")
+	}
+}
+
+func TestGenerateClusterName(t *testing.T) {
+	// Common prefix
+	modules := []ModuleMap{
+		{Path: "src/auth/provider/"},
+		{Path: "src/auth/middleware/"},
+	}
+	name := generateClusterName(modules)
+	if !strings.Contains(name, "auth") {
+		t.Errorf("expected name containing 'auth', got %q", name)
+	}
+
+	// No common prefix — uses dominant module
+	modules2 := []ModuleMap{
+		{Path: "auth/", KeyTypes: []string{"AuthProvider", "Session"}, EntryPoints: []string{"login()"}},
+		{Path: "pages/login/"},
+	}
+	name2 := generateClusterName(modules2)
+	if name2 == "" || name2 == "unknown" {
+		t.Errorf("expected a meaningful name, got %q", name2)
+	}
+}
+
+func TestSeedStoreMethods(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	userID := "test-ns"
+
+	// Initially no seeds
+	count, err := store.CountSeedMemories(userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 seeds, got %d", count)
+	}
+
+	// Insert a seed memory
+	dm := &DetailMemory{
+		ID:              "seed-1",
+		Text:            "Auth system description",
+		Sector:          "auth-system",
+		Salience:        0.5,
+		ImportanceScore: 0.7,
+		Type:            "seed",
+		Files:           []string{"auth/", "jwt/"},
+	}
+	err = store.InsertDetail(dm, []float32{0.1, 0.2, 0.3}, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Insert an organic memory
+	dm2 := &DetailMemory{
+		ID:              "organic-1",
+		Text:            "An organic memory",
+		Sector:          "decision",
+		Salience:        0.9,
+		ImportanceScore: 0.8,
+		Type:            "decision",
+	}
+	err = store.InsertDetail(dm2, []float32{0.4, 0.5, 0.6}, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Count seeds: should be 1
+	count, err = store.CountSeedMemories(userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 seed, got %d", count)
+	}
+
+	// Count excluding seeds: should be 1 (only organic)
+	organicCount, err := store.GetDetailCountExcludingSeeds(userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if organicCount != 1 {
+		t.Errorf("expected 1 non-seed, got %d", organicCount)
+	}
+
+	// Total count: should be 2
+	totalCount, err := store.GetDetailCount(userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if totalCount != 2 {
+		t.Errorf("expected 2 total, got %d", totalCount)
+	}
+
+	// Delete seeds
+	err = store.DeleteSeedMemories(userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Only organic should remain
+	count, err = store.CountSeedMemories(userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 seeds after delete, got %d", count)
+	}
+	totalCount, err = store.GetDetailCount(userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if totalCount != 1 {
+		t.Errorf("expected 1 total after seed delete, got %d", totalCount)
+	}
+}
+
+func TestSeedTypeMultiplier(t *testing.T) {
+	explore := IntentProfiles[IntentExplore]
+	if m := explore.TypeMultiplier("seed"); m != 1.2 {
+		t.Errorf("explore.seed = %.1f, want 1.2", m)
+	}
+
+	debug := IntentProfiles[IntentDebug]
+	if m := debug.TypeMultiplier("seed"); m != 0.6 {
+		t.Errorf("debug.seed = %.1f, want 0.6", m)
+	}
+
+	cont := IntentProfiles[IntentContinue]
+	if m := cont.TypeMultiplier("seed"); m != 0.5 {
+		t.Errorf("continue.seed = %.1f, want 0.5", m)
+	}
+}

@@ -188,6 +188,11 @@ dualmem checkpoint --list                               # view active checkpoint
 dualmem map                                             # codebase structure map
 dualmem diff                                            # changes since last session
 
+# Seed — pre-seed context for new projects
+dualmem seed --dry-run                                  # preview clusters without calling LLM
+dualmem seed                                            # generate seed memories from codebase structure
+dualmem seed --force                                    # regenerate (deletes existing seeds first)
+
 # Maintenance
 dualmem promote --id <memory-id>                        # move sketch → detail
 dualmem promote --all --type warning                    # batch re-evaluate all raw sketch entries
@@ -258,6 +263,28 @@ In `dualmem context` output, checkpoints render as compact structured blocks at 
   Done: JWT validation; middleware setup
   Remaining: refresh tokens; logout endpoint
 ```
+
+### Seed — cold-start context
+
+New projects have no useful memories until organically built over sessions. `dualmem seed` solves this by analyzing your codebase structure and generating semantic relationship memories from day one.
+
+It builds an import graph from the existing code map, detects module clusters via connected components, and uses Gemini Flash to generate 2-3 sentence descriptions per cluster. These are stored as `type='seed'` memories with their own capacity cap (30), separate from the organic memory cap (100).
+
+```bash
+# Preview clusters without calling LLM or writing to DB
+dualmem seed --dry-run
+
+# Generate seed memories
+dualmem seed
+
+# Regenerate (deletes existing seeds first)
+dualmem seed --force
+
+# JSON output
+dualmem seed --json
+```
+
+Seed memories rank below organic memories (salience 0.5 vs 0.7 default) and are weighted by intent — `explore` boosts seeds (1.2×), `debug` suppresses them (0.6×). They appear in `context` output with a `[Codebase Context — cluster-name]` label. As you build organic memories, seeds naturally fall in priority.
 
 ### Promote / demote
 

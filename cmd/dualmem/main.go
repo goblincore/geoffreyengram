@@ -121,6 +121,7 @@ func newEngine(cfg CLIConfig) (*dualmem.Engine, error) {
 		SQLitePath:            cfg.Storage.SQLitePath,
 		EmbeddingProvider:     embedder,
 		Classifier:            classifier,
+		Summarizer:            dualmem.NewGeminiSummarizer(apiKey, ""),
 		Sectors:               sectors,
 		MaxDetailPerUser:      100,
 		ImportanceTheta:       0.65,
@@ -165,6 +166,8 @@ func main() {
 		cmdCheckpoint(cfg)
 	case "gc":
 		cmdGC(cfg)
+	case "seed":
+		cmdSeed(cfg)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -188,6 +191,7 @@ Commands:
   status      Memory counts and health
   promote     Pin a memory to Detail Path
   demote      Demote a memory to Sketch Path
+  seed        Auto-generate semantic context memories from code structure
   gc          Garbage collect stale/expired memories
 
 Flags (all commands):
@@ -879,3 +883,67 @@ func cmdDiff(cfg CLIConfig) {
 
 	fmt.Println(diff.Summary)
 }
+
+// --- Seed command ---
+
+func cmdSeed(cfg CLIConfig) {
+	fs := flag.NewFlagSet("seed", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace")
+	root := fs.String("root", "", "Project root (default: cwd)")
+	dryRun := fs.Bool("dry-run", false, "Show clusters without writing memories")
+	force := fs.Bool("force", false, "Replace existing seed memories")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	namespace := resolveNamespace(*ns, cfg)
+	rootDir := *root
+	if rootDir == "" {
+		rootDir, _ = os.Getwd()
+	}
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+	result, err := engine.SeedMemories(ctx, namespace, *force, *dryRun)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(result)
+		return
+	}
+
+	if *dryRun {
+		fmt.Printf("Dry run: found %d clusters from codemap\n\n", len(result.Clusters))
+		for i, c := range result.Clusters {
+			fmt.Printf("Cluster %d: %s (%d modules)\n", i+1, c.Name, len(c.Modules))
+			for _, m := range c.Modules {
+				fmt.Printf("  - %s: %s\n", m.Path, m.Summary)
+			}
+			fmt.Println()
+		}
+		return
+	}
+
+	if len(result.Warnings) > 0 {
+		for _, w := range result.Warnings {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		}
+		fmt.Fprintln(os.Stderr)
+	}
+	fmt.Printf("Seeded %d memories from %d clusters\n\n", len(result.Memories), len(result.Clusters))
+	for i, dm := range result.Memories {
+		fmt.Printf("%d. [%s] %s\n", i+1, dm.Sector, truncate(dm.Text, 120))
+		if len(dm.Files) > 0 {
+			fmt.Printf("   Files: %s\n", strings.Join(dm.Files, ", "))
+		}
+	}
+}
+

@@ -207,6 +207,7 @@ type IntentProfile struct {
 	Continuity float64
 	Map        float64
 	General    float64
+	Seed       float64 // Auto-generated codebase context memories
 }
 
 // IntentProfiles maps each intent to its weight multipliers.
@@ -217,6 +218,7 @@ var IntentProfiles = map[Intent]IntentProfile{
 		Continuity: 0.5,
 		Map:        1.0,
 		General:    0.8,
+		Seed:       0.6,
 	},
 	IntentContinue: {
 		Warning:    1.0,
@@ -224,6 +226,7 @@ var IntentProfiles = map[Intent]IntentProfile{
 		Continuity: 2.0,
 		Map:        1.5,
 		General:    0.8,
+		Seed:       0.5,
 	},
 	IntentFeature: {
 		Warning:    1.0,
@@ -231,6 +234,7 @@ var IntentProfiles = map[Intent]IntentProfile{
 		Map:        1.5,
 		Continuity: 0.8,
 		General:    1.0,
+		Seed:       1.0,
 	},
 	IntentExplore: {
 		Warning:    0.8,
@@ -238,6 +242,7 @@ var IntentProfiles = map[Intent]IntentProfile{
 		Continuity: 0.5,
 		Map:        2.0,
 		General:    1.2,
+		Seed:       1.2,
 	},
 }
 
@@ -252,9 +257,35 @@ func (ip IntentProfile) TypeMultiplier(memType string) float64 {
 		return ip.Continuity
 	case "map":
 		return ip.Map
+	case "seed":
+		if ip.Seed != 0 {
+			return ip.Seed
+		}
+		return ip.General
 	default:
 		return ip.General
 	}
+}
+
+// --- Import graph / clustering ---
+
+// ImportGraph represents import relationships between code modules.
+type ImportGraph struct {
+	Nodes map[string]*ModuleMap // path → module
+	Edges []ImportEdge          // directed import edges
+	Adj   map[string][]string   // adjacency list (undirected)
+}
+
+// ImportEdge is a directed import from one module to another.
+type ImportEdge struct {
+	From string // importer module path
+	To   string // imported module path
+}
+
+// Cluster is a group of related modules detected by import-graph analysis.
+type Cluster struct {
+	Name    string      `json:"name"`    // Auto-generated from dominant types/paths
+	Modules []ModuleMap `json:"modules"` // The modules in this cluster
 }
 
 // --- Garbage collection ---
@@ -345,6 +376,7 @@ type Config struct {
 
 	// Capacity
 	MaxDetailPerUser int     // Default 100
+	MaxSeedPerUser   int     // Default 30 (separate cap for auto-generated seed memories)
 	ImportanceTheta  float64 // Default 0.65
 
 	// Pipeline intervals
@@ -373,6 +405,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.MaxDetailPerUser == 0 {
 		c.MaxDetailPerUser = 100
+	}
+	if c.MaxSeedPerUser == 0 {
+		c.MaxSeedPerUser = 30
 	}
 	if c.ImportanceTheta == 0 {
 		c.ImportanceTheta = 0.65
@@ -410,6 +445,11 @@ type Store interface {
 
 	// Detail Path — filtered queries
 	GetDetailsByType(userID, memType string) ([]detailWithVector, error)
+
+	// Detail Path — seed memories (separate cap from organic)
+	GetDetailCountExcludingSeeds(userID string) (int, error)
+	CountSeedMemories(userID string) (int, error)
+	DeleteSeedMemories(userID string) error
 
 	// Sketch Path — raw staging
 	InsertSketchRaw(userID, content, sector, sessionID string, embedding []float32) error

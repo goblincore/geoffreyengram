@@ -763,3 +763,442 @@ func EmbedCodeMap(ctx context.Context, cm *CodeMap, embedder EmbeddingProvider) 
 	}
 	return result, nil
 }
+
+// --- Import Graph & Clustering ---
+
+// BuildImportGraph constructs an undirected import graph from codemap modules.
+// Only internal edges (imports between modules in the same codebase) are included.
+func BuildImportGraph(modules []ModuleMap) *ImportGraph {
+	g := &ImportGraph{
+		Nodes: make(map[string]*ModuleMap, len(modules)),
+		Adj:   make(map[string][]string, len(modules)),
+	}
+
+	// Index modules by path
+	for i := range modules {
+		g.Nodes[modules[i].Path] = &modules[i]
+		g.Adj[modules[i].Path] = nil // ensure entry exists
+	}
+
+	// Build edges by matching imports to module paths
+	for _, m := range modules {
+		for _, imp := range m.Imports {
+			target := resolveImportToModule(imp, g.Nodes)
+			if target != "" && target != m.Path {
+				g.Edges = append(g.Edges, ImportEdge{From: m.Path, To: target})
+				// Undirected adjacency
+				if !containsStr(g.Adj[m.Path], target) {
+					g.Adj[m.Path] = append(g.Adj[m.Path], target)
+				}
+				if !containsStr(g.Adj[target], m.Path) {
+					g.Adj[target] = append(g.Adj[target], m.Path)
+				}
+			}
+		}
+	}
+
+	return g
+}
+
+// resolveImportToModule matches an import string to a module path.
+// Tries exact match first, then suffix match after stripping prefixes.
+func resolveImportToModule(imp string, nodes map[string]*ModuleMap) string {
+	// Normalize: strip trailing slash for comparison
+	normalized := strings.TrimSuffix(imp, "/")
+
+	// Exact match (with or without trailing slash)
+	if _, ok := nodes[normalized]; ok {
+		return normalized
+	}
+	if _, ok := nodes[normalized+"/"]; ok {
+		return normalized + "/"
+	}
+
+	// Strip common prefixes: ./, ../, @scope/pkg/
+	cleaned := normalized
+	for strings.HasPrefix(cleaned, "./") || strings.HasPrefix(cleaned, "../") {
+		if strings.HasPrefix(cleaned, "./") {
+			cleaned = cleaned[2:]
+		} else {
+			cleaned = cleaned[3:]
+		}
+	}
+	// Strip @scope/package/ prefix (e.g., @learncard/auth/provider → auth/provider)
+	if strings.HasPrefix(cleaned, "@") {
+		parts := strings.SplitN(cleaned, "/", 3)
+		if len(parts) >= 3 {
+			cleaned = parts[2]
+		}
+	}
+
+	// Try suffix matching against all module paths
+	for path := range nodes {
+		pathNorm := strings.TrimSuffix(path, "/")
+		if pathNorm == cleaned {
+			return path
+		}
+		// Check if module path ends with the cleaned import
+		if strings.HasSuffix(pathNorm, "/"+cleaned) || strings.HasSuffix(pathNorm, cleaned) {
+			return path
+		}
+	}
+
+	// Go module imports: full paths like "github.com/foo/bar/pkg"
+	// Match if any module path is a suffix of the import path
+	for path := range nodes {
+		pathNorm := strings.TrimSuffix(path, "/")
+		if pathNorm == "." {
+			continue
+		}
+		if strings.HasSuffix(normalized, "/"+pathNorm) {
+			return path
+		}
+	}
+
+	return "" // external import, no match
+}
+
+// DetectClusters finds groups of related modules using connected components.
+// Large components (>maxSize) are split; tiny ones (<minSize) are merged with neighbors.
+func DetectClusters(graph *ImportGraph) []Cluster {
+	const maxClusterSize = 8
+	const minClusterSize = 2
+
+	// Find connected components via BFS
+	visited := make(map[string]bool)
+	var components [][]string
+
+	for path := range graph.Nodes {
+		if visited[path] {
+			continue
+		}
+		component := bfsComponent(path, graph.Adj, visited)
+		components = append(components, component)
+	}
+
+	// Split large components
+	var refined [][]string
+	for _, comp := range components {
+		if len(comp) <= maxClusterSize {
+			refined = append(refined, comp)
+		} else {
+			refined = append(refined, splitLargeComponent(comp, graph, maxClusterSize)...)
+		}
+	}
+
+	// Merge tiny components into nearest neighbor
+	var result []Cluster
+	var tiny [][]string
+	for _, comp := range refined {
+		if len(comp) >= minClusterSize {
+			result = append(result, buildCluster(comp, graph))
+		} else {
+			tiny = append(tiny, comp)
+		}
+	}
+
+	// Try to merge each tiny component with a result cluster that shares imports
+	for _, t := range tiny {
+		merged := false
+		for i := range result {
+			if clusterSharesEdge(t, result[i], graph) {
+				for _, path := range t {
+					if mod, ok := graph.Nodes[path]; ok {
+						result[i].Modules = append(result[i].Modules, *mod)
+					}
+				}
+				result[i].Name = generateClusterName(result[i].Modules)
+				merged = true
+				break
+			}
+		}
+		if !merged && len(t) > 0 {
+			// Keep as its own cluster even though it's small
+			result = append(result, buildCluster(t, graph))
+		}
+	}
+
+	// Sort clusters by size (largest first) for stable output
+	sort.Slice(result, func(i, j int) bool {
+		return len(result[i].Modules) > len(result[j].Modules)
+	})
+
+	return result
+}
+
+// bfsComponent performs BFS from a starting node, returning all reachable nodes.
+func bfsComponent(start string, adj map[string][]string, visited map[string]bool) []string {
+	queue := []string{start}
+	visited[start] = true
+	var component []string
+
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+		component = append(component, node)
+
+		for _, neighbor := range adj[node] {
+			if !visited[neighbor] {
+				visited[neighbor] = true
+				queue = append(queue, neighbor)
+			}
+		}
+	}
+	return component
+}
+
+// splitLargeComponent splits a component into subgroups by iteratively
+// removing the node with the most connections (highest degree), breaking
+// the component into smaller pieces.
+func splitLargeComponent(comp []string, graph *ImportGraph, maxSize int) [][]string {
+	// Build a local adjacency set for this component
+	inComp := make(map[string]bool, len(comp))
+	for _, p := range comp {
+		inComp[p] = true
+	}
+
+	localAdj := make(map[string][]string)
+	for _, p := range comp {
+		for _, n := range graph.Adj[p] {
+			if inComp[n] {
+				localAdj[p] = append(localAdj[p], n)
+			}
+		}
+	}
+
+	// Iteratively remove highest-degree nodes until all components are small enough
+	removed := make(map[string]bool)
+	for i := 0; i < len(comp); i++ {
+		// Find connected components of remaining nodes
+		subVisited := make(map[string]bool)
+		var subs [][]string
+		for _, p := range comp {
+			if removed[p] || subVisited[p] {
+				continue
+			}
+			sub := bfsWithFilter(p, localAdj, subVisited, removed)
+			subs = append(subs, sub)
+		}
+
+		// Check if all are small enough
+		allSmall := true
+		for _, s := range subs {
+			if len(s) > maxSize {
+				allSmall = false
+				break
+			}
+		}
+		if allSmall {
+			// Add back removed nodes to their nearest subcomponent
+			for r := range removed {
+				bestIdx := 0
+				bestEdges := 0
+				for idx, s := range subs {
+					edges := 0
+					for _, n := range localAdj[r] {
+						if !removed[n] && containsStr(s, n) {
+							edges++
+						}
+					}
+					if edges > bestEdges {
+						bestEdges = edges
+						bestIdx = idx
+					}
+				}
+				if len(subs) > 0 {
+					subs[bestIdx] = append(subs[bestIdx], r)
+				}
+			}
+			return subs
+		}
+
+		// Find highest-degree node in largest component
+		largestIdx := 0
+		for idx, s := range subs {
+			if len(s) > len(subs[largestIdx]) {
+				largestIdx = idx
+			}
+		}
+		highDeg := ""
+		highCount := -1
+		for _, p := range subs[largestIdx] {
+			deg := 0
+			for _, n := range localAdj[p] {
+				if !removed[n] {
+					deg++
+				}
+			}
+			if deg > highCount {
+				highCount = deg
+				highDeg = p
+			}
+		}
+		if highDeg != "" {
+			removed[highDeg] = true
+		}
+	}
+
+	// Fallback: return original as single component
+	return [][]string{comp}
+}
+
+func bfsWithFilter(start string, adj map[string][]string, visited, excluded map[string]bool) []string {
+	queue := []string{start}
+	visited[start] = true
+	var result []string
+
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+		result = append(result, node)
+
+		for _, n := range adj[node] {
+			if !visited[n] && !excluded[n] {
+				visited[n] = true
+				queue = append(queue, n)
+			}
+		}
+	}
+	return result
+}
+
+func buildCluster(paths []string, graph *ImportGraph) Cluster {
+	var modules []ModuleMap
+	for _, p := range paths {
+		if mod, ok := graph.Nodes[p]; ok {
+			modules = append(modules, *mod)
+		}
+	}
+	return Cluster{
+		Name:    generateClusterName(modules),
+		Modules: modules,
+	}
+}
+
+// generateClusterName creates a descriptive name from the modules in a cluster.
+// Uses the common path prefix and dominant types.
+func generateClusterName(modules []ModuleMap) string {
+	if len(modules) == 0 {
+		return "unknown"
+	}
+	if len(modules) == 1 {
+		return strings.TrimSuffix(modules[0].Path, "/")
+	}
+
+	// Find common path prefix
+	paths := make([]string, len(modules))
+	for i, m := range modules {
+		paths[i] = strings.TrimSuffix(m.Path, "/")
+	}
+	prefix := commonPathPrefix(paths)
+	if prefix != "" && prefix != "." {
+		return strings.TrimSuffix(prefix, "/")
+	}
+
+	// No common prefix — use the most central module's last path segment
+	// Pick the module with the most types/entry points as "dominant"
+	best := modules[0]
+	bestScore := 0
+	for _, m := range modules {
+		score := len(m.KeyTypes) + len(m.EntryPoints)
+		if score > bestScore {
+			bestScore = score
+			best = m
+		}
+	}
+	name := strings.TrimSuffix(best.Path, "/")
+	parts := strings.Split(name, "/")
+	if len(parts) > 0 {
+		return parts[len(parts)-1] + "-system"
+	}
+	return name
+}
+
+func commonPathPrefix(paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	parts0 := strings.Split(paths[0], "/")
+	var common []string
+	for i, part := range parts0 {
+		allMatch := true
+		for _, p := range paths[1:] {
+			pp := strings.Split(p, "/")
+			if i >= len(pp) || pp[i] != part {
+				allMatch = false
+				break
+			}
+		}
+		if allMatch {
+			common = append(common, part)
+		} else {
+			break
+		}
+	}
+	return strings.Join(common, "/")
+}
+
+func clusterSharesEdge(paths []string, cluster Cluster, graph *ImportGraph) bool {
+	clusterPaths := make(map[string]bool, len(cluster.Modules))
+	for _, m := range cluster.Modules {
+		clusterPaths[m.Path] = true
+	}
+	for _, p := range paths {
+		for _, n := range graph.Adj[p] {
+			if clusterPaths[n] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func containsStr(slice []string, s string) bool {
+	for _, v := range slice {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// FormatClusterPrompt creates an LLM prompt for a cluster to generate a semantic description.
+func FormatClusterPrompt(cluster Cluster) string {
+	var sb strings.Builder
+	sb.WriteString("Given these related code modules in a project:\n\n")
+
+	for _, m := range cluster.Modules {
+		sb.WriteString(fmt.Sprintf("Module: %s\n", m.Path))
+		if len(m.KeyTypes) > 0 {
+			sb.WriteString(fmt.Sprintf("  Types: %s\n", strings.Join(m.KeyTypes, ", ")))
+		}
+		if len(m.EntryPoints) > 0 {
+			sb.WriteString(fmt.Sprintf("  Entry points: %s\n", strings.Join(m.EntryPoints, ", ")))
+		}
+		if len(m.Imports) > 0 {
+			// Only show internal imports (ones that reference other modules)
+			var internal []string
+			for _, imp := range m.Imports {
+				for _, other := range cluster.Modules {
+					if strings.Contains(imp, strings.TrimSuffix(other.Path, "/")) {
+						internal = append(internal, imp)
+						break
+					}
+				}
+			}
+			if len(internal) > 0 {
+				sb.WriteString(fmt.Sprintf("  Internal imports: %s\n", strings.Join(internal, ", ")))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("Based on the types, entry points, and import relationships between these modules, ")
+	sb.WriteString("write 2-3 concise sentences describing:\n")
+	sb.WriteString("1. What this system/feature does\n")
+	sb.WriteString("2. How the components relate to each other\n")
+	sb.WriteString("3. The likely data flow between them\n\n")
+	sb.WriteString("Be specific about component names. Do not speculate beyond what the code structure shows.")
+
+	return sb.String()
+}

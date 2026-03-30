@@ -1161,6 +1161,8 @@ func formatTypeLabel(memType, sector string, importance float64) string {
 		return fmt.Sprintf("[Decision — %s (importance: %.2f)]", sector, importance)
 	case "continuity":
 		return fmt.Sprintf("[Continuity — %s (importance: %.2f)]", sector, importance)
+	case "seed":
+		return fmt.Sprintf("[Codebase Context — %s]", sector)
 	default:
 		return fmt.Sprintf("[Memory — %s (importance: %.2f)]", sector, importance)
 	}
@@ -1182,6 +1184,129 @@ func accessRecencyFactor(lastAccessed time.Time, memType string, now time.Time) 
 		factor = 0.5
 	}
 	return factor
+}
+
+// --- Seed memories ---
+
+// TextGenerator is an optional interface for LLM text generation.
+// Implemented by GeminiSummarizer.
+type TextGenerator interface {
+	GenerateText(ctx context.Context, prompt string, maxTokens int) (string, error)
+}
+
+// SeedResult describes what SeedMemories produced.
+type SeedResult struct {
+	Clusters []Cluster
+	Memories []DetailMemory
+	Warnings []string
+	DryRun   bool
+}
+
+// SeedMemories generates semantic relationship memories from codebase structure.
+// It builds an import graph from the codemap, detects clusters, and uses an LLM
+// to generate descriptions for each cluster. Stores results as type='seed' detail memories.
+func (e *Engine) SeedMemories(ctx context.Context, userID string, force bool, dryRun bool) (*SeedResult, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// Check for existing seeds
+	if !force {
+		count, err := e.store.CountSeedMemories(userID)
+		if err != nil {
+			return nil, fmt.Errorf("dualmem: count seeds: %w", err)
+		}
+		if count > 0 {
+			return nil, fmt.Errorf("dualmem: %d seed memories already exist for namespace %q (use --force to replace)", count, userID)
+		}
+	}
+
+	// Load or generate codemap
+	codeMap, _ := e.getOrGenerateCodeMap(ctx, userID)
+	if codeMap == nil {
+		return nil, fmt.Errorf("dualmem: no codemap available (set RootDir in config)")
+	}
+	if len(codeMap.Zoom2) == 0 {
+		return nil, fmt.Errorf("dualmem: codemap has no modules")
+	}
+
+	// Build import graph and detect clusters
+	graph := BuildImportGraph(codeMap.Zoom2)
+	clusters := DetectClusters(graph)
+
+	if len(clusters) == 0 {
+		return &SeedResult{}, nil
+	}
+
+	result := &SeedResult{
+		Clusters: clusters,
+		DryRun:   dryRun,
+	}
+
+	if dryRun {
+		return result, nil
+	}
+
+	// Check for text generator (only needed for non-dry-run)
+	gen, ok := e.cfg.Summarizer.(TextGenerator)
+	if !ok {
+		return nil, fmt.Errorf("dualmem: summarizer does not support GenerateText (need GeminiSummarizer)")
+	}
+
+	// Delete existing seeds if force
+	if force {
+		if err := e.store.DeleteSeedMemories(userID); err != nil {
+			return nil, fmt.Errorf("dualmem: delete old seeds: %w", err)
+		}
+	}
+
+	// Generate descriptions and store seeds
+	maxSeeds := e.cfg.MaxSeedPerUser
+	for i, cluster := range clusters {
+		if i >= maxSeeds {
+			break
+		}
+
+		// Generate LLM description (continue on individual failures)
+		prompt := FormatClusterPrompt(cluster)
+		description, err := gen.GenerateText(ctx, prompt, 300)
+		if err != nil {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("cluster %q: %v", cluster.Name, err))
+			continue
+		}
+
+		// Collect file paths from cluster modules
+		var files []string
+		for _, m := range cluster.Modules {
+			files = append(files, m.Path)
+		}
+
+		// Embed the description
+		embedding, err := e.embedder.Embed(ctx, description, "RETRIEVAL_DOCUMENT")
+		if err != nil {
+			return nil, fmt.Errorf("dualmem: embed seed %q: %w", cluster.Name, err)
+		}
+
+		// Store as seed memory
+		dm := &DetailMemory{
+			ID:              generateID(),
+			Text:            description,
+			Sector:          cluster.Name,
+			Salience:        0.5, // lower than CLI default (0.7) so organic outranks
+			ImportanceScore: 0.7,
+			Type:            "seed",
+			Files:           files,
+			CreatedAt:       time.Now(),
+			LastAccessedAt:  time.Now(),
+		}
+
+		if err := e.store.InsertDetail(dm, embedding, userID); err != nil {
+			return nil, fmt.Errorf("dualmem: insert seed %q: %w", cluster.Name, err)
+		}
+
+		result.Memories = append(result.Memories, *dm)
+	}
+
+	return result, nil
 }
 
 func formatProfile(p *ProfileSketch) string {

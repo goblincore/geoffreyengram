@@ -101,6 +101,12 @@ Respond with ONLY valid JSON matching this exact structure (no markdown, no expl
 	return &profile, nil
 }
 
+// GenerateText sends a raw prompt to Gemini and returns the response text.
+// Used by SeedMemories for cluster description generation.
+func (s *GeminiSummarizer) GenerateText(ctx context.Context, prompt string, maxTokens int) (string, error) {
+	return s.generate(ctx, prompt, maxTokens)
+}
+
 func (s *GeminiSummarizer) generate(ctx context.Context, prompt string, maxTokens int) (string, error) {
 	url := "https://generativelanguage.googleapis.com/v1beta/models/" + s.model + ":generateContent?key=" + s.apiKey
 

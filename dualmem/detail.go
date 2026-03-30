@@ -47,7 +47,8 @@ func (dp *DetailPath) ScoreAndRoute(sector string, salience float64, content str
 // If the user is at capacity, demotes the lowest-importance memory.
 // Returns the demoted memory text (for sketch ingestion) or empty string.
 func (dp *DetailPath) Insert(ctx context.Context, dm *DetailMemory, embedding []float32, userID string) (demotedText string, err error) {
-	count, err := dp.store.GetDetailCount(userID)
+	// Exclude seeds from organic cap — seeds have their own capacity limit
+	count, err := dp.store.GetDetailCountExcludingSeeds(userID)
 	if err != nil {
 		return "", err
 	}

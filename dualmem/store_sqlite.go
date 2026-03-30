@@ -826,6 +826,25 @@ func (s *SQLiteStore) Close() error {
 	return s.db.Close()
 }
 
+// --- Seed memory operations ---
+
+func (s *SQLiteStore) GetDetailCountExcludingSeeds(userID string) (int, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM detail_memories WHERE user_id = ? AND (type IS NULL OR type != 'seed')`, userID).Scan(&count)
+	return count, err
+}
+
+func (s *SQLiteStore) CountSeedMemories(userID string) (int, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM detail_memories WHERE user_id = ? AND type = 'seed'`, userID).Scan(&count)
+	return count, err
+}
+
+func (s *SQLiteStore) DeleteSeedMemories(userID string) error {
+	_, err := s.db.Exec(`DELETE FROM detail_memories WHERE user_id = ? AND type = 'seed'`, userID)
+	return err
+}
+
 // --- Helpers ---
 
 func generateID() string {
