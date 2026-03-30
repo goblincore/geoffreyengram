@@ -303,6 +303,7 @@ func cmdSearch(cfg CLIConfig) {
 	result, err := engine.DualSearch(ctx, namespace, query, dualmem.SearchOpts{
 		Limit:         *limit,
 		IncludeSketch: true,
+		QueryText:     query,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
