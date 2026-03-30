@@ -1584,6 +1584,29 @@ func (e *Engine) DeleteKnowledgeDoc(ctx context.Context, namespace, topic string
 	return e.store.DeleteKnowledgeDoc(namespace, topic)
 }
 
+// SynthesizeAll runs synthesis across all namespaces in the database.
+func (e *Engine) SynthesizeAll(ctx context.Context, opts *SynthesizeOpts) (map[string]*SynthesizeResult, error) {
+	namespaces, err := e.store.ListNamespaces()
+	if err != nil {
+		return nil, fmt.Errorf("dualmem: list namespaces: %w", err)
+	}
+
+	results := make(map[string]*SynthesizeResult)
+	for _, ns := range namespaces {
+		result, err := e.Synthesize(ctx, ns, opts)
+		if err != nil {
+			// Log warning but continue to other namespaces
+			if results[ns] == nil {
+				results[ns] = &SynthesizeResult{}
+			}
+			results[ns].Warnings = append(results[ns].Warnings, err.Error())
+			continue
+		}
+		results[ns] = result
+	}
+	return results, nil
+}
+
 func memoryIDs(memories []detailWithVector) []string {
 	ids := make([]string, len(memories))
 	for i, m := range memories {

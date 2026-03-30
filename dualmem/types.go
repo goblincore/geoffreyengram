@@ -537,6 +537,9 @@ type Store interface {
 	GetCodeMapEmbeddings(namespace string) (map[string][]float32, string, error)
 	DeleteCodeMapEmbeddings(namespace string) error
 
+	// Namespaces
+	ListNamespaces() ([]string, error)
+
 	// Knowledge documents
 	UpsertKnowledgeDoc(doc *KnowledgeDoc, embedding []float32) error
 	GetKnowledgeDocs(namespace string) ([]KnowledgeDoc, error)

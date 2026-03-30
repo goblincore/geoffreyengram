@@ -838,6 +838,25 @@ func (s *SQLiteStore) GetLatestSessionMarker(namespace string) (*SessionMarker, 
 	return &sm, nil
 }
 
+// --- Namespaces ---
+
+func (s *SQLiteStore) ListNamespaces() ([]string, error) {
+	rows, err := s.db.Query(`SELECT DISTINCT user_id FROM detail_memories ORDER BY user_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var namespaces []string
+	for rows.Next() {
+		var ns string
+		if err := rows.Scan(&ns); err != nil {
+			return nil, err
+		}
+		namespaces = append(namespaces, ns)
+	}
+	return namespaces, rows.Err()
+}
+
 // --- Knowledge documents ---
 
 func (s *SQLiteStore) UpsertKnowledgeDoc(doc *KnowledgeDoc, embedding []float32) error {

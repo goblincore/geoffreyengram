@@ -989,13 +989,12 @@ func cmdSeed(cfg CLIConfig) {
 func cmdSynthesize(cfg CLIConfig) {
 	fs := flag.NewFlagSet("synthesize", flag.ExitOnError)
 	ns := fs.String("ns", "", "Namespace")
+	all := fs.Bool("all", false, "Synthesize across all namespaces")
 	force := fs.Bool("force", false, "Re-synthesize all docs regardless of staleness")
 	topic := fs.String("topic", "", "Only synthesize this specific topic")
 	dryRun := fs.Bool("dry-run", false, "Show what would be done without writing")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	fs.Parse(os.Args[2:])
-
-	namespace := resolveNamespace(*ns, cfg)
 
 	engine, err := newEngine(cfg)
 	if err != nil {
@@ -1005,6 +1004,35 @@ func cmdSynthesize(cfg CLIConfig) {
 	defer engine.Close()
 
 	ctx := context.Background()
+
+	if *all {
+		opts := &dualmem.SynthesizeOpts{Force: *force, DryRun: *dryRun}
+		results, err := engine.SynthesizeAll(ctx, opts)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		if *jsonOut {
+			json.NewEncoder(os.Stdout).Encode(results)
+			return
+		}
+		for ns, result := range results {
+			created := len(result.Created)
+			updated := len(result.Updated)
+			if created == 0 && updated == 0 && result.Skipped == 0 {
+				continue
+			}
+			fmt.Printf("[%s] created: %d, updated: %d, skipped: %d, orphaned: %d\n",
+				ns, created, updated, result.Skipped, result.Orphaned)
+			for _, w := range result.Warnings {
+				fmt.Fprintf(os.Stderr, "  warning: %s\n", w)
+			}
+		}
+		return
+	}
+
+	namespace := resolveNamespace(*ns, cfg)
+
 	result, err := engine.Synthesize(ctx, namespace, &dualmem.SynthesizeOpts{
 		Force:  *force,
 		Topic:  *topic,
