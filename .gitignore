@@ -31,3 +31,6 @@ Thumbs.db
 .claude/
 .vexp/
 vexp.toml
+
+# Worktrees
+.worktrees/
