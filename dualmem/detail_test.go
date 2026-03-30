@@ -203,3 +203,63 @@ func TestDetailSearch_PureCosineFallback(t *testing.T) {
 		t.Fatal("Search returned no results")
 	}
 }
+
+func TestDetailSearch_IdentifierPreFilter(t *testing.T) {
+	// Verifies that identifier-matched memories are guaranteed in results even
+	// when they would normally be cut off by the limit on cosine ranking alone.
+	store := newTestStore(t)
+	embedder := &mockEmbedder{dim: 64}
+
+	dp := NewDetailPath(store, embedder, 0.5, 100, nil)
+	ctx := context.Background()
+	userID := "test-user-prefilter"
+
+	// Insert 4 generic memories + 1 LC-1663 specific one.
+	// With limit=3, pure cosine might cut the LC-1663 memory.
+	memories := []string{
+		"auth middleware rewrite driven by legal compliance requirements",
+		"button component uses React.memo for performance optimization",
+		"database migration uses SQLite for zero-setup deployments",
+		"navigation uses React Router with lazy loading for code splitting",
+		"LC-1663: Inline finalization is fire-and-forget during createProfile",
+	}
+	for i, text := range memories {
+		emb, _ := embedder.Embed(ctx, text, "")
+		dm := &DetailMemory{
+			ID:              fmt.Sprintf("prefilter-mem-%d", i),
+			Text:            text,
+			ImportanceScore: 0.75,
+			Salience:        0.7,
+			Sector:          "semantic",
+			Type:            "decision",
+		}
+		dp.Insert(ctx, dm, emb, userID)
+	}
+
+	// limit=3, but LC-1663 memory must still appear
+	queryEmb, _ := embedder.Embed(ctx, "LC-1663", "RETRIEVAL_QUERY")
+	results, err := dp.Search(ctx, queryEmb, userID, 3, "LC-1663")
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+
+	found := false
+	for _, r := range results {
+		if strings.Contains(r.Text, "LC-1663") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		texts := make([]string, len(results))
+		for i, r := range results {
+			l := len(r.Text)
+		if l > 50 {
+			l = 50
+		}
+		texts[i] = r.Text[:l]
+		}
+		t.Errorf("LC-1663 memory not found in results (limit=3, got %d): %v", len(results), texts)
+	}
+}
+

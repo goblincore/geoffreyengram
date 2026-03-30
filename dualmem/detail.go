@@ -209,22 +209,46 @@ func (dp *DetailPath) Search(ctx context.Context, queryEmbedding []float32, user
 		return results[i].hybridScore > results[j].hybridScore
 	})
 
-	// Take top-M
 	if limit <= 0 {
 		limit = 5
 	}
 	var topM []DetailMemory
 	seen := make(map[string]bool)
-	for i, r := range results {
-		if i >= limit {
+
+	// Phase 1 — identifier pre-filter: if the query contains specific identifiers
+	// (e.g. "LC-1663", "PR-42"), guarantee all memories containing those strings
+	// are included regardless of cosine similarity ranking.
+	if queryText != "" {
+		identifiers := extractIdentifiers(queryText)
+		if len(identifiers) > 0 {
+			for _, r := range results {
+				memLower := strings.ToLower(r.Text)
+				for _, id := range identifiers {
+					if strings.Contains(memLower, strings.ToLower(id)) {
+						dm := r.DetailMemory
+						dm.Similarity = r.similarity
+						topM = append(topM, dm)
+						seen[dm.ID] = true
+						dp.store.TouchDetail(dm.ID)
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// Phase 2 — cosine/hybrid fill: top-M by hybrid score, skipping already-included
+	for _, r := range results {
+		if len(topM) >= limit {
 			break
+		}
+		if seen[r.ID] {
+			continue
 		}
 		dm := r.DetailMemory
 		dm.Similarity = r.similarity
 		topM = append(topM, dm)
 		seen[dm.ID] = true
-
-		// Touch for access tracking
 		dp.store.TouchDetail(dm.ID)
 	}
 
