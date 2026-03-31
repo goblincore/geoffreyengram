@@ -65,6 +65,51 @@ type Entity struct {
 	Type string `json:"type"` // "person", "music_artist", "song", "topic", "place"
 }
 
+// EntityNode is a canonical entity in the knowledge graph.
+type EntityNode struct {
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	Type         string    `json:"type"` // "person", "file", "function", "concept", "tool", "project"
+	Namespace    string    `json:"namespace"`
+	MentionCount int       `json:"mention_count"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// EntityEdge is a relationship between two entities.
+type EntityEdge struct {
+	ID        string    `json:"id"`
+	SourceID  string    `json:"source_id"`
+	TargetID  string    `json:"target_id"`
+	Relation  string    `json:"relation"` // "uses", "modifies", "depends_on", "implements", etc.
+	Strength  float64   `json:"strength"`
+	Mentions  int       `json:"mentions"`
+	Namespace string    `json:"namespace"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// EntityTriple is an extracted relationship for the entity graph (used during distillation).
+type EntityTriple struct {
+	Source   Entity `json:"source"`
+	Relation string `json:"relation"`
+	Target   Entity `json:"target"`
+}
+
+// GraphExpansionResult holds memory IDs found via entity graph traversal.
+type GraphExpansionResult struct {
+	MemoryIDs    []string     // memory IDs found via graph traversal
+	MatchedNodes []EntityNode // entities that matched the query
+}
+
+// GraphBoostConfig configures entity graph boosting in search.
+// When set, memories linked to entities matching the query get an additive score boost.
+type GraphBoostConfig struct {
+	Namespace   string  // Entity graph namespace to query
+	BoostWeight float64 // Additive boost for graph-matched memories (default 0.15)
+	MaxHops     int     // Graph expansion hops (default 1)
+}
+
 // SearchOpts configures dual-path search.
 type SearchOpts struct {
 	Limit          int                // Max detail memories to return (default 5)
@@ -78,6 +123,7 @@ type SearchOpts struct {
 	QueryEmbedding []float32          // Pre-computed query embedding; if non-nil, DualSearch skips embedding
 	MinSimilarity  float64            // If > 0, exclude detail memories below this cosine similarity
 	QueryText      string             // Raw query text for keyword boosting in detail search
+	GraphBoost     *GraphBoostConfig  // If non-nil, apply entity graph boost to search results
 }
 
 // DualSearchResult contains results from both paths.
@@ -551,6 +597,17 @@ type Store interface {
 	// Session markers
 	InsertSessionMarker(marker *SessionMarker) error
 	GetLatestSessionMarker(namespace string) (*SessionMarker, error)
+
+	// Entity graph
+	UpsertEntity(node *EntityNode) (string, error) // returns entity ID
+	UpsertEdge(edge *EntityEdge) error
+	LinkMemoryToEntity(memoryID, entityID, namespace string) error
+	ExpandEntities(namespace string, entityIDs []string, maxNeighbors int) ([]string, error) // returns neighbor entity IDs
+	GetMemoryIDsByEntities(entityIDs []string) ([]string, error)
+	GetEntitiesByName(namespace, name string, limit int) ([]EntityNode, error)
+	GetEntityStats(namespace string) (totalNodes int, totalEdges int, totalLinks int, err error)
+	GetTopEntities(namespace string, limit int) ([]EntityNode, error)
+	GetEntityEdges(entityID string) ([]EntityEdge, error)
 
 	// Lifecycle
 	Close() error

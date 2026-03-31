@@ -194,6 +194,18 @@ dualmem seed --dry-run                                  # preview clusters witho
 dualmem seed                                            # generate seed memories from codebase structure
 dualmem seed --force                                    # regenerate (deletes existing seeds first)
 
+# Session distillation — ambient capture from transcripts
+dualmem distill                                         # auto-detect latest CC session
+dualmem distill --dry-run                               # preview extracted facts without writing
+dualmem distill --file session.jsonl                    # explicit transcript file
+dualmem distill --auto                                  # idempotent (used by hook)
+
+# Entity graph
+dualmem entities                                        # graph stats (nodes, edges, links)
+dualmem entities search "SQLite"                        # find entities by name
+dualmem entities show "store_sqlite.go"                 # show entity + relationships
+dualmem entities top --limit 20                         # most-mentioned entities
+
 # Maintenance
 dualmem promote --id <memory-id>                        # move sketch → detail
 dualmem promote --all --type warning                    # batch re-evaluate all raw sketch entries
@@ -286,6 +298,63 @@ dualmem seed --json
 ```
 
 Seed memories rank below organic memories (salience 0.5 vs 0.7 default) and are weighted by intent — `explore` boosts seeds (1.2×), `debug` suppresses them (0.6×). They appear in `context` output with a `[Codebase Context — cluster-name]` label. As you build organic memories, seeds naturally fall in priority.
+
+### Session distillation — ambient memory capture
+
+DualMem can automatically extract memories from session transcripts — no explicit `dualmem add` calls needed. At session end, `dualmem distill` reads the transcript, uses Gemini to extract facts, decisions, warnings, and entity relationships, then writes them via the normal import pipeline with dedup and importance scoring.
+
+```bash
+# Auto-detect latest Claude Code session and distill it
+dualmem distill
+
+# Preview what would be extracted (no writes)
+dualmem distill --dry-run
+
+# From an explicit transcript file (other harnesses)
+dualmem distill --file /path/to/session.jsonl
+
+# From stdin (pipe from any harness)
+cat transcript.jsonl | dualmem distill --stdin
+```
+
+**Automatic via Claude Code hook** — add to your project's `.claude/settings.json` to distill at session end without thinking about it:
+
+```json
+{
+  "hooks": {
+    "Stop": [{
+      "matcher": "",
+      "command": "~/go/bin/dualmem distill --auto --ns \"claude:$(basename $(pwd))\" 2>/dev/null || true"
+    }]
+  }
+}
+```
+
+The `--auto` flag is idempotent — it tracks the last distilled session ID and skips if already done. Distillation extracts up to 20 facts per session, skips near-duplicates (cosine > 0.90), floors salience at 0.60, and auto-triggers `synthesize` when 3+ new memories are added.
+
+Extracted entity triples (e.g., `store_sqlite.go → implements → Store interface`) are written into the entity graph, enabling cross-memory traversal in future searches.
+
+### Entity graph — traversal-based retrieval
+
+Entities extracted from memories are stored in a lightweight knowledge graph (3 SQLite tables: `entity_nodes`, `entity_edges`, `memory_entity_links`). This enables graph-boosted retrieval: memories linked to entities matching the query get an additive score boost, surfacing related context even when vocabulary differs.
+
+```bash
+# View entity graph stats for current project
+dualmem entities
+
+# Find entities by name
+dualmem entities search "SQLite"
+
+# Show an entity's relationships (1-hop)
+dualmem entities show "store_sqlite.go"
+
+# List most-mentioned entities
+dualmem entities top --limit 20
+```
+
+Entity nodes are upserted at every `add` (via the heuristic extractor) and during `distill` (via LLM-extracted triples with richer relationship types). Edges record source → relation → target with running-average strength across repeated observations.
+
+Graph boost is opt-in at search time via `GraphBoost: &GraphBoostConfig{Namespace: ns, BoostWeight: 0.15}` in `SearchOpts`.
 
 ### Knowledge documents — synthesized context
 
