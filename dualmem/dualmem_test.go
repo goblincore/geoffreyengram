@@ -1292,3 +1292,78 @@ func TestDualSearch_WithGraphBoost(t *testing.T) {
 		t.Fatal("No detail memories returned without boost")
 	}
 }
+
+func TestAssembleContextWith_GraphBoost(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+	userID := "test-ctx-graphboost"
+	ns := userID // AssembleContextWith uses userID as namespace for GraphBoost
+
+	// Insert memories with distinct topics
+	memories := []MemoryInput{
+		{UserMessage: "payment gateway uses Stripe for card processing", Salience: 0.9, Type: "decision"},
+		{UserMessage: "caching layer uses Redis for session storage", Salience: 0.9, Type: "decision"},
+		{UserMessage: "deployment pipeline runs on GitHub Actions CI/CD", Salience: 0.9, Type: "decision"},
+	}
+	for _, m := range memories {
+		if err := engine.AddWithOptions(ctx, m, userID); err != nil {
+			t.Fatalf("AddWithOptions: %v", err)
+		}
+	}
+
+	// Find the payment memory ID
+	details, _ := engine.store.GetDetailMemories(userID)
+	if len(details) < 3 {
+		t.Fatalf("Expected >= 3 detail memories, got %d", len(details))
+	}
+
+	paymentMemID := ""
+	for _, d := range details {
+		if strings.Contains(d.Text, "payment gateway") {
+			paymentMemID = d.ID
+			break
+		}
+	}
+	if paymentMemID == "" {
+		t.Fatal("Could not find payment gateway memory")
+	}
+
+	// Create entity and link to payment memory
+	entityID, err := engine.store.UpsertEntity(&EntityNode{
+		Name:      "stripe",
+		Type:      "service",
+		Namespace: ns,
+	})
+	if err != nil {
+		t.Fatalf("UpsertEntity: %v", err)
+	}
+	if err := engine.store.LinkMemoryToEntity(paymentMemID, entityID, ns); err != nil {
+		t.Fatalf("LinkMemoryToEntity: %v", err)
+	}
+
+	// AssembleContextWith should auto-enable graph boost
+	block, err := engine.AssembleContextWith(ctx, userID, "stripe integration", 5000, nil)
+	if err != nil {
+		t.Fatalf("AssembleContextWith: %v", err)
+	}
+	if block.Text == "" {
+		t.Fatal("Empty context block")
+	}
+
+	// Payment memory should appear in output (graph boost surfaces it)
+	if !strings.Contains(block.Text, "payment gateway") && !strings.Contains(block.Text, "Stripe") {
+		t.Error("Expected payment/Stripe memory in graph-boosted context output")
+	}
+
+	// With DisableGraphBoost, the search should still work (just no boost)
+	blockNoBoost, err := engine.AssembleContextWith(ctx, userID, "stripe integration", 5000, &ContextOpts{
+		DisableGraphBoost: true,
+	})
+	if err != nil {
+		t.Fatalf("AssembleContextWith (no graph): %v", err)
+	}
+	// Should still return context (other retrieval paths work)
+	if blockNoBoost == nil {
+		t.Fatal("Nil context block with DisableGraphBoost")
+	}
+}

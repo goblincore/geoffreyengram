@@ -431,8 +431,9 @@ func extractEntityCandidates(query string) []string {
 // diffs and code maps before memories.
 // ContextOpts configures AssembleContext behavior.
 type ContextOpts struct {
-	Intent        Intent  // Explicit intent override (empty = auto-detect from query)
-	MinSimilarity float64 // If > 0, exclude detail memories below this cosine similarity
+	Intent            Intent  // Explicit intent override (empty = auto-detect from query)
+	MinSimilarity     float64 // If > 0, exclude detail memories below this cosine similarity
+	DisableGraphBoost bool    // If true, skip entity graph boost in search
 }
 
 func (e *Engine) AssembleContext(ctx context.Context, userID string, query string, tokenBudget int) (*ContextBlock, error) {
@@ -466,13 +467,21 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 	if opts != nil {
 		minSim = opts.MinSimilarity
 	}
-	results, err := e.DualSearch(ctx, userID, query, SearchOpts{
+	searchOpts := SearchOpts{
 		Limit:          10,
 		IncludeSketch:  true,
 		QueryEmbedding: queryEmb,
 		MinSimilarity:  minSim,
 		QueryText:      query,
-	})
+	}
+	if opts == nil || !opts.DisableGraphBoost {
+		searchOpts.GraphBoost = &GraphBoostConfig{
+			Namespace:   userID,
+			BoostWeight: 0.15,
+			MaxHops:     1,
+		}
+	}
+	results, err := e.DualSearch(ctx, userID, query, searchOpts)
 	if err != nil {
 		return nil, err
 	}

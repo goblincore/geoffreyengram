@@ -354,7 +354,14 @@ dualmem entities top --limit 20
 
 Entity nodes are upserted at every `add` (via the heuristic extractor) and during `distill` (via LLM-extracted triples with richer relationship types). Edges record source → relation → target with running-average strength across repeated observations.
 
-Graph boost is opt-in at search time via `GraphBoost: &GraphBoostConfig{Namespace: ns, BoostWeight: 0.15}` in `SearchOpts`.
+Graph boost is **automatic** in `dualmem context` — every context assembly call applies entity graph traversal (1-hop, +0.15 additive boost) to surface memories linked to entities matching the query. If no entities exist, the boost is a no-op. Disable with `--no-graph` for debugging:
+
+```bash
+dualmem context "auth system" --budget 3000              # graph boost auto-enabled
+dualmem context "auth system" --budget 3000 --no-graph   # graph boost disabled
+```
+
+For programmatic use, set `DisableGraphBoost: true` in `ContextOpts`.
 
 ### Knowledge documents — synthesized context
 

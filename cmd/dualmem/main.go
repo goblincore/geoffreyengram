@@ -4,7 +4,7 @@
 //
 //	dualmem add --ns <namespace> --text "memory content" [--sector semantic] [--salience 0.8]
 //	dualmem search --ns <namespace> "query" [--limit 5] [--json]
-//	dualmem context --ns <namespace> "query" [--budget 3000] [--json]
+//	dualmem context --ns <namespace> "query" [--budget 3000] [--no-graph] [--json]
 //	dualmem profile --ns <namespace> [--json]
 //	dualmem status --ns <namespace>
 //	dualmem promote --ns <namespace> --id <memory-id>
@@ -395,6 +395,7 @@ func cmdContext(cfg CLIConfig) {
 	ns := fs.String("ns", "", "Namespace")
 	budget := fs.Int("budget", 3000, "Token budget")
 	intent := fs.String("intent", "", "Task intent override: debug, continue, feature, explore (default: auto-detect)")
+	noGraph := fs.Bool("no-graph", false, "Disable entity graph boosting")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	fs.Parse(os.Args[2:])
 
@@ -413,8 +414,11 @@ func cmdContext(cfg CLIConfig) {
 	defer engine.Close()
 
 	var opts *dualmem.ContextOpts
-	if *intent != "" {
-		opts = &dualmem.ContextOpts{Intent: dualmem.Intent(*intent)}
+	if *intent != "" || *noGraph {
+		opts = &dualmem.ContextOpts{
+			Intent:            dualmem.Intent(*intent),
+			DisableGraphBoost: *noGraph,
+		}
 	}
 
 	ctx := context.Background()
