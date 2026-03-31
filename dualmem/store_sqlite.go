@@ -188,6 +188,50 @@ func (s *SQLiteStore) migrate() error {
 		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (6)`)
 	}
 
+	if version < 7 {
+		if _, err := s.db.Exec(`
+			CREATE TABLE IF NOT EXISTS entity_nodes (
+				id            TEXT PRIMARY KEY,
+				name          TEXT NOT NULL,
+				type          TEXT NOT NULL,
+				namespace     TEXT NOT NULL,
+				mention_count INTEGER NOT NULL DEFAULT 1,
+				created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+				updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+			);
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_canonical
+				ON entity_nodes(namespace, type, name COLLATE NOCASE);
+
+			CREATE TABLE IF NOT EXISTS entity_edges (
+				id          TEXT PRIMARY KEY,
+				source_id   TEXT NOT NULL REFERENCES entity_nodes(id),
+				target_id   TEXT NOT NULL REFERENCES entity_nodes(id),
+				relation    TEXT NOT NULL,
+				strength    REAL NOT NULL DEFAULT 1.0,
+				mentions    INTEGER NOT NULL DEFAULT 1,
+				namespace   TEXT NOT NULL,
+				created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+				updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+			);
+			CREATE INDEX IF NOT EXISTS idx_edge_source ON entity_edges(source_id);
+			CREATE INDEX IF NOT EXISTS idx_edge_target ON entity_edges(target_id);
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_unique
+				ON entity_edges(source_id, target_id, relation);
+
+			CREATE TABLE IF NOT EXISTS memory_entity_links (
+				memory_id TEXT NOT NULL,
+				entity_id TEXT NOT NULL REFERENCES entity_nodes(id),
+				namespace TEXT NOT NULL,
+				PRIMARY KEY (memory_id, entity_id)
+			);
+			CREATE INDEX IF NOT EXISTS idx_mel_entity ON memory_entity_links(entity_id);
+			CREATE INDEX IF NOT EXISTS idx_mel_memory ON memory_entity_links(memory_id);
+		`); err != nil {
+			return fmt.Errorf("migrate v7 (entity graph): %w", err)
+		}
+		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (7)`)
+	}
+
 	return nil
 }
 
@@ -1013,6 +1057,250 @@ func (s *SQLiteStore) CountSeedMemories(userID string) (int, error) {
 func (s *SQLiteStore) DeleteSeedMemories(userID string) error {
 	_, err := s.db.Exec(`DELETE FROM detail_memories WHERE user_id = ? AND type = 'seed'`, userID)
 	return err
+}
+
+// --- Entity graph methods ---
+
+func (s *SQLiteStore) UpsertEntity(node *EntityNode) (string, error) {
+	// Try to find existing entity by canonical match
+	var existingID string
+	err := s.db.QueryRow(
+		`SELECT id FROM entity_nodes WHERE namespace = ? AND type = ? AND name = ? COLLATE NOCASE`,
+		node.Namespace, node.Type, node.Name,
+	).Scan(&existingID)
+
+	if err == nil {
+		// Exists — increment mention count
+		s.db.Exec(
+			`UPDATE entity_nodes SET mention_count = mention_count + 1, updated_at = datetime('now') WHERE id = ?`,
+			existingID,
+		)
+		return existingID, nil
+	}
+
+	// New entity
+	id := generateID()
+	_, err = s.db.Exec(
+		`INSERT INTO entity_nodes (id, name, type, namespace, mention_count) VALUES (?, ?, ?, ?, 1)`,
+		id, node.Name, node.Type, node.Namespace,
+	)
+	if err != nil {
+		return "", fmt.Errorf("insert entity: %w", err)
+	}
+	return id, nil
+}
+
+func (s *SQLiteStore) UpsertEdge(edge *EntityEdge) error {
+	// Try to find existing edge
+	var existingID string
+	var mentions int
+	var strength float64
+	err := s.db.QueryRow(
+		`SELECT id, mentions, strength FROM entity_edges WHERE source_id = ? AND target_id = ? AND relation = ?`,
+		edge.SourceID, edge.TargetID, edge.Relation,
+	).Scan(&existingID, &mentions, &strength)
+
+	if err == nil {
+		// Exists — update with running average
+		newStrength := (strength*float64(mentions) + 1.0) / float64(mentions+1)
+		_, err = s.db.Exec(
+			`UPDATE entity_edges SET mentions = ?, strength = ?, updated_at = datetime('now') WHERE id = ?`,
+			mentions+1, newStrength, existingID,
+		)
+		return err
+	}
+
+	// New edge
+	id := generateID()
+	_, err = s.db.Exec(
+		`INSERT INTO entity_edges (id, source_id, target_id, relation, strength, mentions, namespace) VALUES (?, ?, ?, ?, ?, 1, ?)`,
+		id, edge.SourceID, edge.TargetID, edge.Relation, 1.0, edge.Namespace,
+	)
+	return err
+}
+
+func (s *SQLiteStore) LinkMemoryToEntity(memoryID, entityID, namespace string) error {
+	_, err := s.db.Exec(
+		`INSERT OR IGNORE INTO memory_entity_links (memory_id, entity_id, namespace) VALUES (?, ?, ?)`,
+		memoryID, entityID, namespace,
+	)
+	return err
+}
+
+func (s *SQLiteStore) ExpandEntities(namespace string, entityIDs []string, maxNeighbors int) ([]string, error) {
+	if len(entityIDs) == 0 {
+		return nil, nil
+	}
+
+	placeholders := strings.Repeat("?,", len(entityIDs))
+	placeholders = placeholders[:len(placeholders)-1]
+
+	args := make([]interface{}, 0, len(entityIDs)*3+1)
+	for _, id := range entityIDs {
+		args = append(args, id)
+	}
+	for _, id := range entityIDs {
+		args = append(args, id)
+	}
+	for _, id := range entityIDs {
+		args = append(args, id)
+	}
+	args = append(args, maxNeighbors)
+
+	query := fmt.Sprintf(`
+		SELECT DISTINCT neighbor_id FROM (
+			SELECT target_id AS neighbor_id FROM entity_edges WHERE source_id IN (%s)
+			UNION
+			SELECT source_id AS neighbor_id FROM entity_edges WHERE target_id IN (%s)
+		) WHERE neighbor_id NOT IN (%s)
+		LIMIT ?`, placeholders, placeholders, placeholders)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("expand entities: %w", err)
+	}
+	defer rows.Close()
+
+	var neighbors []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		neighbors = append(neighbors, id)
+	}
+	return neighbors, rows.Err()
+}
+
+func (s *SQLiteStore) GetMemoryIDsByEntities(entityIDs []string) ([]string, error) {
+	if len(entityIDs) == 0 {
+		return nil, nil
+	}
+
+	placeholders := strings.Repeat("?,", len(entityIDs))
+	placeholders = placeholders[:len(placeholders)-1]
+
+	args := make([]interface{}, len(entityIDs))
+	for i, id := range entityIDs {
+		args[i] = id
+	}
+
+	query := fmt.Sprintf(
+		`SELECT DISTINCT memory_id FROM memory_entity_links WHERE entity_id IN (%s) LIMIT 200`,
+		placeholders,
+	)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("get memory ids by entities: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func (s *SQLiteStore) GetEntitiesByName(namespace, name string, limit int) ([]EntityNode, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.Query(
+		`SELECT id, name, type, namespace, mention_count, created_at, updated_at
+		 FROM entity_nodes
+		 WHERE namespace = ? AND name LIKE '%' || ? || '%' COLLATE NOCASE
+		 ORDER BY mention_count DESC
+		 LIMIT ?`,
+		namespace, name, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get entities by name: %w", err)
+	}
+	defer rows.Close()
+
+	var nodes []EntityNode
+	for rows.Next() {
+		var n EntityNode
+		var createdAt, updatedAt string
+		if err := rows.Scan(&n.ID, &n.Name, &n.Type, &n.Namespace, &n.MentionCount, &createdAt, &updatedAt); err != nil {
+			continue
+		}
+		n.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+		n.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAt)
+		nodes = append(nodes, n)
+	}
+	return nodes, rows.Err()
+}
+
+func (s *SQLiteStore) GetEntityStats(namespace string) (totalNodes int, totalEdges int, totalLinks int, err error) {
+	s.db.QueryRow(`SELECT COUNT(*) FROM entity_nodes WHERE namespace = ?`, namespace).Scan(&totalNodes)
+	s.db.QueryRow(`SELECT COUNT(*) FROM entity_edges WHERE namespace = ?`, namespace).Scan(&totalEdges)
+	s.db.QueryRow(`SELECT COUNT(*) FROM memory_entity_links WHERE namespace = ?`, namespace).Scan(&totalLinks)
+	return totalNodes, totalEdges, totalLinks, nil
+}
+
+func (s *SQLiteStore) GetTopEntities(namespace string, limit int) ([]EntityNode, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.Query(
+		`SELECT id, name, type, namespace, mention_count, created_at, updated_at
+		 FROM entity_nodes
+		 WHERE namespace = ?
+		 ORDER BY mention_count DESC
+		 LIMIT ?`,
+		namespace, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get top entities: %w", err)
+	}
+	defer rows.Close()
+
+	var nodes []EntityNode
+	for rows.Next() {
+		var n EntityNode
+		var createdAt, updatedAt string
+		if err := rows.Scan(&n.ID, &n.Name, &n.Type, &n.Namespace, &n.MentionCount, &createdAt, &updatedAt); err != nil {
+			continue
+		}
+		n.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+		n.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAt)
+		nodes = append(nodes, n)
+	}
+	return nodes, rows.Err()
+}
+
+func (s *SQLiteStore) GetEntityEdges(entityID string) ([]EntityEdge, error) {
+	rows, err := s.db.Query(
+		`SELECT id, source_id, target_id, relation, strength, mentions, namespace, created_at, updated_at
+		 FROM entity_edges
+		 WHERE source_id = ? OR target_id = ?
+		 ORDER BY strength DESC`,
+		entityID, entityID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get entity edges: %w", err)
+	}
+	defer rows.Close()
+
+	var edges []EntityEdge
+	for rows.Next() {
+		var e EntityEdge
+		var createdAt, updatedAt string
+		if err := rows.Scan(&e.ID, &e.SourceID, &e.TargetID, &e.Relation, &e.Strength, &e.Mentions, &e.Namespace, &createdAt, &updatedAt); err != nil {
+			continue
+		}
+		e.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+		e.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAt)
+		edges = append(edges, e)
+	}
+	return edges, rows.Err()
 }
 
 // --- Helpers ---

@@ -204,6 +204,10 @@ func main() {
 		cmdSynthesize(cfg)
 	case "docs":
 		cmdDocs(cfg)
+	case "distill":
+		cmdDistill(cfg)
+	case "entities":
+		cmdEntities(cfg)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -229,6 +233,8 @@ Commands:
   demote      Demote a memory to Sketch Path
   seed        Auto-generate semantic context memories from code structure
   synthesize  Cluster memories into knowledge docs (concept-oriented summaries)
+  distill     Extract memories from a session transcript
+  entities    Query the entity graph (stats, search, show, top)
   docs        List/show/delete/export knowledge docs
   gc          Garbage collect stale/expired memories
 
@@ -1193,6 +1199,189 @@ func cmdDocs(cfg CLIConfig) {
 			fmt.Printf("  %-30s %4d tokens  %2d sources  updated %s\n",
 				d.Topic, d.TokenCount, len(d.SourceIDs), d.UpdatedAt.Format("2006-01-02"))
 		}
+	}
+}
+
+func cmdDistill(cfg CLIConfig) {
+	distillFlags := flag.NewFlagSet("distill", flag.ExitOnError)
+	autoFlag := distillFlags.Bool("auto", false, "Auto-detect CC session, skip if already distilled")
+	fileFlag := distillFlags.String("file", "", "Explicit transcript file path")
+	stdinFlag := distillFlags.Bool("stdin", false, "Read transcript from stdin")
+	dryRunFlag := distillFlags.Bool("dry-run", false, "Preview without writing")
+	jsonFlag := distillFlags.Bool("json", false, "JSON output")
+	nsFlag := distillFlags.String("ns", "", "Namespace override")
+	distillFlags.Parse(os.Args[2:])
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	ns := resolveNamespace(*nsFlag, cfg)
+	opts := dualmem.DistillOpts{
+		File:      *fileFlag,
+		Stdin:     *stdinFlag,
+		Auto:      *autoFlag,
+		DryRun:    *dryRunFlag,
+		Namespace: *nsFlag,
+	}
+	if opts.Namespace == "" {
+		opts.Namespace = ns
+	}
+
+	ctx := context.Background()
+	result, err := engine.Distill(ctx, opts, ns)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonFlag {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(result)
+	} else {
+		if result.DryRun {
+			fmt.Println("[DRY RUN]")
+		}
+		fmt.Printf("Session: %s\n", result.SessionID)
+		fmt.Printf("Summary: %s\n", result.Summary)
+		fmt.Printf("Facts extracted: %d, written: %d, skipped (duplicates): %d\n", len(result.Facts), result.Written, result.Skipped)
+		if len(result.Triples) > 0 {
+			fmt.Printf("Entity triples: %d\n", len(result.Triples))
+		}
+		if result.DryRun && len(result.Facts) > 0 {
+			fmt.Println("\nExtracted facts:")
+			for i, f := range result.Facts {
+				fmt.Printf("  %d. [%s] %s (salience: %.1f)\n", i+1, f.Type, f.Text, f.Salience)
+				if len(f.Files) > 0 {
+					fmt.Printf("     Files: %s\n", strings.Join(f.Files, ", "))
+				}
+			}
+		}
+	}
+}
+
+func cmdEntities(cfg CLIConfig) {
+	entitiesFlags := flag.NewFlagSet("entities", flag.ExitOnError)
+	nsFlag := entitiesFlags.String("ns", "", "Namespace override")
+	limitFlag := entitiesFlags.Int("limit", 20, "Max results")
+	jsonFlag := entitiesFlags.Bool("json", false, "JSON output")
+
+	// Parse subcommand before flags
+	subArgs := os.Args[2:]
+	subCmd := ""
+	if len(subArgs) > 0 && subArgs[0] != "-" && !strings.HasPrefix(subArgs[0], "--") {
+		subCmd = subArgs[0]
+		subArgs = subArgs[1:]
+	}
+	entitiesFlags.Parse(subArgs)
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	store := engine.GetStore()
+	ns := resolveNamespace(*nsFlag, cfg)
+
+	switch subCmd {
+	case "", "stats":
+		nodes, edges, links, _ := store.GetEntityStats(ns)
+		if *jsonFlag {
+			json.NewEncoder(os.Stdout).Encode(map[string]int{
+				"nodes": nodes, "edges": edges, "links": links,
+			})
+		} else {
+			fmt.Printf("Entity graph (%s):\n  Nodes: %d\n  Edges: %d\n  Memory links: %d\n", ns, nodes, edges, links)
+		}
+
+	case "search":
+		query := entitiesFlags.Arg(0)
+		if query == "" {
+			fmt.Fprintln(os.Stderr, "Usage: dualmem entities search <query>")
+			os.Exit(1)
+		}
+		entities, err := store.GetEntitiesByName(ns, query, *limitFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if *jsonFlag {
+			json.NewEncoder(os.Stdout).Encode(entities)
+		} else {
+			fmt.Printf("Entities matching %q:\n", query)
+			for _, e := range entities {
+				fmt.Printf("  %s [%s] (mentions: %d)\n", e.Name, e.Type, e.MentionCount)
+			}
+			if len(entities) == 0 {
+				fmt.Println("  (none found)")
+			}
+		}
+
+	case "show":
+		name := entitiesFlags.Arg(0)
+		if name == "" {
+			fmt.Fprintln(os.Stderr, "Usage: dualmem entities show <entity-name>")
+			os.Exit(1)
+		}
+		entities, err := store.GetEntitiesByName(ns, name, 1)
+		if err != nil || len(entities) == 0 {
+			fmt.Fprintf(os.Stderr, "Entity %q not found\n", name)
+			os.Exit(1)
+		}
+		ent := entities[0]
+		edges, _ := store.GetEntityEdges(ent.ID)
+		if *jsonFlag {
+			json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+				"entity": ent, "edges": edges,
+			})
+		} else {
+			fmt.Printf("%s [%s] (mentions: %d)\n", ent.Name, ent.Type, ent.MentionCount)
+			if len(edges) > 0 {
+				fmt.Println("Relationships:")
+				for _, edge := range edges {
+					if edge.SourceID == ent.ID {
+						targets, _ := store.GetEntitiesByName(ns, "", 1000)
+						for _, t := range targets {
+							if t.ID == edge.TargetID {
+								fmt.Printf("  → %s %s (strength: %.2f)\n", edge.Relation, t.Name, edge.Strength)
+							}
+						}
+					} else {
+						sources, _ := store.GetEntitiesByName(ns, "", 1000)
+						for _, s := range sources {
+							if s.ID == edge.SourceID {
+								fmt.Printf("  ← %s %s (strength: %.2f)\n", edge.Relation, s.Name, edge.Strength)
+							}
+						}
+					}
+				}
+			}
+		}
+
+	case "top":
+		entities, err := store.GetTopEntities(ns, *limitFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if *jsonFlag {
+			json.NewEncoder(os.Stdout).Encode(entities)
+		} else {
+			fmt.Printf("Top entities (%s):\n", ns)
+			for i, e := range entities {
+				fmt.Printf("  %d. %s [%s] (mentions: %d)\n", i+1, e.Name, e.Type, e.MentionCount)
+			}
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown entities subcommand: %s\nUsage: dualmem entities [stats|search|show|top]\n", subCmd)
+		os.Exit(1)
 	}
 }
 

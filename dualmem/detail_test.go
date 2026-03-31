@@ -153,7 +153,7 @@ func TestDetailSearch_HybridRanking(t *testing.T) {
 
 	// Search for "LC-1663" — the specific memory should rank first
 	queryEmb, _ := embedder.Embed(ctx, "LC-1663", "RETRIEVAL_QUERY")
-	results, err := dp.Search(ctx, queryEmb, userID, 5, "LC-1663")
+	results, err := dp.Search(ctx, queryEmb, userID, 5, "LC-1663", nil)
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestDetailSearch_PureCosineFallback(t *testing.T) {
 
 	// Empty queryText = pure cosine, should not panic
 	queryEmb, _ := embedder.Embed(ctx, "auth", "RETRIEVAL_QUERY")
-	results, err := dp.Search(ctx, queryEmb, userID, 5, "")
+	results, err := dp.Search(ctx, queryEmb, userID, 5, "", nil)
 	if err != nil {
 		t.Fatalf("Search with empty queryText failed: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestDetailSearch_IdentifierPreFilter(t *testing.T) {
 
 	// limit=3, but LC-1663 memory must still appear
 	queryEmb, _ := embedder.Embed(ctx, "LC-1663", "RETRIEVAL_QUERY")
-	results, err := dp.Search(ctx, queryEmb, userID, 3, "LC-1663")
+	results, err := dp.Search(ctx, queryEmb, userID, 3, "LC-1663", nil)
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
@@ -260,6 +260,129 @@ func TestDetailSearch_IdentifierPreFilter(t *testing.T) {
 		texts[i] = r.Text[:l]
 		}
 		t.Errorf("LC-1663 memory not found in results (limit=3, got %d): %v", len(results), texts)
+	}
+}
+
+func TestDetailSearch_GraphBoost(t *testing.T) {
+	store := newTestStore(t)
+	embedder := &mockEmbedder{dim: 64}
+
+	dp := NewDetailPath(store, embedder, 0.5, 100, nil)
+	ctx := context.Background()
+	userID := "test-user-graphboost"
+
+	// Insert several memories — the "auth middleware" memory will get graph-boosted
+	memories := []struct {
+		id   string
+		text string
+	}{
+		{"gb-mem-0", "button component uses React.memo for performance optimization"},
+		{"gb-mem-1", "auth middleware rewrite driven by legal compliance requirements"},
+		{"gb-mem-2", "database migration uses SQLite for zero-setup deployments"},
+		{"gb-mem-3", "navigation uses React Router with lazy loading for code splitting"},
+	}
+
+	for _, m := range memories {
+		emb, _ := embedder.Embed(ctx, m.text, "")
+		dm := &DetailMemory{
+			ID:              m.id,
+			Text:            m.text,
+			ImportanceScore: 0.75,
+			Salience:        0.5,
+			Sector:          "semantic",
+			Type:            "decision",
+		}
+		dp.Insert(ctx, dm, emb, userID)
+	}
+
+	// Query for "database" — without boost, "database migration" would rank
+	// by cosine/keyword. With a boost on "auth middleware" (gb-mem-1),
+	// the auth memory should be promoted above its natural ranking.
+	queryEmb, _ := embedder.Embed(ctx, "database migration", "RETRIEVAL_QUERY")
+
+	// First: search WITHOUT graph boost — database should be first
+	resultsNoBoost, err := dp.Search(ctx, queryEmb, userID, 4, "database migration", nil)
+	if err != nil {
+		t.Fatalf("Search without boost failed: %v", err)
+	}
+	if len(resultsNoBoost) == 0 {
+		t.Fatal("No results returned")
+	}
+
+	// Find auth memory's position without boost
+	authPosNoBoost := -1
+	for i, r := range resultsNoBoost {
+		if r.ID == "gb-mem-1" {
+			authPosNoBoost = i
+			break
+		}
+	}
+
+	// Now search WITH graph boost on the auth memory
+	graphBoost := map[string]float64{
+		"gb-mem-1": 0.5, // large boost to ensure it moves up
+	}
+	resultsWithBoost, err := dp.Search(ctx, queryEmb, userID, 4, "database migration", graphBoost)
+	if err != nil {
+		t.Fatalf("Search with boost failed: %v", err)
+	}
+
+	authPosWithBoost := -1
+	for i, r := range resultsWithBoost {
+		if r.ID == "gb-mem-1" {
+			authPosWithBoost = i
+			break
+		}
+	}
+
+	if authPosWithBoost < 0 {
+		t.Fatal("Auth memory not found in boosted results")
+	}
+
+	// The boosted auth memory should rank higher (lower index) than without boost
+	if authPosNoBoost >= 0 && authPosWithBoost >= authPosNoBoost {
+		t.Errorf("Graph boost did not improve auth memory ranking: pos %d (no boost) vs %d (with boost)",
+			authPosNoBoost, authPosWithBoost)
+	}
+
+	// With a 0.5 boost, auth should be ranked first
+	if resultsWithBoost[0].ID != "gb-mem-1" {
+		t.Errorf("Expected auth memory (gb-mem-1) to rank first with large boost, got %q", resultsWithBoost[0].ID)
+	}
+}
+
+func TestDetailSearch_GraphBoostNilNoEffect(t *testing.T) {
+	// Verify that passing nil graphBoostedIDs doesn't change behavior
+	store := newTestStore(t)
+	embedder := &mockEmbedder{dim: 64}
+
+	dp := NewDetailPath(store, embedder, 0.5, 100, nil)
+	ctx := context.Background()
+	userID := "test-user-nilboost"
+
+	emb, _ := embedder.Embed(ctx, "test memory", "")
+	dm := &DetailMemory{
+		ID:              "nil-mem-0",
+		Text:            "test memory about auth",
+		ImportanceScore: 0.75,
+		Salience:        0.5,
+	}
+	dp.Insert(ctx, dm, emb, userID)
+
+	queryEmb, _ := embedder.Embed(ctx, "auth", "RETRIEVAL_QUERY")
+
+	// Both nil and empty map should produce the same results
+	r1, err := dp.Search(ctx, queryEmb, userID, 5, "auth", nil)
+	if err != nil {
+		t.Fatalf("Search with nil boost failed: %v", err)
+	}
+	r2, err := dp.Search(ctx, queryEmb, userID, 5, "auth", map[string]float64{})
+	if err != nil {
+		t.Fatalf("Search with empty boost failed: %v", err)
+	}
+
+	if len(r1) != len(r2) {
+		t.Errorf("Result count mismatch: nil=%d empty=%d", len(r1), len(r2))
 	}
 }
 

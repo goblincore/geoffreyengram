@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -192,6 +193,11 @@ func (e *Engine) AddWithOptions(ctx context.Context, input MemoryInput, userID s
 			return fmt.Errorf("dualmem: detail insert: %w", err)
 		}
 
+		// Link entities to graph (best-effort)
+		if ns := e.namespace(); ns != "" && len(entities) > 0 {
+			e.linkEntitiesToGraph(dm.ID, ns, entities)
+		}
+
 		// If a memory was demoted, route it to sketch
 		if demoted != "" && demoted != content {
 			e.sketch.IngestRaw(ctx, userID, demoted, sector, input.SessionID, nil)
@@ -212,6 +218,32 @@ func (e *Engine) AddWithOptions(ctx context.Context, input MemoryInput, userID s
 	}
 
 	return nil
+}
+
+// namespace returns the engine's namespace derived from RootDir config.
+func (e *Engine) namespace() string {
+	if e.cfg.RootDir == "" {
+		return ""
+	}
+	return "claude:" + filepath.Base(e.cfg.RootDir)
+}
+
+// linkEntitiesToGraph upserts entities into the graph and links them to a memory.
+func (e *Engine) linkEntitiesToGraph(memoryID, namespace string, entities []Entity) {
+	for _, ent := range entities {
+		if ent.Text == "" {
+			continue
+		}
+		entityID, err := e.store.UpsertEntity(&EntityNode{
+			Name:      ent.Text,
+			Type:      ent.Type,
+			Namespace: namespace,
+		})
+		if err != nil {
+			continue // best-effort: don't fail the add
+		}
+		e.store.LinkMemoryToEntity(memoryID, entityID, namespace)
+	}
 }
 
 // DualSearch performs parallel search across both paths.
@@ -238,7 +270,14 @@ func (e *Engine) DualSearch(ctx context.Context, userID string, query string, op
 	if limit <= 0 {
 		limit = 5
 	}
-	details, err := e.detail.Search(ctx, queryEmb, userID, limit, opts.QueryText)
+
+	// Compute entity graph boost if configured
+	var graphBoostedIDs map[string]float64
+	if opts.GraphBoost != nil && opts.QueryText != "" {
+		graphBoostedIDs = e.computeGraphBoost(opts.GraphBoost, opts.QueryText)
+	}
+
+	details, err := e.detail.Search(ctx, queryEmb, userID, limit, opts.QueryText, graphBoostedIDs)
 	if err != nil {
 		return nil, fmt.Errorf("dualmem: detail search: %w", err)
 	}
@@ -281,6 +320,109 @@ func (e *Engine) DualSearch(ctx context.Context, userID string, query string, op
 	}
 
 	return result, nil
+}
+
+// computeGraphBoost extracts entity candidates from query text, expands them
+// through the entity graph, and returns a map of memory ID → boost weight
+// for memories connected to those entities.
+func (e *Engine) computeGraphBoost(cfg *GraphBoostConfig, queryText string) map[string]float64 {
+	boostWeight := cfg.BoostWeight
+	if boostWeight <= 0 {
+		boostWeight = 0.15
+	}
+	maxHops := cfg.MaxHops
+	if maxHops <= 0 {
+		maxHops = 1
+	}
+	ns := cfg.Namespace
+
+	// Extract entity name candidates from query words.
+	// We use each whitespace-delimited token (lowercased, trimmed of punctuation)
+	// and also try multi-word combinations (bigrams) for compound entity names.
+	candidates := extractEntityCandidates(queryText)
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// Look up matching entity nodes for each candidate
+	var matchedEntityIDs []string
+	seen := make(map[string]bool)
+	for _, name := range candidates {
+		nodes, err := e.store.GetEntitiesByName(ns, name, 5)
+		if err != nil {
+			continue
+		}
+		for _, node := range nodes {
+			if !seen[node.ID] {
+				seen[node.ID] = true
+				matchedEntityIDs = append(matchedEntityIDs, node.ID)
+			}
+		}
+	}
+	if len(matchedEntityIDs) == 0 {
+		return nil
+	}
+
+	// Expand 1 hop (or more) to find neighbor entities
+	allEntityIDs := make([]string, len(matchedEntityIDs))
+	copy(allEntityIDs, matchedEntityIDs)
+	for hop := 0; hop < maxHops; hop++ {
+		neighborIDs, err := e.store.ExpandEntities(ns, allEntityIDs, 10)
+		if err != nil {
+			break
+		}
+		for _, nid := range neighborIDs {
+			if !seen[nid] {
+				seen[nid] = true
+				allEntityIDs = append(allEntityIDs, nid)
+			}
+		}
+	}
+
+	// Collect memory IDs linked to all matched+expanded entities
+	memoryIDs, err := e.store.GetMemoryIDsByEntities(allEntityIDs)
+	if err != nil || len(memoryIDs) == 0 {
+		return nil
+	}
+
+	// Build boost map: direct matches get full boost, expanded get half
+	directEntitySet := make(map[string]bool, len(matchedEntityIDs))
+	for _, eid := range matchedEntityIDs {
+		directEntitySet[eid] = true
+	}
+
+	// For simplicity, all graph-matched memories get the same boost.
+	// A future refinement could differentiate direct vs expanded.
+	result := make(map[string]float64, len(memoryIDs))
+	for _, mid := range memoryIDs {
+		result[mid] = boostWeight
+	}
+	return result
+}
+
+// extractEntityCandidates returns normalized entity name candidates from query text.
+// Produces unigrams (single words >= 2 chars) and bigrams (adjacent word pairs).
+func extractEntityCandidates(query string) []string {
+	words := strings.Fields(strings.ToLower(query))
+	// Filter out very short/common words for entity lookup
+	var filtered []string
+	for _, w := range words {
+		w = strings.Trim(w, ".,;:!?\"'()[]")
+		if len(w) >= 2 {
+			filtered = append(filtered, w)
+		}
+	}
+
+	// Unigrams
+	candidates := make([]string, len(filtered))
+	copy(candidates, filtered)
+
+	// Bigrams (for multi-word entity names like "auth middleware")
+	for i := 0; i+1 < len(filtered); i++ {
+		candidates = append(candidates, filtered[i]+" "+filtered[i+1])
+	}
+
+	return candidates
 }
 
 // AssembleContext is the key differentiator: token-budget-aware context assembly.
@@ -1093,6 +1235,11 @@ func truncateGC(s string, max int) string {
 		return s[:max-3] + "..."
 	}
 	return s
+}
+
+// GetStore returns the underlying store for direct entity graph queries.
+func (e *Engine) GetStore() Store {
+	return e.store
 }
 
 // Close shuts down the engine and all background workers.

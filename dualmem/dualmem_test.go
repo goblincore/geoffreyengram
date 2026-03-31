@@ -1148,3 +1148,147 @@ func TestCheckpointInAssembleContext(t *testing.T) {
 		t.Error("checkpoint source not tracked")
 	}
 }
+
+func TestExtractEntityCandidates(t *testing.T) {
+	tests := []struct {
+		query    string
+		wantAny  []string // at least these should appear
+		minCount int      // minimum number of candidates
+	}{
+		{
+			query:    "auth middleware",
+			wantAny:  []string{"auth", "middleware", "auth middleware"},
+			minCount: 3,
+		},
+		{
+			query:    "SQLite database",
+			wantAny:  []string{"sqlite", "database", "sqlite database"},
+			minCount: 3,
+		},
+		{
+			query:   "a",
+			wantAny: nil, // single-char word filtered out
+		},
+		{
+			query:    "HDC encoder performance",
+			wantAny:  []string{"hdc", "encoder", "hdc encoder", "encoder performance"},
+			minCount: 5,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			got := extractEntityCandidates(tt.query)
+			if tt.minCount > 0 && len(got) < tt.minCount {
+				t.Errorf("extractEntityCandidates(%q) returned %d candidates, want >= %d: %v",
+					tt.query, len(got), tt.minCount, got)
+			}
+			for _, want := range tt.wantAny {
+				found := false
+				for _, g := range got {
+					if g == want {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("extractEntityCandidates(%q) missing %q, got %v", tt.query, want, got)
+				}
+			}
+		})
+	}
+}
+
+func TestDualSearch_WithGraphBoost(t *testing.T) {
+	// End-to-end test: create engine, add entities, and verify graph boost in DualSearch
+	engine := newTestEngine(t)
+	ctx := context.Background()
+	userID := "test-graphboost"
+	ns := "test-ns"
+
+	// Insert memories via engine with high salience to ensure detail routing
+	memories := []MemoryInput{
+		{UserMessage: "button component uses React.memo for performance optimization", Salience: 0.9, Type: "decision"},
+		{UserMessage: "auth middleware rewrite driven by legal compliance requirements", Salience: 0.9, Type: "decision"},
+		{UserMessage: "database migration uses SQLite for zero-setup deployments", Salience: 0.9, Type: "decision"},
+	}
+	for _, m := range memories {
+		if err := engine.AddWithOptions(ctx, m, userID); err != nil {
+			t.Fatalf("AddWithOptions: %v", err)
+		}
+	}
+
+	// Get the detail memories to find their IDs
+	details, _ := engine.store.GetDetailMemories(userID)
+	if len(details) < 3 {
+		t.Fatalf("Expected >= 3 detail memories, got %d", len(details))
+	}
+
+	// Create an entity and link it to the auth memory
+	authMemID := ""
+	for _, d := range details {
+		if strings.Contains(d.Text, "auth middleware") {
+			authMemID = d.ID
+			break
+		}
+	}
+	if authMemID == "" {
+		t.Fatal("Could not find auth middleware memory")
+	}
+
+	// Create entity node
+	entityID, err := engine.store.UpsertEntity(&EntityNode{
+		Name:      "auth",
+		Type:      "concept",
+		Namespace: ns,
+	})
+	if err != nil {
+		t.Fatalf("UpsertEntity: %v", err)
+	}
+
+	// Link memory to entity
+	if err := engine.store.LinkMemoryToEntity(authMemID, entityID, ns); err != nil {
+		t.Fatalf("LinkMemoryToEntity: %v", err)
+	}
+
+	// Search with graph boost — querying for "auth" should boost the auth memory
+	result, err := engine.DualSearch(ctx, userID, "auth system", SearchOpts{
+		Limit:     10,
+		QueryText: "auth system",
+		GraphBoost: &GraphBoostConfig{
+			Namespace:   ns,
+			BoostWeight: 0.3,
+		},
+	})
+	if err != nil {
+		t.Fatalf("DualSearch with graph boost: %v", err)
+	}
+
+	if len(result.DetailMemories) == 0 {
+		t.Fatal("No detail memories returned")
+	}
+
+	// The auth memory should appear in results (graph boost helps ensure this)
+	found := false
+	for _, dm := range result.DetailMemories {
+		if strings.Contains(dm.Text, "auth middleware") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Auth middleware memory not found in graph-boosted results")
+	}
+
+	// Search WITHOUT graph boost for comparison (should still work)
+	resultNoBoost, err := engine.DualSearch(ctx, userID, "auth system", SearchOpts{
+		Limit:     10,
+		QueryText: "auth system",
+	})
+	if err != nil {
+		t.Fatalf("DualSearch without graph boost: %v", err)
+	}
+	if len(resultNoBoost.DetailMemories) == 0 {
+		t.Fatal("No detail memories returned without boost")
+	}
+}

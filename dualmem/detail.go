@@ -145,8 +145,10 @@ func keywordMatchScore(query, text string) float64 {
 // When queryText is non-empty, blends cosine similarity with keyword match scores
 // using AdaptiveAlpha (same pattern as code search). When queryText is empty,
 // falls back to pure cosine similarity.
+// graphBoostedIDs is an optional set of memory IDs that receive an additive boost
+// (from entity graph expansion). Pass nil to disable graph boost.
 // Returns top-M results sorted by hybrid score, plus high-salience guarantees.
-func (dp *DetailPath) Search(ctx context.Context, queryEmbedding []float32, userID string, limit int, queryText string) ([]DetailMemory, error) {
+func (dp *DetailPath) Search(ctx context.Context, queryEmbedding []float32, userID string, limit int, queryText string, graphBoostedIDs map[string]float64) ([]DetailMemory, error) {
 	details, err := dp.store.GetDetailMemories(userID)
 	if err != nil {
 		return nil, err
@@ -201,6 +203,16 @@ func (dp *DetailPath) Search(ctx context.Context, queryEmbedding []float32, user
 				kwNorm = kwScores[i] / maxKW
 			}
 			results[i].hybridScore = alpha*cosNorm + (1.0-alpha)*kwNorm
+		}
+	}
+
+	// Apply entity graph boost: memories linked to query-matching entities
+	// get an additive score boost to surface graph-connected results.
+	if len(graphBoostedIDs) > 0 {
+		for i := range results {
+			if boost, ok := graphBoostedIDs[results[i].ID]; ok {
+				results[i].hybridScore += boost
+			}
 		}
 	}
 
