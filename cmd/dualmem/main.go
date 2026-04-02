@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"crypto/md5"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -208,6 +209,10 @@ func main() {
 		cmdDistill(cfg)
 	case "entities":
 		cmdEntities(cfg)
+	case "file-context":
+		cmdFileContext(cfg)
+	case "file-index":
+		cmdFileIndex(cfg)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -236,6 +241,8 @@ Commands:
   distill     Extract memories from a session transcript
   entities    Query the entity graph (stats, search, show, top)
   docs        List/show/delete/export knowledge docs
+  file-context  Get memories associated with a specific file (warnings, decisions, maps)
+  file-index    Generate file index for Read hook fast-path filtering
   gc          Garbage collect stale/expired memories
 
 Flags (all commands):
@@ -312,6 +319,10 @@ func cmdAdd(cfg CLIConfig) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
+	}
+
+	if len(filesList) > 0 {
+		regenerateFileIndex(cfg, namespace)
 	}
 
 	if *jsonOut {
@@ -427,6 +438,8 @@ func cmdContext(cfg CLIConfig) {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+
+	go regenerateFileIndex(cfg, namespace)
 
 	if *jsonOut {
 		json.NewEncoder(os.Stdout).Encode(block)
@@ -1242,6 +1255,10 @@ func cmdDistill(cfg CLIConfig) {
 		os.Exit(1)
 	}
 
+	if result.Written > 0 {
+		regenerateFileIndex(cfg, ns)
+	}
+
 	if *jsonFlag {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -1386,6 +1403,117 @@ func cmdEntities(cfg CLIConfig) {
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown entities subcommand: %s\nUsage: dualmem entities [stats|search|show|top]\n", subCmd)
 		os.Exit(1)
+	}
+}
+
+// regenerateFileIndex updates the file index in /tmp after memory changes.
+// Best-effort: errors are silently ignored since this is an optimization.
+func regenerateFileIndex(cfg CLIConfig, namespace string) {
+	engine, err := newEngine(cfg)
+	if err != nil {
+		return
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+	files, err := engine.FileIndex(ctx, namespace)
+	if err != nil {
+		return
+	}
+
+	nsHash := fmt.Sprintf("%x", md5.Sum([]byte(namespace)))[:8]
+	indexPath := filepath.Join(os.TempDir(), fmt.Sprintf("dualmem-file-index-%s.json", nsHash))
+
+	indexData := map[string]interface{}{
+		"files":      files,
+		"namespace":  namespace,
+		"updated_at": time.Now().Format(time.RFC3339),
+	}
+
+	data, _ := json.Marshal(indexData)
+	os.WriteFile(indexPath, data, 0644)
+}
+
+func cmdFileContext(cfg CLIConfig) {
+	fs := flag.NewFlagSet("file-context", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	limit := fs.Int("limit", 5, "Max results")
+	fs.Parse(os.Args[2:])
+
+	filename := strings.Join(fs.Args(), " ")
+	if filename == "" {
+		fmt.Fprintln(os.Stderr, "error: filename required")
+		fmt.Fprintln(os.Stderr, "usage: dualmem file-context <filename> [--ns <namespace>] [--json]")
+		os.Exit(1)
+	}
+
+	namespace := resolveNamespace(*ns, cfg)
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+	results, err := engine.FileContext(ctx, namespace, filename, *limit)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(results) == 0 {
+		return // Silent exit — no memories for this file
+	}
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(results)
+		return
+	}
+
+	for _, r := range results {
+		fmt.Printf("[%s] %s (%.2f, %s)\n", r.Type, r.Text, r.Salience, r.CreatedAt.Format("2006-01-02"))
+	}
+}
+
+func cmdFileIndex(cfg CLIConfig) {
+	fs := flag.NewFlagSet("file-index", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	namespace := resolveNamespace(*ns, cfg)
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+	files, err := engine.FileIndex(ctx, namespace)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	nsHash := fmt.Sprintf("%x", md5.Sum([]byte(namespace)))[:8]
+	indexPath := filepath.Join(os.TempDir(), fmt.Sprintf("dualmem-file-index-%s.json", nsHash))
+
+	indexData := map[string]interface{}{
+		"files":      files,
+		"namespace":  namespace,
+		"updated_at": time.Now().Format(time.RFC3339),
+	}
+
+	data, _ := json.Marshal(indexData)
+	os.WriteFile(indexPath, data, 0644)
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(indexData)
+	} else {
+		fmt.Printf("File index: %s (%d files)\n", indexPath, len(files))
 	}
 }
 
