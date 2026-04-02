@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -352,6 +353,97 @@ func (s *SQLiteStore) GetDetailsByType(userID, memType string) ([]detailWithVect
 		results = append(results, d)
 	}
 	return results, rows.Err()
+}
+
+func (s *SQLiteStore) GetDetailsByFiles(userID, filename string, types []string, limit int) ([]detailWithVector, error) {
+	if len(types) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(types))
+	args := make([]interface{}, 0, len(types)+2)
+	args = append(args, userID)
+	for i, t := range types {
+		placeholders[i] = "?"
+		args = append(args, t)
+	}
+	args = append(args, "%"+filename+"%")
+
+	query := fmt.Sprintf(`
+		SELECT id, user_id, text, embedding, importance_score, sector, entities_json, session_id, salience, created_at, last_accessed_at, access_count, type, files_json
+		FROM detail_memories WHERE user_id = ? AND type IN (%s) AND files_json LIKE ?
+		ORDER BY salience DESC LIMIT %d`, strings.Join(placeholders, ","), limit)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []detailWithVector
+	for rows.Next() {
+		var d detailWithVector
+		var vecBlob []byte
+		var entitiesJSON, filesJSON, createdAt, lastAccessed string
+		if err := rows.Scan(&d.ID, &d.UserID, &d.Text, &vecBlob, &d.ImportanceScore,
+			&d.Sector, &entitiesJSON, &d.SessionID, &d.Salience,
+			&createdAt, &lastAccessed, &d.AccessCount, &d.Type, &filesJSON); err != nil {
+			return nil, err
+		}
+		d.Vector = decodeVector(vecBlob)
+		d.Entities = decodeEntities(entitiesJSON)
+		d.Files = decodeStringSlice(filesJSON)
+		d.CreatedAt = parseTime(createdAt)
+		d.LastAccessedAt = parseTime(lastAccessed)
+		results = append(results, d)
+	}
+	return results, rows.Err()
+}
+
+func (s *SQLiteStore) GetFilesWithMemories(userID string, types []string) ([]string, error) {
+	if len(types) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(types))
+	args := make([]interface{}, 0, len(types)+1)
+	args = append(args, userID)
+	for i, t := range types {
+		placeholders[i] = "?"
+		args = append(args, t)
+	}
+
+	query := fmt.Sprintf(`
+		SELECT files_json FROM detail_memories
+		WHERE user_id = ? AND type IN (%s) AND files_json != '[]'`,
+		strings.Join(placeholders, ","))
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	seen := make(map[string]bool)
+	for rows.Next() {
+		var filesJSON string
+		if err := rows.Scan(&filesJSON); err != nil {
+			return nil, err
+		}
+		files := decodeStringSlice(filesJSON)
+		for _, f := range files {
+			base := filepath.Base(f)
+			seen[base] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	result := make([]string, 0, len(seen))
+	for f := range seen {
+		result = append(result, f)
+	}
+	sort.Strings(result)
+	return result, nil
 }
 
 func (s *SQLiteStore) GetDetailCount(userID string) (int, error) {

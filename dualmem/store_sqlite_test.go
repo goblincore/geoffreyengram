@@ -441,3 +441,138 @@ func TestGetUsersNeedingProfileUpdate(t *testing.T) {
 	}
 	t.Logf("Users needing update: %v", users)
 }
+
+func TestGetDetailsByFiles(t *testing.T) {
+	store := newTestStore(t)
+	vec := make([]float32, 768)
+
+	// Insert memories with different types and files
+	memories := []struct {
+		id    string
+		text  string
+		typ   string
+		files []string
+		sal   float64
+	}{
+		{"w1", "Don't change rate limiter", "warning", []string{"rate_limiter.go"}, 0.9},
+		{"d1", "Chose SQLite over Postgres", "decision", []string{"store_sqlite.go", "config.go"}, 0.8},
+		{"g1", "User prefers dark mode", "general", []string{"rate_limiter.go"}, 0.5},
+		{"m1", "Auth flow map", "map", []string{"auth.go", "rate_limiter.go"}, 0.7},
+		{"w2", "Config reload is fragile", "warning", []string{"config.go"}, 0.85},
+	}
+
+	for _, m := range memories {
+		dm := &DetailMemory{
+			ID:       m.id,
+			Text:     m.text,
+			Type:     m.typ,
+			Files:    m.files,
+			Salience: m.sal,
+			Sector:   "semantic",
+		}
+		if err := store.InsertDetail(dm, vec, "user1"); err != nil {
+			t.Fatalf("InsertDetail %s: %v", m.id, err)
+		}
+	}
+
+	// Filter by warning/decision/map types for rate_limiter.go
+	results, err := store.GetDetailsByFiles("user1", "rate_limiter.go", []string{"warning", "decision", "map"}, 10)
+	if err != nil {
+		t.Fatalf("GetDetailsByFiles: %v", err)
+	}
+	// Should get w1 (warning) and m1 (map), NOT g1 (general)
+	if len(results) != 2 {
+		t.Fatalf("got %d results, want 2", len(results))
+	}
+	// Ordered by salience DESC: w1 (0.9), m1 (0.7)
+	if results[0].ID != "w1" {
+		t.Errorf("first result ID = %q, want w1", results[0].ID)
+	}
+	if results[1].ID != "m1" {
+		t.Errorf("second result ID = %q, want m1", results[1].ID)
+	}
+
+	// Filter for config.go
+	results, err = store.GetDetailsByFiles("user1", "config.go", []string{"warning", "decision", "map"}, 10)
+	if err != nil {
+		t.Fatalf("GetDetailsByFiles config.go: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("got %d results for config.go, want 2", len(results))
+	}
+
+	// Nonexistent file returns empty
+	results, err = store.GetDetailsByFiles("user1", "nonexistent.go", []string{"warning", "decision", "map"}, 10)
+	if err != nil {
+		t.Fatalf("GetDetailsByFiles nonexistent: %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("got %d results for nonexistent file, want 0", len(results))
+	}
+
+	// Empty types returns nil
+	results, err = store.GetDetailsByFiles("user1", "rate_limiter.go", nil, 10)
+	if err != nil {
+		t.Fatalf("GetDetailsByFiles empty types: %v", err)
+	}
+	if results != nil {
+		t.Errorf("expected nil for empty types, got %v", results)
+	}
+}
+
+func TestGetFilesWithMemories(t *testing.T) {
+	store := newTestStore(t)
+	vec := make([]float32, 768)
+
+	memories := []struct {
+		id    string
+		typ   string
+		files []string
+	}{
+		{"w1", "warning", []string{"rate_limiter.go"}},
+		{"d1", "decision", []string{"store_sqlite.go", "config.go"}},
+		{"g1", "general", []string{"rate_limiter.go", "utils.go"}},
+		{"m1", "map", []string{"auth.go", "rate_limiter.go"}},
+		{"w2", "warning", []string{"config.go"}}, // duplicate config.go
+	}
+
+	for _, m := range memories {
+		dm := &DetailMemory{
+			ID:     m.id,
+			Text:   "text for " + m.id,
+			Type:   m.typ,
+			Files:  m.files,
+			Sector: "semantic",
+		}
+		if err := store.InsertDetail(dm, vec, "user1"); err != nil {
+			t.Fatalf("InsertDetail %s: %v", m.id, err)
+		}
+	}
+
+	// Get files from warning/decision/map types only
+	files, err := store.GetFilesWithMemories("user1", []string{"warning", "decision", "map"})
+	if err != nil {
+		t.Fatalf("GetFilesWithMemories: %v", err)
+	}
+
+	// Should include: auth.go, config.go, rate_limiter.go, store_sqlite.go
+	// Should NOT include: utils.go (only in general type)
+	expected := []string{"auth.go", "config.go", "rate_limiter.go", "store_sqlite.go"}
+	if len(files) != len(expected) {
+		t.Fatalf("got %v, want %v", files, expected)
+	}
+	for i, f := range files {
+		if f != expected[i] {
+			t.Errorf("files[%d] = %q, want %q", i, f, expected[i])
+		}
+	}
+
+	// Empty types returns nil
+	files, err = store.GetFilesWithMemories("user1", nil)
+	if err != nil {
+		t.Fatalf("GetFilesWithMemories empty types: %v", err)
+	}
+	if files != nil {
+		t.Errorf("expected nil for empty types, got %v", files)
+	}
+}

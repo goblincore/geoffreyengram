@@ -538,6 +538,8 @@ type Store interface {
 
 	// Detail Path — filtered queries
 	GetDetailsByType(userID, memType string) ([]detailWithVector, error)
+	GetDetailsByFiles(userID, filename string, types []string, limit int) ([]detailWithVector, error)
+	GetFilesWithMemories(userID string, types []string) ([]string, error)
 
 	// Detail Path — seed memories (separate cap from organic)
 	GetDetailCountExcludingSeeds(userID string) (int, error)
