@@ -220,6 +220,27 @@ func TestParseDistillResponse_SalienceClamping(t *testing.T) {
 	}
 }
 
+func TestCollectAllFiles(t *testing.T) {
+	facts := []DistilledFact{
+		{Text: "fact 1", Files: []string{"auth.go", "middleware.go"}},
+		{Text: "fact 2", Files: []string{"middleware.go", "jwt.go"}},
+		{Text: "fact 3", Files: nil},
+	}
+	files := collectAllFiles(facts)
+
+	fileSet := make(map[string]bool)
+	for _, f := range files {
+		fileSet[f] = true
+	}
+
+	if len(fileSet) != 3 {
+		t.Fatalf("expected 3 unique files, got %d: %v", len(fileSet), files)
+	}
+	if !fileSet["auth.go"] || !fileSet["middleware.go"] || !fileSet["jwt.go"] {
+		t.Errorf("missing expected files: %v", files)
+	}
+}
+
 func TestFormatDistillPrompt(t *testing.T) {
 	transcript := "User: Add dark mode\n\nAssistant: I'll implement that now."
 	maxFacts := 15

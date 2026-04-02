@@ -164,8 +164,24 @@ func (e *Engine) Distill(ctx context.Context, opts DistillOpts, userID string) (
 		}
 	}
 
-	result.Written = written
 	result.Skipped = skipped
+
+	// Step 4b: Persist session summary as a continuity memory
+	if extraction.SessionSummary != "" && !opts.DryRun {
+		summaryFiles := collectAllFiles(extraction.Facts)
+		summaryErr := e.AddWithOptions(ctx, MemoryInput{
+			UserMessage: extraction.SessionSummary,
+			Type:        "continuity",
+			Salience:    0.75,
+			Files:       summaryFiles,
+			SessionID:   sessionID,
+		}, userID)
+		if summaryErr == nil {
+			written++
+		}
+	}
+
+	result.Written = written
 
 	// Step 5: Mark as distilled
 	if sessionID != "" {
@@ -451,6 +467,21 @@ func parseDistillResponse(response string) (*distillExtractionResponse, error) {
 	}
 
 	return &result, nil
+}
+
+// collectAllFiles returns the union of all file paths from distilled facts.
+func collectAllFiles(facts []DistilledFact) []string {
+	seen := make(map[string]bool)
+	var result []string
+	for _, f := range facts {
+		for _, path := range f.Files {
+			if !seen[path] {
+				seen[path] = true
+				result = append(result, path)
+			}
+		}
+	}
+	return result
 }
 
 // isNearDuplicate checks if content is too similar to existing memories.
