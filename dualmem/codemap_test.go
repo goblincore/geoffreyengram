@@ -448,6 +448,11 @@ func TestScanCodebase_FiltersNonCodeDirs(t *testing.T) {
 		}
 	}
 
+	// Python virtual environment — should be excluded
+	venvDir := filepath.Join(tmpDir, ".venv", "lib", "python3.9", "site-packages", "numpy", "polynomial")
+	os.MkdirAll(venvDir, 0755)
+	writeFile(t, venvDir, "polynomial.py", `class Polynomial:\n    pass`)
+
 	// Non-interesting "other" dir with files but no code — should be excluded
 	miscDir := filepath.Join(tmpDir, "random-stuff")
 	os.MkdirAll(miscDir, 0755)
@@ -461,7 +466,7 @@ func TestScanCodebase_FiltersNonCodeDirs(t *testing.T) {
 	}
 
 	for _, m := range cm.Zoom2 {
-		for _, bad := range []string{"images", "icons", "fonts", "sass", ".github", ".changeset", ".superpowers", "random-stuff"} {
+		for _, bad := range []string{"images", "icons", "fonts", "sass", ".github", ".changeset", ".superpowers", ".venv", "random-stuff"} {
 			if strings.Contains(m.Path, bad) {
 				t.Errorf("should not include %q in codemap, got module %q", bad, m.Path)
 			}
@@ -1241,6 +1246,56 @@ func TestSeedStoreMethods(t *testing.T) {
 	}
 	if totalCount != 1 {
 		t.Errorf("expected 1 total after seed delete, got %d", totalCount)
+	}
+}
+
+func TestScanCodebase_DeepNesting(t *testing.T) {
+	// Simulate a monorepo with deeply nested TSX files (depth 8)
+	// e.g. apps/app/src/pages/feature/sub/components/Widget/Widget.tsx
+	tmpDir := t.TempDir()
+	deepPath := filepath.Join(tmpDir, "apps", "app", "src", "pages", "feature", "sub", "components", "Widget")
+	os.MkdirAll(deepPath, 0755)
+	writeFile(t, deepPath, "Widget.tsx", `
+import React from 'react';
+export interface WidgetProps { title: string }
+export const Widget: React.FC<WidgetProps> = ({ title }) => <div>{title}</div>;
+export default Widget;
+`)
+
+	cm, err := ScanCodebase(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range cm.Zoom2 {
+		if strings.Contains(m.Path, "Widget") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("deeply nested Widget.tsx (depth 8) not found in Zoom2 modules; got %d modules", len(cm.Zoom2))
+		for _, m := range cm.Zoom2 {
+			t.Logf("  module: %s", m.Path)
+		}
+	}
+}
+
+func TestScanCodebase_ManyDirs(t *testing.T) {
+	// Create 300 directories with TS files — should all be indexed
+	tmpDir := t.TempDir()
+	for i := 0; i < 300; i++ {
+		dir := filepath.Join(tmpDir, "src", fmt.Sprintf("mod%03d", i))
+		os.MkdirAll(dir, 0755)
+		writeFile(t, dir, "index.ts", fmt.Sprintf(`export const value%d = %d;`, i, i))
+	}
+
+	cm, err := ScanCodebase(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cm.Zoom2) < 300 {
+		t.Errorf("expected >=300 modules, got %d (maxDirs cap too low?)", len(cm.Zoom2))
 	}
 }
 

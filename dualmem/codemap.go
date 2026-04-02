@@ -46,6 +46,9 @@ var skipDirs = map[string]bool{
 	".turbo": true, ".cache": true, ".parcel-cache": true, ".output": true,
 	".nuxt": true, ".svelte-kit": true, "tmp": true, "temp": true, "logs": true,
 	".vexp": true,
+	// Python virtual environments & tool caches
+	".venv": true, "venv": true, ".virtualenv": true, "env": true, ".env": true,
+	".tox": true, ".mypy_cache": true, ".pytest_cache": true, ".ruff_cache": true,
 }
 
 // skipExactNames filters out non-code content directories by exact base name.
@@ -73,8 +76,8 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 		allFiles []string
 	}
 	dirs := make(map[string]*dirInfo)
-	maxDepth := 5
-	maxDirs := 200
+	maxDepth := 12
+	maxDirs := 1000
 
 	filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
