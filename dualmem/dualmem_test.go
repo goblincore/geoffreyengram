@@ -1367,3 +1367,107 @@ func TestAssembleContextWith_GraphBoost(t *testing.T) {
 		t.Fatal("Nil context block with DisableGraphBoost")
 	}
 }
+
+func TestFileContext(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Add a warning with files
+	engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "Don't touch rateLimiter cleanup hot path",
+		SectorHint:  "warning",
+		Salience:    0.9,
+		Type:        "warning",
+		Files:       []string{"rate_limiter.go"},
+	}, "user1")
+
+	// Add a decision with files
+	engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "Chose SQLite over Postgres for zero-setup",
+		SectorHint:  "decision",
+		Salience:    0.8,
+		Type:        "decision",
+		Files:       []string{"store_sqlite.go", "config.go"},
+	}, "user1")
+
+	// Add a general memory (should NOT appear in FileContext results)
+	engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "Rate limiter handles 10k req/s",
+		SectorHint:  "semantic",
+		Salience:    0.8,
+		Type:        "",
+		Files:       []string{"rate_limiter.go"},
+	}, "user1")
+
+	// Query for rate_limiter.go — should return only the warning
+	results, err := engine.FileContext(ctx, "user1", "rate_limiter.go", 0)
+	if err != nil {
+		t.Fatalf("FileContext: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("Expected 1 result for rate_limiter.go, got %d", len(results))
+	}
+	if results[0].Type != "warning" {
+		t.Errorf("Expected type=warning, got %q", results[0].Type)
+	}
+
+	// Query for nonexistent file — should return 0
+	results, err = engine.FileContext(ctx, "user1", "nonexistent.go", 0)
+	if err != nil {
+		t.Fatalf("FileContext nonexistent: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("Expected 0 results for nonexistent.go, got %d", len(results))
+	}
+}
+
+func TestFileIndex(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Add warning with files
+	engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "Don't modify foo internals",
+		SectorHint:  "warning",
+		Salience:    0.9,
+		Type:        "warning",
+		Files:       []string{"foo.go"},
+	}, "user1")
+
+	// Add decision with files
+	engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "Use bar and baz together",
+		SectorHint:  "decision",
+		Salience:    0.8,
+		Type:        "decision",
+		Files:       []string{"bar.go", "baz.go"},
+	}, "user1")
+
+	// Add general memory (should NOT appear in FileIndex)
+	engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "Qux handles background jobs",
+		SectorHint:  "semantic",
+		Salience:    0.8,
+		Type:        "",
+		Files:       []string{"qux.go"},
+	}, "user1")
+
+	files, err := engine.FileIndex(ctx, "user1")
+	if err != nil {
+		t.Fatalf("FileIndex: %v", err)
+	}
+
+	fileSet := make(map[string]bool)
+	for _, f := range files {
+		fileSet[f] = true
+	}
+
+	for _, want := range []string{"foo.go", "bar.go", "baz.go"} {
+		if !fileSet[want] {
+			t.Errorf("FileIndex missing %s, got %v", want, files)
+		}
+	}
+	if fileSet["qux.go"] {
+		t.Errorf("FileIndex should NOT contain qux.go (general type), got %v", files)
+	}
+}

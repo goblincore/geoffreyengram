@@ -322,6 +322,71 @@ func (e *Engine) DualSearch(ctx context.Context, userID string, query string, op
 	return result, nil
 }
 
+// FileContext returns detail memories associated with a specific file.
+// Only returns high-signal types (warning, decision, map). No embedding needed.
+func (e *Engine) FileContext(ctx context.Context, userID string, filename string, limit int) ([]DetailMemory, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	basename := filepath.Base(filename)
+	if limit <= 0 {
+		limit = 5
+	}
+
+	rows, err := e.store.GetDetailsByFiles(userID, basename, []string{"warning", "decision", "map"}, limit)
+	if err != nil {
+		return nil, fmt.Errorf("dualmem: file context: %w", err)
+	}
+
+	result := make([]DetailMemory, len(rows))
+	for i, r := range rows {
+		result[i] = DetailMemory{
+			ID:              r.ID,
+			Text:            r.Text,
+			ImportanceScore: r.ImportanceScore,
+			Sector:          r.Sector,
+			Entities:        r.Entities,
+			Type:            r.Type,
+			Files:           r.Files,
+			Salience:        r.Salience,
+			SessionID:       r.SessionID,
+			CreatedAt:       r.CreatedAt,
+		}
+	}
+	return result, nil
+}
+
+// FileIndex returns all basenames that have associated high-signal memories.
+// Used to generate the file index for the Read hook fast-path.
+func (e *Engine) FileIndex(ctx context.Context, userID string) ([]string, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	files, err := e.store.GetFilesWithMemories(userID, []string{"warning", "decision", "map"})
+	if err != nil {
+		return nil, fmt.Errorf("dualmem: file index: %w", err)
+	}
+
+	seen := make(map[string]bool, len(files))
+	for _, f := range files {
+		seen[f] = true
+	}
+
+	// Also include files from knowledge docs
+	docs, _ := e.store.GetKnowledgeDocs(userID)
+	for _, doc := range docs {
+		for _, f := range doc.Files {
+			base := filepath.Base(f)
+			if !seen[base] {
+				seen[base] = true
+				files = append(files, base)
+			}
+		}
+	}
+
+	return files, nil
+}
+
 // computeGraphBoost extracts entity candidates from query text, expands them
 // through the entity graph, and returns a map of memory ID → boost weight
 // for memories connected to those entities.
