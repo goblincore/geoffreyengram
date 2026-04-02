@@ -356,6 +356,9 @@ func (s *SQLiteStore) GetDetailsByType(userID, memType string) ([]detailWithVect
 }
 
 func (s *SQLiteStore) GetDetailsByFiles(userID, filename string, types []string, limit int) ([]detailWithVector, error) {
+	if limit <= 0 {
+		limit = 5
+	}
 	if len(types) == 0 {
 		return nil, nil
 	}
@@ -366,11 +369,13 @@ func (s *SQLiteStore) GetDetailsByFiles(userID, filename string, types []string,
 		placeholders[i] = "?"
 		args = append(args, t)
 	}
-	args = append(args, "%"+filename+"%")
+	escaped := strings.NewReplacer("%", "\\%", "_", "\\_").Replace(filename)
+	pattern := "%" + escaped + "%"
+	args = append(args, pattern)
 
 	query := fmt.Sprintf(`
 		SELECT id, user_id, text, embedding, importance_score, sector, entities_json, session_id, salience, created_at, last_accessed_at, access_count, type, files_json
-		FROM detail_memories WHERE user_id = ? AND type IN (%s) AND files_json LIKE ?
+		FROM detail_memories WHERE user_id = ? AND type IN (%s) AND files_json LIKE ? ESCAPE '\'
 		ORDER BY salience DESC LIMIT %d`, strings.Join(placeholders, ","), limit)
 
 	rows, err := s.db.Query(query, args...)
