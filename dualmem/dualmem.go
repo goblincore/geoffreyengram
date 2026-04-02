@@ -373,7 +373,10 @@ func (e *Engine) FileIndex(ctx context.Context, userID string) ([]string, error)
 	}
 
 	// Also include files from knowledge docs
-	docs, _ := e.store.GetKnowledgeDocs(userID)
+	docs, err := e.store.GetKnowledgeDocs(userID)
+	if err != nil {
+		return nil, fmt.Errorf("dualmem: file index (knowledge docs): %w", err)
+	}
 	for _, doc := range docs {
 		for _, f := range doc.Files {
 			base := filepath.Base(f)

@@ -1373,42 +1373,66 @@ func TestFileContext(t *testing.T) {
 	ctx := context.Background()
 
 	// Add a warning with files
-	engine.AddWithOptions(ctx, MemoryInput{
+	if err := engine.AddWithOptions(ctx, MemoryInput{
 		UserMessage: "Don't touch rateLimiter cleanup hot path",
 		SectorHint:  "warning",
 		Salience:    0.9,
 		Type:        "warning",
 		Files:       []string{"rate_limiter.go"},
-	}, "user1")
+	}, "user1"); err != nil {
+		t.Fatalf("AddWithOptions warning: %v", err)
+	}
 
 	// Add a decision with files
-	engine.AddWithOptions(ctx, MemoryInput{
+	if err := engine.AddWithOptions(ctx, MemoryInput{
 		UserMessage: "Chose SQLite over Postgres for zero-setup",
 		SectorHint:  "decision",
 		Salience:    0.8,
 		Type:        "decision",
 		Files:       []string{"store_sqlite.go", "config.go"},
-	}, "user1")
+	}, "user1"); err != nil {
+		t.Fatalf("AddWithOptions decision: %v", err)
+	}
+
+	// Add a map memory with files (should appear in FileContext results)
+	if err := engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "Rate limiter flow: api.go → rate_limiter.go",
+		SectorHint:  "procedural",
+		Salience:    0.7,
+		Type:        "map",
+		Files:       []string{"rate_limiter.go"},
+	}, "user1"); err != nil {
+		t.Fatalf("AddWithOptions map: %v", err)
+	}
 
 	// Add a general memory (should NOT appear in FileContext results)
-	engine.AddWithOptions(ctx, MemoryInput{
+	if err := engine.AddWithOptions(ctx, MemoryInput{
 		UserMessage: "Rate limiter handles 10k req/s",
 		SectorHint:  "semantic",
 		Salience:    0.8,
 		Type:        "",
 		Files:       []string{"rate_limiter.go"},
-	}, "user1")
+	}, "user1"); err != nil {
+		t.Fatalf("AddWithOptions general: %v", err)
+	}
 
-	// Query for rate_limiter.go — should return only the warning
+	// Query for rate_limiter.go — should return warning + map (2 results)
 	results, err := engine.FileContext(ctx, "user1", "rate_limiter.go", 0)
 	if err != nil {
 		t.Fatalf("FileContext: %v", err)
 	}
-	if len(results) != 1 {
-		t.Fatalf("Expected 1 result for rate_limiter.go, got %d", len(results))
+	if len(results) != 2 {
+		t.Fatalf("Expected 2 results for rate_limiter.go, got %d", len(results))
 	}
-	if results[0].Type != "warning" {
-		t.Errorf("Expected type=warning, got %q", results[0].Type)
+	typeSet := make(map[string]bool)
+	for _, r := range results {
+		typeSet[r.Type] = true
+	}
+	if !typeSet["warning"] {
+		t.Errorf("Expected a warning result, got types: %v", typeSet)
+	}
+	if !typeSet["map"] {
+		t.Errorf("Expected a map result, got types: %v", typeSet)
 	}
 
 	// Query for nonexistent file — should return 0
@@ -1426,31 +1450,37 @@ func TestFileIndex(t *testing.T) {
 	ctx := context.Background()
 
 	// Add warning with files
-	engine.AddWithOptions(ctx, MemoryInput{
+	if err := engine.AddWithOptions(ctx, MemoryInput{
 		UserMessage: "Don't modify foo internals",
 		SectorHint:  "warning",
 		Salience:    0.9,
 		Type:        "warning",
 		Files:       []string{"foo.go"},
-	}, "user1")
+	}, "user1"); err != nil {
+		t.Fatalf("AddWithOptions warning: %v", err)
+	}
 
 	// Add decision with files
-	engine.AddWithOptions(ctx, MemoryInput{
+	if err := engine.AddWithOptions(ctx, MemoryInput{
 		UserMessage: "Use bar and baz together",
 		SectorHint:  "decision",
 		Salience:    0.8,
 		Type:        "decision",
 		Files:       []string{"bar.go", "baz.go"},
-	}, "user1")
+	}, "user1"); err != nil {
+		t.Fatalf("AddWithOptions decision: %v", err)
+	}
 
 	// Add general memory (should NOT appear in FileIndex)
-	engine.AddWithOptions(ctx, MemoryInput{
+	if err := engine.AddWithOptions(ctx, MemoryInput{
 		UserMessage: "Qux handles background jobs",
 		SectorHint:  "semantic",
 		Salience:    0.8,
 		Type:        "",
 		Files:       []string{"qux.go"},
-	}, "user1")
+	}, "user1"); err != nil {
+		t.Fatalf("AddWithOptions general: %v", err)
+	}
 
 	files, err := engine.FileIndex(ctx, "user1")
 	if err != nil {
