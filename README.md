@@ -153,6 +153,33 @@ dualmem file-context rate_limiter.go   # memories for a specific file
 dualmem file-index                     # regenerate file index for hook
 ```
 
+### Context quality ratings & adaptive re-ranker
+
+Measure whether assembled context is actually useful. The consuming agent (e.g., Claude) rates each context item at two moments — prospectively when context loads, and retrospectively at session end.
+
+```bash
+dualmem context "auth refactor" --budget 3000
+# → outputs context + snapshot ID (e.g. snap_17752...)
+
+# Agent rates items after reading context (early) or at session end (late):
+dualmem rate --snapshot snap_17752... --phase early --ratings '{"mem_abc": 2, "mem_def": 0}'
+dualmem rate --snapshot snap_17752... --phase late  --ratings '{"mem_abc": 2, "mem_ghi": 1}'
+
+# Session-level rating:
+dualmem rate --session --score 4 --explanation "warnings were helpful, codemap too broad"
+
+# View accumulated stats:
+dualmem stats
+```
+
+Once 50+ ratings accumulate, train a learned re-ranker that improves retrieval ordering:
+
+```bash
+dualmem train   # fits logistic regression from ratings → stores weights
+```
+
+The re-ranker adjusts candidate memory ordering during `AssembleContext` using 10 features (cosine similarity, importance, salience, memory type, file overlap, age, etc.). Late-phase ratings are weighted 2x over early-phase in training. Safety rails: coefficients bounded to [-5, 5], re-ranker only adjusts ordering (never filters), `--no-rerank` flag for comparison.
+
 ### Seed — cold-start context
 
 Pre-seed context for new projects by analyzing codebase structure:
@@ -200,6 +227,12 @@ dualmem cochange <file> [--min-strength N] [--decay]
 # Knowledge docs
 dualmem docs [list|show|delete|export]
 dualmem synthesize [--dry-run] [--force] [--all]
+
+# Context quality
+dualmem rate --snapshot <id> --phase late --ratings '{"mem_id": 2}'
+dualmem rate --session --score 4 --explanation "..."
+dualmem train                                           # fit re-ranker from ratings
+dualmem stats                                           # quality metrics + trends
 
 # Maintenance
 dualmem promote --id <id> [--type warning --salience 0.9]
@@ -265,7 +298,9 @@ geoffreyengram/
 │   ├── diff.go            # Git-based structural diffs, stale memory detection
 │   ├── knowledge.go       # Knowledge doc synthesis
 │   ├── distill.go         # Session transcript distillation
-│   ├── store_sqlite.go    # SQLite backend (migrations v1-v8)
+│   ├── rating.go          # Context quality ratings, snapshots, training rows
+│   ├── reranker.go        # Learned re-ranker (logistic regression from ratings)
+│   ├── store_sqlite.go    # SQLite backend (migrations v1-v9)
 │   └── project.go         # Random projection, cosine similarity
 ├── cmd/
 │   ├── dualmem/           # CLI tool
@@ -273,12 +308,13 @@ geoffreyengram/
 │   └── engram-mcp/        # Engram MCP server
 └── examples/
     ├── chat/              # Local REPL with Ollama
-    └── comparison/        # Memory mode comparison + LLM judge
+    ├── comparison/        # Memory mode comparison + LLM judge
+    └── dualmem-bench/     # LLM-as-judge benchmark (9 tasks: QA, codegen, triage)
 ```
 
 ## Status
 
-Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 250+ tests passing.
+Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 260+ tests passing.
 
 ## License
 
