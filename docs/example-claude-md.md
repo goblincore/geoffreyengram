@@ -55,6 +55,8 @@ For simple notes, `--type continuity` still works:
 ~/go/bin/dualmem add --text "Auth flow: routes.go → middleware.go → jwt.go" --files "routes.go,middleware.go,jwt.go" --sector procedural
 ```
 
+**IMPORTANT: Always include `--files` when saving memories about code.** File associations feed the co-change graph — DualMem automatically learns which files change together across sessions. This means future context assembly will surface related files you didn't explicitly ask for.
+
 **Dead ends** — where something is NOT, to avoid re-searching:
 ```
 ~/go/bin/dualmem add --text "Auth logic is NOT in middleware/ — it's in the RPC handlers" --sector semantic
@@ -85,6 +87,13 @@ Find relevant modules by natural language query — uses hyperdimensional comput
 ~/go/bin/dualmem search-code "<natural language query>"
 ```
 Returns modules ranked by structural similarity (path, symbols, imports, identifiers). Useful for fuzzy queries where you don't know what to grep for ("where does auth happen?", "what handles codebase scanning?"). For exact symbol lookup, grep is still better.
+
+### Co-change graph
+Before modifying a file, check what else might need to change:
+```
+~/go/bin/dualmem cochange auth.go
+```
+This shows files that historically co-change with `auth.go`, ranked by strength. The co-change graph builds automatically from `--files` associations — no explicit action needed.
 
 ---
 

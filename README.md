@@ -1,52 +1,238 @@
 # geoffreyengram
 
-Cognitive memory engine for AI agents. Two systems in one Go library:
-
-- **Engram** — character memory for NPCs, companions, chatbots. Cognitive sectors, natural decay, entity graphs, reflective synthesis, multimodal embedding.
-- **DualMem** — agent memory for coding tools (Claude Code, Cursor, etc.). Dual-path routing, hierarchical compression, token-budget-aware retrieval.
+Cognitive memory engine for AI agents. Gives coding tools (Claude Code, Cursor, etc.) cross-session memory with token-budget-aware retrieval, learned file relationships, and structural code search.
 
 Pure Go, SQLite (no CGO), single binary.
 
-## Quickstart — DualMem CLI
+## Architecture
+
+```mermaid
+graph TB
+    subgraph Input
+        Add["dualmem add"] --> Router{"Importance<br/>Router"}
+        Distill["dualmem distill"] --> Router
+    end
+
+    subgraph "Storage Layers"
+        Router -->|"score ≥ 0.65"| Detail["🔬 Detail Path<br/>Full fidelity · Top-100<br/>768d embeddings"]
+        Router -->|"score < 0.65"| Sketch["📐 Sketch Path<br/>Episodes → Arcs → Profile<br/>768d → 128d → 64d"]
+    end
+
+    subgraph "Structural Layers"
+        Detail -->|"file associations"| CoChange["🔗 Co-Change Graph<br/>File pairs · strength · concepts"]
+        Detail -->|"entity extraction"| EntityGraph["🕸️ Entity Graph<br/>Nodes · typed edges · memory links"]
+        CodeMap["📦 HDC Codemap<br/>2048d per module · no API calls"]
+    end
+
+    subgraph "Synthesis"
+        Detail --> KDocs["📄 Knowledge Docs<br/>Clustered concept summaries"]
+    end
+
+    subgraph "Context Assembly"
+        Query["Query + Token Budget"] --> Context["AssembleContext"]
+        Detail --> Context
+        Sketch --> Context
+        CodeMap --> Context
+        CoChange -->|"boost neighbors"| Context
+        EntityGraph -->|"structure-aware boost"| Context
+        KDocs --> Context
+        Context --> Output["Token-budgeted<br/>context block"]
+    end
+```
+
+**Dual-path routing**: Memories are scored at insert time (no LLM calls). High-importance memories (decisions, warnings) stay at full fidelity in the Detail Path. Everything else is compressed into a hierarchical sketch: episodes (30-day retention) → narrative arcs (90-day, 128d projection) → user profile (64d projection).
+
+**Context assembly**: Given a query and token budget, `AssembleContext` packs the most relevant context in priority order: structural diff → checkpoints → code map (HDC-ranked, co-change-expanded) → knowledge docs → profile → arcs → detail memories → episodes. Task-aware: auto-detects intent (debug/continue/feature/explore) and adjusts memory type weights.
+
+## Quickstart
 
 ```bash
-# Install
 go install github.com/goblincore/geoffreyengram/cmd/dualmem@latest
 export GEMINI_API_KEY=your-key  # add to ~/.zshrc
 
-# Save memories
 dualmem add --text "Auth uses JWT, not sessions" --type decision
-dualmem add --text "Don't touch rateLimiter cleanup()" --type warning --salience 0.9
-
-# Search memories
+dualmem add --text "Don't touch rateLimiter cleanup()" --type warning --salience 0.9 --files "rate_limiter.go"
 dualmem search "authentication" --limit 5
-
-# Code search (HDC-powered, no API calls, instant)
-dualmem search-code "authentication middleware"
-
-# Session context (code map + diff + memories, token-budgeted)
-dualmem context "fix the auth bug" --budget 3000
-
-# Codebase structure
-dualmem map
+dualmem search-code "authentication middleware"       # HDC-powered, no API calls
+dualmem context "fix the auth bug" --budget 3000      # token-budgeted context
 ```
 
 For Claude Code integration, copy [`docs/example-claude-md.md`](docs/example-claude-md.md) into your `~/.claude/CLAUDE.md`.
 
-## Engram — Character Memory
+## Features
 
-For NPCs and companion AI that should remember players across sessions.
+### Memory types and routing
 
-Memories are classified into 4 cognitive sectors and scored by a composite formula that weights similarity, salience, recency, and entity associations:
+Memories are classified into sectors and scored by importance. Typed memories (`--type warning`, `--type decision`) are biased toward the Detail Path:
 
-| Sector | Stores | Decay |
-|--------|--------|-------|
-| **Episodic** | Events, visits, encounters | Slow |
-| **Semantic** | Facts, preferences, knowledge | Moderate |
-| **Procedural** | Skills, routines, how-tos | Moderate |
-| **Emotional** | Feelings, reactions, mood | Slow |
+```bash
+dualmem add --type warning --text "Don't touch rateLimiter cleanup()" --files "rate_limiter.go" --salience 0.9
+dualmem add --type decision --text "Rejected Postgres, chose SQLite" --files "store_sqlite.go"
+dualmem add --type continuity --text "Done: JWT. Remaining: refresh tokens" --files "auth.go,jwt.go"
+```
 
-Reflective memories (patterns, meta-observations) are not classified from input — they're synthesized by the `Reflect()` method between conversations.
+Context assembly prioritizes: warnings first, then decisions, then general memories. Intent-aware weighting adjusts per query — debugging boosts warnings (2x), resuming boosts continuity (2x).
+
+### Checkpoints — structured session handoffs
+
+```bash
+dualmem checkpoint --task "auth refactor" --status in_progress \
+  --files "auth.go,middleware.go" \
+  --done "JWT validation,middleware" --remaining "refresh tokens,logout"
+dualmem checkpoint --list
+```
+
+### Co-change graph — learned file relationships
+
+When a memory mentions multiple files, DualMem automatically builds co-change edges between all file pairs. Over time, this creates a learned map of which files change together.
+
+```bash
+dualmem cochange auth.go                      # files that co-change with auth.go
+dualmem cochange auth.go --min-strength 2.0   # only strong relationships
+dualmem cochange --decay                      # apply 90-day half-life decay
+```
+
+**Context assembly integration**: File hints from checkpoints and memories are expanded through co-change neighbors. Working on `auth.go`? The codemap will also highlight `middleware.go` and `jwt.go` if they historically co-change — even if their code structure (HDC vectors) is dissimilar.
+
+Edges include concept labels (entity names that explain *why* files co-change), populated automatically during `dualmem synthesize`.
+
+### Entity graph — structure-aware retrieval
+
+Entities extracted from memories are stored in a knowledge graph. Search applies **structure-aware** graph traversal — direct entity matches get full boost, expanded neighbors get reduced boost scaled by edge type:
+
+| Edge type | Multiplier | Meaning |
+|-----------|-----------|---------|
+| `depends_on` | 1.0 | Strong structural relationship |
+| `implements` | 0.9 | Strong behavioral relationship |
+| `modifies` | 0.8 | Moderate change relationship |
+| `uses` | 0.7 | Moderate usage relationship |
+| `relates` | 0.5 | Weak association |
+
+```bash
+dualmem entities                          # graph stats
+dualmem entities search "SQLite"          # find entities by name
+dualmem entities show "store_sqlite.go"   # entity + relationships
+```
+
+### Knowledge documents — synthesized context
+
+`dualmem synthesize` clusters related memories and produces coherent concept documents. These appear in context output before individual memories, saving tokens:
+
+```bash
+dualmem synthesize --dry-run   # preview clusters
+dualmem synthesize             # synthesize knowledge docs
+dualmem docs                   # list docs
+dualmem docs show <topic>      # read a doc
+```
+
+### HDC-powered code search
+
+Find relevant code modules by natural language — uses hyperdimensional computing (2048-dim vectors from path, symbols, language, identifiers), no API calls, ~55us/query:
+
+```bash
+dualmem search-code "authentication middleware"
+dualmem search-code "database connection pooling" --limit 5
+```
+
+### Session distillation — ambient memory capture
+
+Automatically extract memories from session transcripts at session end:
+
+```bash
+dualmem distill              # auto-detect latest Claude Code session
+dualmem distill --dry-run    # preview extracted facts
+dualmem distill --auto       # idempotent (for hooks)
+```
+
+### File-scoped recall
+
+Inject relevant memories when Claude opens a file — warnings about `rate_limiter.go` surface even if the session task is "refactor error handling":
+
+```bash
+dualmem file-context rate_limiter.go   # memories for a specific file
+dualmem file-index                     # regenerate file index for hook
+```
+
+### Seed — cold-start context
+
+Pre-seed context for new projects by analyzing codebase structure:
+
+```bash
+dualmem seed --dry-run   # preview clusters
+dualmem seed             # generate seed memories
+```
+
+## CLI Reference
+
+```bash
+# Memory
+dualmem add --text "..." --type decision --salience 0.9 --files "a.go,b.go"
+dualmem search "query" --limit 5
+dualmem search "LC-1663"                                # identifier pre-filter
+
+# Code search (HDC-powered, no API calls)
+dualmem search-code "authentication middleware"
+
+# Context assembly
+dualmem context "auth system" --budget 3000
+dualmem context "fix the bug" --intent debug
+
+# Session management
+dualmem checkpoint --task "auth refactor" --status in_progress --files "auth.go" --done "JWT" --remaining "refresh,logout"
+dualmem checkpoint --list
+dualmem map                                             # codebase structure map
+dualmem diff                                            # changes since last session
+
+# Seed and distillation
+dualmem seed [--dry-run] [--force]
+dualmem distill [--dry-run] [--auto] [--file path]
+
+# File-scoped recall
+dualmem file-context rate_limiter.go
+dualmem file-index
+
+# Entity graph
+dualmem entities [stats|search|show|top]
+
+# Co-change graph
+dualmem cochange <file> [--min-strength N] [--decay]
+
+# Knowledge docs
+dualmem docs [list|show|delete|export]
+dualmem synthesize [--dry-run] [--force] [--all]
+
+# Maintenance
+dualmem promote --id <id> [--type warning --salience 0.9]
+dualmem demote --id <id>
+dualmem gc [--dry-run --verbose]
+dualmem profile
+dualmem status
+```
+
+## Claude Code Integration
+
+Copy [`docs/example-claude-md.md`](docs/example-claude-md.md) into your `~/.claude/CLAUDE.md`. It teaches the agent to:
+- Load context at session start (`dualmem context`)
+- Save decisions, warnings, and checkpoints during work
+- Search memory before exploring (`dualmem search`)
+- Use HDC code search (`dualmem search-code`)
+- Always include `--files` to build the co-change graph
+
+**Hooks** (add to `.claude/settings.json`):
+- **Stop hook**: `dualmem distill --auto` — ambient memory capture at session end
+- **PreToolUse Read hook**: `dualmem file-context` — inject file-scoped memories when Claude opens a file
+
+See [`docs/example-claude-md.md`](docs/example-claude-md.md) for the full template.
+
+## Engram — Character Memory for NPCs
+
+Also includes **Engram**, a character memory system for NPCs, companions, and chatbots. Memories are classified into cognitive sectors (episodic, semantic, procedural, emotional) with natural exponential decay, entity graph associations, and reflective synthesis.
+
+- Composite scoring: `(similarity*0.6 + salience*0.2 + recency*0.1 + linkWeight*0.1) * sectorWeight`
+- Waypoint entity graph: mentioning a song surfaces the person you heard it with
+- Multimodal: text, images, audio in same vector space (Gemini Embedding 2)
+- Reflective synthesis: `Reflect()` creates meta-memories between conversations
+- MCP server: `engram-mcp` with tools for remember, recall, reflect
 
 ```go
 import engram "github.com/goblincore/geoffreyengram"
@@ -61,635 +247,30 @@ mem.Add("I just got back from Berlin!", "That's amazing!", "lily:player123")
 results := mem.Search("travel", "lily:player123", 5, nil)
 ```
 
-### Key features
-
-- **Composite scoring**: `(similarity*0.6 + salience*0.2 + recency*0.1 + linkWeight*0.1) * sectorWeight`
-- **Waypoint entity graph**: one-hop associative expansion — mentioning a song surfaces the person you heard it with
-- **Exponential decay**: per-sector rates, configurable. Important memories persist, small talk fades
-- **High-salience guarantee**: top-2 important memories always surface regardless of query similarity
-- **Reflective synthesis**: between conversations, an LLM synthesizes patterns ("they always mention music when stressed")
-- **Multimodal memory**: embed images and audio via Gemini Embedding 2 — NPCs can "hear" music or "see" photos
-- **Embedding-based classification**: zero extra API calls per `Add()` — reuses the already-computed embedding (96% accuracy on 50-example benchmark)
-- **Time simulation**: `SimulateTimePassing(userID, days)` artificially ages memories and runs decay — test what a character remembers after months pass
-- **Session threading**: `SessionID` / `ParentID` for conversation chains
-- **Per-character personality**: sector weights let an emotional character prioritize feelings over facts
-
-### Multimodal
-
-NPCs can form memories from images and audio via Gemini Embedding 2 — text, images, and audio share the same vector space:
-
-```go
-mem, _ := engram.Init(engram.Config{
-    DBPath:            "./data/memory.db",
-    EmbeddingProvider: engram.NewGeminiEmbedder2(apiKey, 768),
-})
-
-// NPC hears music playing
-mem.AddWithOptions(engram.AddOptions{
-    UserID:      "lily:player123",
-    Media:       &engram.MediaContent{MimeType: "audio/mpeg", Data: trackBytes},
-    Description: "Electronic music playing in the club",
-})
-
-// Text search finds the audio memory
-results := mem.Search("what music was playing?", "lily:player123", 5, nil)
-```
-
-### Providers
-
-All pluggable via interfaces:
-
-| Provider | Type | Notes |
-|----------|------|-------|
-| `GeminiEmbedder` | Text embedding | gemini-embedding-001 |
-| `GeminiEmbedder2` | Multimodal embedding | text/image/audio, gemini-embedding-2 |
-| `OpenAIEmbedder` | Text embedding | text-embedding-3-small/large |
-| `OllamaEmbedder` | Text embedding | Local, no API key |
-| `EmbeddingClassifier` | Sector classification | Default. Zero API calls, 96% accuracy |
-| `HeuristicClassifier` | Sector classification | Keyword-based, no API needed |
-| `GeminiReflector` | Reflective synthesis | Explicit opt-in |
-
-### MCP Server
-
-```bash
-go install github.com/goblincore/geoffreyengram/cmd/engram-mcp
-ENGRAM_DB_PATH=./data/engram.db GEMINI_API_KEY=key engram-mcp
-```
-
-Tools: `remember`, `recall`, `reflect`, `get_session`, `inspect`. Supports multimodal via `media_base64` + `mime_type` fields.
-
-## DualMem — Agent Memory
-
-For coding agents and multi-agent systems where context window is the bottleneck.
-
-Routes memories by importance: critical ones stay at full fidelity, everything else gets compressed into a hierarchical sketch.
-
-Sectors are configurable via `SectorConfig`. Ships with two presets:
-
-| Preset | Sectors | Detail Bias | Use Case |
-|--------|---------|-------------|----------|
-| `CodingSectors()` | decision, warning, map, continuity | decision, warning | Coding agents (default) |
-| `NPCSectors()` | episodic, semantic, procedural, emotional | semantic, procedural | NPC/character memory |
-
-```
-Incoming Memory → Importance Scorer
-                       │
-                score ≥ 0.65           score < 0.65
-                       │                     │
-             ┌─────────▼───────┐   ┌─────────▼──────────┐
-             │   Detail Path   │   │    Sketch Path      │
-             │   (Top-K=100)   │   │   (Hierarchical)    │
-             │                 │   │                     │
-             │  Full text      │   │  L1: Episodes       │
-             │  Full 768d vec  │   │  L2: Narrative Arcs  │
-             │  Full metadata  │   │  L3: User Profile    │
-             └─────────────────┘   └─────────────────────┘
-```
-
-**AssembleContext** is the key method — given a token budget, it assembles a structured context block in priority order: structural diff → checkpoints (loaded early for file hints) → code map (memory-informed ranking) → profile → arcs → detail memories → episodes. Returns exactly what fits. **Task-aware**: auto-detects intent from the query (debug, continue, feature, explore) and adjusts memory type weights accordingly — debugging boosts warnings, resuming boosts continuity.
-
-```go
-import "github.com/goblincore/geoffreyengram/dualmem"
-
-engine, _ := dualmem.New(dualmem.Config{
-    SQLitePath:        "./data/dualmem.db",
-    EmbeddingProvider: dualmem.NewGeminiEmbedder(apiKey, 768),
-})
-defer engine.Close()
-
-engine.Add("chose SQLite for zero-setup", "Good call", "claude:my-project")
-
-block, _ := engine.AssembleContext(ctx, "claude:my-project", "database choice", 500)
-// block.Text — pre-formatted, fits within budget
-// block.Sources — traces each fragment to detail/episode/arc/profile
-```
-
-### CLI
-
-```bash
-go install github.com/goblincore/geoffreyengram/cmd/dualmem@latest
-export GEMINI_API_KEY=your-key
-
-# Memory
-dualmem add --text "Auth uses JWT, not sessions" --type decision --salience 0.9
-dualmem search "database" --limit 5          # semantic: cosine+keyword hybrid
-dualmem search "LC-1663"                     # identifier: returns only LC-1663 memories
-
-# Code search (HDC-powered — no API calls, instant)
-dualmem search-code "authentication middleware"
-dualmem search-code "database connection pooling" --limit 5 --json
-
-# Context assembly
-dualmem context "auth system" --budget 3000             # memories + code map + diff
-dualmem context "fix the bug" --intent debug            # explicit intent override
-
-# Session management
-dualmem checkpoint --task "auth refactor" --status in_progress --files "auth.go" --done "JWT" --remaining "refresh,logout"
-dualmem checkpoint --list                               # view active checkpoints
-dualmem map                                             # codebase structure map
-dualmem diff                                            # changes since last session
-
-# Seed — pre-seed context for new projects
-dualmem seed --dry-run                                  # preview clusters without calling LLM
-dualmem seed                                            # generate seed memories from codebase structure
-dualmem seed --force                                    # regenerate (deletes existing seeds first)
-
-# Session distillation — ambient capture from transcripts
-dualmem distill                                         # auto-detect latest CC session
-dualmem distill --dry-run                               # preview extracted facts without writing
-dualmem distill --file session.jsonl                    # explicit transcript file
-dualmem distill --auto                                  # idempotent (used by hook)
-
-# File-scoped recall — proactive memory at point of use
-dualmem file-context rate_limiter.go                    # memories for a specific file
-dualmem file-context store_sqlite.go --json             # JSON output
-dualmem file-index                                      # regenerate file index for hook
-
-# Entity graph
-dualmem entities                                        # graph stats (nodes, edges, links)
-dualmem entities search "SQLite"                        # find entities by name
-dualmem entities show "store_sqlite.go"                 # show entity + relationships
-dualmem entities top --limit 20                         # most-mentioned entities
-
-# Co-change graph — learned file relationships
-dualmem cochange auth.go                                # files that co-change with auth.go
-dualmem cochange auth.go --min-strength 2.0             # only strong relationships
-dualmem cochange --decay                                # apply 90-day half-life decay
-
-# Maintenance
-dualmem promote --id <memory-id>                        # move sketch → detail
-dualmem promote --all --type warning                    # batch re-evaluate all raw sketch entries
-dualmem demote --id <memory-id>                         # move detail → sketch
-dualmem gc                                              # clean stale/expired/superseded memories
-dualmem gc --dry-run --verbose                          # preview what gc would do
-dualmem profile
-dualmem status
-```
-
-### Claude Code integration
-
-Copy [`docs/example-claude-md.md`](docs/example-claude-md.md) into your `~/.claude/CLAUDE.md` to give Claude Code cross-session memory. It teaches the agent to automatically load context at session start, save decisions/warnings/checkpoints during work, search memory before exploring, and use `search-code` for HDC-powered file discovery.
-
-### File-scoped recall — proactive memory at point of use
-
-Memories are normally loaded at session start based on the initial task query. But a warning about `rate_limiter.go` won't surface if the session task is "refactor error handling." File-scoped recall solves this by injecting relevant memories when Claude opens a file.
-
-```bash
-# Query memories associated with a specific file (no LLM, pure SQLite)
-dualmem file-context rate_limiter.go
-
-# Generate the file index (list of files that have associated memories)
-dualmem file-index
-```
-
-**How it works:** A Claude Code `PreToolUse` hook fires before every `Read` tool call. It checks a pre-built file index (JSON in `$TMPDIR`) — if the file has associated warnings, decisions, or maps, it queries `dualmem file-context` and injects the results as context. For files with no memories (~95% of reads), the hook exits immediately with zero overhead.
-
-**Setup:** Add the Read hook to `~/.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Read",
-        "hooks": [{
-          "type": "command",
-          "command": "~/.claude/hooks/dualmem-file-recall.sh",
-          "timeout": 5
-        }]
-      }
-    ]
-  }
-}
-```
-
-The file index auto-regenerates after `dualmem add --files`, `dualmem distill`, and `dualmem context` (session start). Only high-signal memory types are indexed: warnings, decisions, and maps.
-
-### Memory types
-
-Typed memories are prioritized in context assembly — warnings first, then decisions:
-
-```bash
-dualmem add --type warning --text "Don't touch rateLimiter cleanup()" --files "rate_limiter.go" --salience 0.9
-dualmem add --type decision --text "Rejected Postgres, chose SQLite" --files "store_sqlite.go"
-dualmem add --type continuity --text "Done: JWT. Remaining: refresh tokens" --files "auth.go,jwt.go"
-```
-
-### Task-aware context
-
-`AssembleContext` auto-detects the task intent from the query string and adjusts how memory types are ranked. This means "fix the bug" prioritizes warnings and decisions, while "resume work" prioritizes continuity entries and file maps.
-
-| Intent | Trigger keywords | Boosts | Suppresses |
-|--------|-----------------|--------|------------|
-| `debug` | fix, bug, error, crash, fail, debug | warnings (2x), decisions (1.5x) | continuity (0.5x) |
-| `continue` | continue, resume, pick up, session context, what next, next step, status, progress, todo | continuity (2x), maps (1.5x) | general (0.8x) |
-| `feature` | add, implement, create, build | decisions (1.5x), maps (1.5x) | continuity (0.8x) |
-| `explore` | where is, how does, explain, architecture | maps (2x), general (1.2x) | continuity (0.5x) |
-
-Override with `--intent`:
-
-```bash
-dualmem context "auth system" --intent debug    # force debug weighting
-dualmem context "auth system" --intent continue  # force continue weighting
-```
-
-### Checkpoints
-
-Structured session handoffs that replace free-form continuity prose. Checkpoints have typed fields for task, status, files, completed/remaining steps, and blockers. They auto-supersede — saving a new checkpoint for the same task replaces the old one.
-
-```bash
-# Save a checkpoint
-dualmem checkpoint --task "auth refactor" --status in_progress \
-  --files "auth.go,middleware.go" \
-  --done "JWT validation,middleware setup" \
-  --remaining "refresh tokens,logout endpoint" \
-  --decision "JWT vs session tokens"
-
-# List active checkpoints
-dualmem checkpoint --list
-
-# Checkpoint with blocker
-dualmem checkpoint --task "auth refactor" --status blocked --blocked "waiting for API spec"
-```
-
-In `dualmem context` output, checkpoints render as compact structured blocks at the top:
-
-```
-[Checkpoint: auth refactor] status=in_progress
-  Files: auth.go, middleware.go
-  Pending decision: JWT vs session tokens
-  Done: JWT validation; middleware setup
-  Remaining: refresh tokens; logout endpoint
-```
-
-### Seed — cold-start context
-
-New projects have no useful memories until organically built over sessions. `dualmem seed` solves this by analyzing your codebase structure and generating semantic relationship memories from day one.
-
-It builds an import graph from the existing code map, detects module clusters via connected components, and uses Gemini Flash to generate 2-3 sentence descriptions per cluster. These are stored as `type='seed'` memories with their own capacity cap (30), separate from the organic memory cap (100).
-
-```bash
-# Preview clusters without calling LLM or writing to DB
-dualmem seed --dry-run
-
-# Generate seed memories
-dualmem seed
-
-# Regenerate (deletes existing seeds first)
-dualmem seed --force
-
-# JSON output
-dualmem seed --json
-```
-
-Seed memories rank below organic memories (salience 0.5 vs 0.7 default) and are weighted by intent — `explore` boosts seeds (1.2×), `debug` suppresses them (0.6×). They appear in `context` output with a `[Codebase Context — cluster-name]` label. As you build organic memories, seeds naturally fall in priority.
-
-### Session distillation — ambient memory capture
-
-DualMem can automatically extract memories from session transcripts — no explicit `dualmem add` calls needed. At session end, `dualmem distill` reads the transcript, uses Gemini to extract facts, decisions, warnings, and entity relationships, then writes them via the normal import pipeline with dedup and importance scoring.
-
-```bash
-# Auto-detect latest Claude Code session and distill it
-dualmem distill
-
-# Preview what would be extracted (no writes)
-dualmem distill --dry-run
-
-# From an explicit transcript file (other harnesses)
-dualmem distill --file /path/to/session.jsonl
-
-# From stdin (pipe from any harness)
-cat transcript.jsonl | dualmem distill --stdin
-```
-
-**Automatic via Claude Code hook** — add to your project's `.claude/settings.json` to distill at session end without thinking about it:
-
-```json
-{
-  "hooks": {
-    "Stop": [{
-      "matcher": "",
-      "command": "~/go/bin/dualmem distill --auto --ns \"claude:$(basename $(pwd))\" 2>/dev/null || true"
-    }]
-  }
-}
-```
-
-The `--auto` flag is idempotent — it tracks the last distilled session ID and skips if already done. Distillation extracts up to 20 facts per session, skips near-duplicates (cosine > 0.90), floors salience at 0.60, persists a session summary as a continuity memory (salience 0.75, with the union of all extracted file paths), and auto-triggers `synthesize` when 3+ new memories are added.
-
-Extracted entity triples (e.g., `store_sqlite.go → implements → Store interface`) are written into the entity graph, enabling cross-memory traversal in future searches.
-
-### Entity graph — traversal-based retrieval
-
-Entities extracted from memories are stored in a lightweight knowledge graph (3 SQLite tables: `entity_nodes`, `entity_edges`, `memory_entity_links`). This enables graph-boosted retrieval: memories linked to entities matching the query get an additive score boost, surfacing related context even when vocabulary differs.
-
-```bash
-# View entity graph stats for current project
-dualmem entities
-
-# Find entities by name
-dualmem entities search "SQLite"
-
-# Show an entity's relationships (1-hop)
-dualmem entities show "store_sqlite.go"
-
-# List most-mentioned entities
-dualmem entities top --limit 20
-```
-
-Entity nodes are upserted at every `add` (via the heuristic extractor) and during `distill` (via LLM-extracted triples with richer relationship types). Edges record source → relation → target with running-average strength across repeated observations.
-
-Graph boost is **automatic** in `dualmem context` — every context assembly call applies **structure-aware** entity graph traversal. Direct entity matches get a full boost (0.20), while expanded neighbors get a reduced boost scaled by edge type and strength:
-
-| Edge type | Multiplier | Meaning |
-|-----------|-----------|---------|
-| `depends_on` | 1.0 | Strong structural relationship |
-| `implements` | 0.9 | Strong behavioral relationship |
-| `modifies` | 0.8 | Moderate change relationship |
-| `uses` | 0.7 | Moderate usage relationship |
-| `relates` | 0.5 | Weak association |
-
-Disable with `--no-graph` for debugging:
-
-```bash
-dualmem context "auth system" --budget 3000              # graph boost auto-enabled
-dualmem context "auth system" --budget 3000 --no-graph   # graph boost disabled
-```
-
-For programmatic use, set `DisableGraphBoost: true` in `ContextOpts`.
-
-### Co-change graph — learned file relationships
-
-When a memory mentions multiple files (e.g., `--files "auth.go,middleware.go,jwt.go"`), DualMem automatically builds co-change edges between all file pairs. Over time, this creates a learned structural map of which files change together and how strongly.
-
-```bash
-# Query co-change neighbors for a file
-dualmem cochange auth.go
-
-# With minimum strength filter
-dualmem cochange auth.go --min-strength 2.0
-
-# JSON output for scripting
-dualmem cochange auth.go --json
-
-# Run co-change decay (90-day half-life)
-dualmem cochange --decay
-```
-
-Co-change edges accumulate automatically — every `dualmem add --files "a.go,b.go"` strengthens the edge between those files. Edges include:
-- **Strength**: weighted by co-occurrence count with exponential time decay
-- **Memory IDs**: which memories evidenced the relationship
-- **Concept labels**: entity names that explain *why* files co-change (populated by `EnrichCoChangeWithEntities`)
-
-**Context assembly integration**: When assembling context, file hints from checkpoints and memories are expanded through co-change neighbors. If you're working on `auth.go`, the codemap will also highlight `middleware.go` and `jwt.go` if they historically co-change — even if their code structure (HDC vectors) is dissimilar.
-
-### Knowledge documents — synthesized context
-
-Over time, individual memories accumulate — "auth uses JWT", "refresh tokens in Redis", "rate limiter skips nil check". Instead of serving these as a flat list, `dualmem synthesize` clusters related memories and uses an LLM to produce coherent, concept-oriented documents — like auto-generated AGENTS.md sections.
-
-```bash
-# Preview what would be synthesized
-dualmem synthesize --dry-run
-
-# Synthesize knowledge docs from memory clusters
-dualmem synthesize
-
-# Re-synthesize all docs regardless of staleness
-dualmem synthesize --force
-
-# Synthesize across all namespaces (for cron jobs)
-dualmem synthesize --all
-```
-
-Clustering works in three phases: (1) match to existing docs by file overlap, (2) group remaining memories by shared files (≥2), (3) group by semantic similarity (cosine ≥0.55). Groups of ≥3 memories become docs. Synthesis uses the existing `TextGenerator` interface (Gemini Flash).
-
-Knowledge docs appear in `context` output as `[Knowledge: topic]` sections before individual memories. Memories already covered by a doc are suppressed to avoid duplication:
-
-```
-[Knowledge: auth-middleware]
-The auth system uses JWT tokens validated in middleware.go. Refresh tokens
-are stored in Redis with a 7-day TTL. Warning: the rate limiter cleanup()
-skips nil check intentionally for the hot path.
-  Files: auth.go, middleware.go
-```
-
-Docs are re-synthesized when source memories are updated. Browse and manage docs:
-
-```bash
-dualmem docs                      # list all docs with topic, tokens, source count
-dualmem docs show <topic>         # read a specific doc
-dualmem docs delete <topic>       # remove a doc (source memories preserved)
-dualmem docs export [--dir path]  # export as markdown files
-```
-
-### Promote / demote
-
-Memories can be moved between paths. Promote moves a sketch memory (raw entry or episode) to the Detail Path; demote does the reverse.
-
-```bash
-# Single promote — by memory ID (from search results)
-dualmem promote --id abc123
-
-# Promote with type/salience override
-dualmem promote --id abc123 --type warning --salience 0.9
-
-# Batch re-evaluate — re-scores all raw sketch entries with current scorer
-# Useful for recovering old memories saved before the type-boost fix
-dualmem promote --all --type warning
-
-# Demote — move from detail to sketch
-dualmem demote --id abc123
-```
-
-Also available via API: `POST /v1/memory/promote` with `{"user_id", "memory_id", "type", "salience"}`.
-
-### Garbage collection
-
-Over time, continuity entries accumulate — you add "remaining: auth, payments" and later "remaining: payments" but the old one is still there saying auth isn't done. `dualmem gc` cleans these up automatically.
-
-```bash
-# Preview what would be cleaned
-dualmem gc --dry-run --verbose
-
-# Run cleanup
-dualmem gc
-```
-
-GC runs five cleanup strategies in order:
-
-1. **Expire episodes** — delete episodes past the retention window (default 30 days)
-2. **Expire arcs** — delete arcs past the retention window (default 90 days)
-3. **Git-stale demotion** — demote detail memories whose associated files changed since last session (warnings exempt)
-4. **Continuity supersession** — when multiple continuity entries cover the same topic (cosine similarity > 0.75), keep the newest, demote the rest
-5. **Access-cold demotion** — demote detail memories not accessed in 30+ days with importance < 0.8 (warnings exempt)
-
-Supersession also runs automatically on `add --type continuity` — adding a new continuity entry auto-demotes older similar ones, so stale status entries don't accumulate.
-
-Additionally, `AssembleContext` applies access-recency weighting: memories not accessed in 60+ days are ranked lower within their priority tier. Warnings are always exempt from recency decay.
-
-### Session context
-
-`dualmem context` assembles a token-budget-aware context block for the start of each coding session. It combines four things:
-
-**Code map** — multi-resolution structural summary of the codebase. Zoom-1 is a one-line system overview, zoom-2 is per-module with key types, entry points, imports, and private identifiers. Generated via Go AST parsing and tree-sitter (TypeScript, Python, Rust). Query-aware ranking uses **hyperdimensional computing (HDC)** — deterministic 2048-dim vectors encoded from structural signals, no API calls needed. HDC encodes 4 layers per module: path (0.25), symbols (0.40), language (0.15), and content (0.20). The content layer combines identifiers at full weight with imports at 0.8× weight. **File-level splitting**: TypeScript files with ≥5 exports or ≥300 lines get their own module entry instead of being merged into directory-level modules — this prevents signal dilution in large monorepos where utility files (e.g., `boosts.ts` with `useCreateBoost`, `sendBoostCredential`) would otherwise be drowned by unrelated files in the same directory. **Memory-informed ranking**: checkpoints and recent memories provide file hints that boost relevant modules — if your checkpoint mentions `jwt.go` and `auth.go`, modules containing those paths rank higher even with a generic query. A minimum similarity threshold (0.05) filters modules with near-zero relevance, preventing budget waste on noise. Aggressively filters noise directories (assets, icons, sass, .github, .changeset, etc.). Auto-regenerates when git HEAD changes.
-
-**Structural diff** — git-based delta since the last session. Shows added/modified/deleted files with elapsed time and branch info. Handles branch switches, rebases, and force-pushes gracefully.
-
-**Structured checkpoints** — typed session handoffs (task, status, files, steps, blockers) render as compact structured blocks before other memories. Auto-supersede by task name.
-
-**Stale memory detection** — memories with `--files` associations are cross-referenced against the diff. If a referenced file was modified or deleted, the memory is tagged `[STALE?]` in context output.
-
-```
-$ dualmem context "session context" --budget 3000
-
-[Changes Since Last Session]
-Since last session (9h ago, branch main):
-  Modified (4): cmd/dualmem/main.go, dualmem/dualmem.go, dualmem/store_sqlite.go, dualmem/types.go
-  Added (4): dualmem/codemap.go, dualmem/codemap_test.go, dualmem/diff.go, dualmem/diff_test.go
-
-[Codebase Map]
-Go project. packages: ., dualmem. binaries: cmd/dualmem, cmd/engram-mcp, examples/comparison.
-
-  ./ — Go package engram
-    Types: struct EmbeddingClassifier, struct LLMClassifier, struct Store, ...
-    Entry: NewEmbeddingClassifier(), NewLLMClassifier(), CompositeScore(), ...
-  dualmem/ — Go package dualmem
-    Types: struct StructuralDiff, struct SketchPath, struct SQLiteStore, ...
-    Entry: ComputeStructuralDiff(), DetectStaleMemories(), NewSketchPath(), ...
-
-[⚠ Warning — warning (importance: 0.83)]
-Don't touch: rateLimiter cleanup() skips nil check intentionally
-
-[Decision — decision (importance: 0.70)] [STALE? file changed since last session]
-Chose SQLite for zero-setup
-  Files: store_sqlite.go
-```
-
-The `map` and `diff` commands are also available standalone:
-
-```bash
-dualmem map    # print codebase structure without memories
-dualmem diff   # print changes since last session
-```
-
-### HDC-powered code map ranking
-
-Code map modules are ranked by relevance using **hyperdimensional computing** (HDC) — inspired by [Glyphh Code](https://github.com/glyphh-ai/glyphh-code). No API calls, no embedding model, fully deterministic.
-
-Each module is encoded as a 2048-dimensional vector from 4 structural layers:
-
-| Layer | Weight | Source | Encoding |
-|-------|--------|--------|----------|
-| **Path** | 0.25 | Directory path tokens | Position-encoded (rotation) |
-| **Symbols** | 0.40 | Exported types + entry points | Bag-of-words |
-| **Language** | 0.15 | Programming language tag | Single basis vector |
-| **Content** | 0.20 | Identifiers (1.0) + imports (0.8) | Weighted bag-of-words |
-
-Vectors are built from FNV-64a seeded basis vectors (+1/-1 binary), combined via HDC bundle (element-wise sum) and normalized to unit length. Queries are encoded the same way — ranking is cosine similarity.
-
-**Why HDC?** Semantic embedding APIs (Gemini, OpenAI) cost money and add latency. HDC is free, instant (~600µs/module), deterministic, and works offline. The content layer — unexported identifiers and import paths — gives HDC enough signal to rank correctly: modules importing `database/sql` rank high for "database" queries, modules with `validateToken` identifiers rank high for "auth" queries.
-
-**Memory-informed ranking**: For generic session-start queries like "session context", pure HDC similarity has no discriminative power — all modules score equally low. To solve this, `AssembleContext` loads checkpoints and memories before rendering the codemap and extracts file hints. Modules whose paths match these hints get a +0.3 similarity boost. A minimum threshold (0.05) filters modules with near-zero relevance, preventing budget waste. In a 16-module simulated repo, this reduces noise from 16 modules to just the 3-4 relevant ones.
-
-**Boost-only mode for vague queries**: When intent is `continue` (e.g. "what next", "status", "what should I work on") and checkpoint/memory file hints exist, the codemap switches to boost-only mode — it shows *only* modules referenced in active checkpoints and recent memories, suppressing everything else entirely. This prevents the HDC vectors from producing arbitrary rankings on semantically empty queries, and focuses the codemap token budget on the files you were actually working on.
-
-**Benchmark results:**
-
-| | With content layer | Without |
-|---|---|---|
-| Top-1 accuracy | 100% (5/5) | 40% (2/5) |
-| Avg NDCG | 0.956 | — |
-| Encode speed | ~600µs/module | ~160µs/module |
-
-| Codemap relevance | Without memory boost | With memory boost |
-|---|---|---|
-| Relevant modules surfaced | 0-1/3 | 3/3 |
-| Noise modules filtered | 1/16 | 12/16 |
-
-### MCP Server (optional) — `dualmem-mcp`
-
-An MCP server is also available for environments that prefer MCP tools over CLI. The CLI is recommended for Claude Code (lower token overhead), but the MCP server works with any MCP client.
-
-```bash
-go install github.com/goblincore/geoffreyengram/cmd/dualmem-mcp@latest
-claude mcp add dualmem -s user -- dualmem-mcp
-```
-
-Tools: `search_codebase`, `get_codemap`, `search_memory`, `get_context`, `save_memory`. Auto-detects project root from cwd.
-
-**Search benchmark** (HDC search via CLI or MCP, 10-module repo, 6 queries):
-
-| | HDC Search | Grep Chain |
-|---|---|---|
-| Accuracy | **100%** (6/6) | 67% (4/6) |
-| Tool calls | **6** (1/query) | 36 (6/query) |
-| Query latency | ~55µs | — |
-
-### Tree-sitter parsing
-
-Code map extraction uses [gotreesitter](https://github.com/odvcencio/gotreesitter) (pure Go, no CGO) for TypeScript, Python, and Rust. Go parsing uses `go/ast` (stdlib). Each language has tree-sitter S-expression queries for types, entry points, imports, and private identifiers.
-
-| Language | Parser | Types | Entry Points | Imports | Identifiers |
-|----------|--------|-------|-------------|---------|-------------|
-| Go | `go/ast` | exported structs/interfaces | exported functions | import paths | unexported types/functions |
-| TypeScript | tree-sitter | exported classes/interfaces/types | exported functions/consts | import sources | non-exported declarations |
-| Python | tree-sitter | classes | public functions | import/from targets | `_underscore` functions |
-| Rust | tree-sitter | structs/enums/traits | `pub fn` | `use` paths | non-pub functions |
-
-## Engram vs DualMem
-
-Both systems share embedding providers and SQLite storage, but they're designed for different problems:
-
-| | **Engram** | **DualMem** |
-|---|---|---|
-| **Designed for** | NPCs, companions, chatbots | Coding agents, multi-agent systems |
-| **Search scoring** | Composite: similarity + salience + recency + entity links | Two-phase hybrid (Detail Path): exact identifier matches (e.g. "LC-1663", "PR-42") are pre-filtered and returned exclusively; semantic queries use cosine+keyword blending via `AdaptiveAlpha` |
-| **Memory decay** | Exponential decay — old small talk fades naturally | Garbage collection (expiry, supersession, access-cold demotion) + hierarchical compression |
-| **Entity graph** | Waypoints — mentioning a song surfaces the person you heard it with | Entities stored as metadata only, no associative expansion |
-| **Reflective synthesis** | `Reflect()` creates meta-memories ("they always mention music when stressed") | Not available |
-| **Multimodal** | Text, images, audio in same vector space (Gemini Embedding 2) | Text only |
-| **Compression** | None — every memory at full fidelity | Episodes → arcs → profiles (hierarchical sketch) |
-| **Context assembly** | Manual (you format search results) | `AssembleContext()` with token budget, code maps, stale detection |
-| **Capacity** | Unbounded (decay handles relevance) | Detail: fixed top-K. Sketch: compressed hierarchy |
-| **Best for** | Characters that should feel alive — remembering, forgetting, making associations | Agents that need structured context within tight token budgets |
-
 ## Project Structure
 
 ```
 geoffreyengram/
-├── engram.go              # Core engine (Init, Search, Add, Reflect, SimulateTimePassing)
-├── types.go               # Modality, Sector, Memory, Config, scoring types
-├── providers.go           # EmbeddingProvider (Embed, Dimension, ModelName), MultimodalEmbeddingProvider, SectorClassifier
-├── store.go               # SQLite persistence, versioned migrations (v1-v3)
-├── scoring.go             # Composite scoring, cosine similarity, decay
-├── classify_embedding.go  # EmbeddingClassifier (default, 96% accuracy)
-├── classify.go            # HeuristicClassifier (keyword fallback)
-├── embed_gemini2.go       # GeminiEmbedder2 (multimodal: text/image/audio)
-├── embed.go               # GeminiEmbedder (text-only, v1)
-├── embed_openai.go        # OpenAIEmbedder
-├── embed_ollama.go        # OllamaEmbedder
-├── waypoints.go           # Entity graph, associative expansion
-├── reflect.go             # ReflectionProvider, Reflect method
-├── dualmem/               # Dual-path agent memory engine
-│   ├── dualmem.go         # Engine (New, Add, DualSearch, AssembleContext, SaveCheckpoint, GarbageCollect, PromoteToDetail)
-│   ├── types.go           # Config, SectorConfig, Intent, Checkpoint, GCOptions, Store interface
+├── engram.go              # Engram core (Init, Search, Add, Reflect)
+├── dualmem/               # DualMem agent memory engine
+│   ├── dualmem.go         # Engine (Add, DualSearch, AssembleContext, Synthesize)
+│   ├── types.go           # Config, Store interface, Intent, all data types
 │   ├── detail.go          # Detail Path (importance scoring, capacity management)
 │   ├── sketch.go          # Sketch Path (episodes, arcs, profiles)
 │   ├── pipeline.go        # Background compression workers
-│   ├── codemap.go         # Codebase scanner (Go AST), HDC encode/search wrappers
-│   ├── parse_treesitter.go # Tree-sitter parsing for TypeScript, Python, Rust
-│   ├── hdc.go             # Hyperdimensional computing encoder (2048-dim, 4-layer)
+│   ├── cochange.go        # Co-change graph (builder, query, entity enrichment)
+│   ├── codemap.go         # Codebase scanner, HDC search, co-change-aware ranking
+│   ├── hdc.go             # HDC encoder (2048-dim, 4-layer)
+│   ├── parse_treesitter.go # Tree-sitter (TypeScript, Python, Rust)
 │   ├── diff.go            # Git-based structural diffs, stale memory detection
-│   ├── classify_embedding.go  # EmbeddingClassifier (ported from engram)
-│   ├── summarize_gemini.go    # GeminiSummarizer (episode/arc/profile compression)
-│   ├── knowledge.go       # Knowledge doc synthesis (clustering, prompts, staleness)
-│   ├── distill.go         # Session transcript distillation (fact extraction, summary persistence)
-│   ├── store_sqlite.go    # SQLite backend (migrations v1-v6)
+│   ├── knowledge.go       # Knowledge doc synthesis
+│   ├── distill.go         # Session transcript distillation
+│   ├── store_sqlite.go    # SQLite backend (migrations v1-v8)
 │   └── project.go         # Random projection, cosine similarity
 ├── cmd/
 │   ├── dualmem/           # CLI tool
-│   ├── dualmem-mcp/       # MCP server (5 tools: search_codebase, get_codemap, search_memory, get_context, save_memory)
-│   └── engram-mcp/        # MCP server (5 tools: remember, recall, reflect, get_session, inspect)
+│   ├── dualmem-mcp/       # MCP server
+│   └── engram-mcp/        # Engram MCP server
 └── examples/
     ├── chat/              # Local REPL with Ollama
     └── comparison/        # Memory mode comparison + LLM judge
