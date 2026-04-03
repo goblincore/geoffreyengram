@@ -233,6 +233,28 @@ func (s *SQLiteStore) migrate() error {
 		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (7)`)
 	}
 
+	if version < 8 {
+		if _, err := s.db.Exec(`
+			CREATE TABLE IF NOT EXISTS file_cochange (
+				source_path TEXT NOT NULL,
+				target_path TEXT NOT NULL,
+				namespace   TEXT NOT NULL,
+				strength    REAL NOT NULL DEFAULT 1.0,
+				co_count    INTEGER NOT NULL DEFAULT 1,
+				memory_ids  TEXT DEFAULT '[]',
+				concepts    TEXT DEFAULT '[]',
+				created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+				updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+				PRIMARY KEY (namespace, source_path, target_path)
+			);
+			CREATE INDEX IF NOT EXISTS idx_cochange_source ON file_cochange(namespace, source_path);
+			CREATE INDEX IF NOT EXISTS idx_cochange_target ON file_cochange(namespace, target_path);
+		`); err != nil {
+			return fmt.Errorf("migrate v8 (co-change graph): %w", err)
+		}
+		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (8)`)
+	}
+
 	return nil
 }
 
@@ -1398,6 +1420,243 @@ func (s *SQLiteStore) GetEntityEdges(entityID string) ([]EntityEdge, error) {
 		edges = append(edges, e)
 	}
 	return edges, rows.Err()
+}
+
+// --- Co-change graph ---
+
+func (s *SQLiteStore) UpsertCoChange(namespace, source, target, memoryID string) error {
+	// Normalize: always store with lexicographically smaller path first
+	if source > target {
+		source, target = target, source
+	}
+
+	// Try to load existing edge to merge memory IDs
+	var existing string
+	var coCount int
+	err := s.db.QueryRow(
+		`SELECT memory_ids, co_count FROM file_cochange WHERE namespace = ? AND source_path = ? AND target_path = ?`,
+		namespace, source, target,
+	).Scan(&existing, &coCount)
+
+	if err == sql.ErrNoRows {
+		// New edge
+		ids, _ := json.Marshal([]string{memoryID})
+		_, err = s.db.Exec(
+			`INSERT INTO file_cochange (source_path, target_path, namespace, strength, co_count, memory_ids)
+			 VALUES (?, ?, ?, 1.0, 1, ?)`,
+			source, target, namespace, string(ids),
+		)
+		return err
+	}
+	if err != nil {
+		return fmt.Errorf("upsert co-change: %w", err)
+	}
+
+	// Merge memory ID into existing list
+	var ids []string
+	json.Unmarshal([]byte(existing), &ids)
+	found := false
+	for _, id := range ids {
+		if id == memoryID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		ids = append(ids, memoryID)
+	}
+	idsJSON, _ := json.Marshal(ids)
+	newCount := coCount + 1
+
+	_, err = s.db.Exec(
+		`UPDATE file_cochange SET co_count = ?, strength = ?, memory_ids = ?, updated_at = datetime('now')
+		 WHERE namespace = ? AND source_path = ? AND target_path = ?`,
+		newCount, float64(newCount), string(idsJSON), namespace, source, target,
+	)
+	return err
+}
+
+func (s *SQLiteStore) GetCoChangeNeighbors(namespace, path string, minStrength float64, limit int) ([]CoChangeEdge, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.Query(
+		`SELECT source_path, target_path, namespace, strength, co_count, memory_ids, concepts, created_at, updated_at
+		 FROM file_cochange
+		 WHERE namespace = ? AND (source_path = ? OR target_path = ?) AND strength >= ?
+		 ORDER BY strength DESC
+		 LIMIT ?`,
+		namespace, path, path, minStrength, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get co-change neighbors: %w", err)
+	}
+	defer rows.Close()
+	return scanCoChangeEdges(rows)
+}
+
+func (s *SQLiteStore) GetCoChangePaths(namespace string, paths []string, limit int) ([]CoChangeEdge, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+
+	// Build placeholders for source and target matching
+	placeholders := strings.Repeat("?,", len(paths))
+	placeholders = placeholders[:len(placeholders)-1]
+
+	args := make([]interface{}, 0, len(paths)*2+2)
+	args = append(args, namespace)
+	for _, p := range paths {
+		args = append(args, p)
+	}
+	for _, p := range paths {
+		args = append(args, p)
+	}
+	args = append(args, limit)
+
+	query := fmt.Sprintf(
+		`SELECT source_path, target_path, namespace, strength, co_count, memory_ids, concepts, created_at, updated_at
+		 FROM file_cochange
+		 WHERE namespace = ? AND (source_path IN (%s) OR target_path IN (%s))
+		 ORDER BY strength DESC
+		 LIMIT ?`,
+		placeholders, placeholders,
+	)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("get co-change paths: %w", err)
+	}
+	defer rows.Close()
+	return scanCoChangeEdges(rows)
+}
+
+func (s *SQLiteStore) GetCoChangeAll(namespace string, limit int) ([]CoChangeEdge, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.Query(
+		`SELECT source_path, target_path, namespace, strength, co_count, memory_ids, concepts, created_at, updated_at
+		 FROM file_cochange
+		 WHERE namespace = ?
+		 ORDER BY strength DESC
+		 LIMIT ?`,
+		namespace, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get all co-change: %w", err)
+	}
+	defer rows.Close()
+	return scanCoChangeEdges(rows)
+}
+
+func (s *SQLiteStore) UpdateCoChangeConcepts(namespace, source, target, conceptsJSON string) error {
+	// Normalize ordering
+	if source > target {
+		source, target = target, source
+	}
+	_, err := s.db.Exec(
+		`UPDATE file_cochange SET concepts = ?, updated_at = datetime('now')
+		 WHERE namespace = ? AND source_path = ? AND target_path = ?`,
+		conceptsJSON, namespace, source, target,
+	)
+	return err
+}
+
+func (s *SQLiteStore) DecayCoChange(namespace string, halfLifeDays int) error {
+	if halfLifeDays <= 0 {
+		halfLifeDays = 90
+	}
+	// λ = ln(2) / halfLife
+	lambda := 0.693147 / float64(halfLifeDays)
+
+	// Apply exponential decay: strength = co_count * exp(-λ * days_since_update)
+	_, err := s.db.Exec(
+		`UPDATE file_cochange
+		 SET strength = co_count * exp(? * (julianday('now') - julianday(updated_at)))
+		 WHERE namespace = ?`,
+		-lambda, namespace,
+	)
+	if err != nil {
+		return fmt.Errorf("decay co-change: %w", err)
+	}
+
+	// Clean up edges that decayed below threshold
+	_, err = s.db.Exec(
+		`DELETE FROM file_cochange WHERE namespace = ? AND strength < 0.1`,
+		namespace,
+	)
+	return err
+}
+
+func scanCoChangeEdges(rows *sql.Rows) ([]CoChangeEdge, error) {
+	var edges []CoChangeEdge
+	for rows.Next() {
+		var e CoChangeEdge
+		var memoryIDsJSON, conceptsJSON, createdAt, updatedAt string
+		if err := rows.Scan(&e.SourcePath, &e.TargetPath, &e.Namespace, &e.Strength, &e.CoCount,
+			&memoryIDsJSON, &conceptsJSON, &createdAt, &updatedAt); err != nil {
+			continue
+		}
+		json.Unmarshal([]byte(memoryIDsJSON), &e.MemoryIDs)
+		json.Unmarshal([]byte(conceptsJSON), &e.Concepts)
+		e.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+		e.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAt)
+		edges = append(edges, e)
+	}
+	return edges, rows.Err()
+}
+
+// ExpandEntitiesWithEdges returns neighbor entity IDs with their connecting edge info.
+// Unlike ExpandEntities which returns just IDs, this preserves edge type and strength
+// for structure-aware graph boosting.
+func (s *SQLiteStore) ExpandEntitiesWithEdges(namespace string, entityIDs []string, maxNeighbors int) ([]ExpandedEntityEdge, error) {
+	if len(entityIDs) == 0 {
+		return nil, nil
+	}
+
+	placeholders := strings.Repeat("?,", len(entityIDs))
+	placeholders = placeholders[:len(placeholders)-1]
+
+	args := make([]interface{}, 0, len(entityIDs)*3+1)
+	for _, id := range entityIDs {
+		args = append(args, id)
+	}
+	for _, id := range entityIDs {
+		args = append(args, id)
+	}
+	for _, id := range entityIDs {
+		args = append(args, id)
+	}
+	args = append(args, maxNeighbors)
+
+	query := fmt.Sprintf(`
+		SELECT neighbor_id, relation, strength FROM (
+			SELECT target_id AS neighbor_id, relation, strength FROM entity_edges WHERE source_id IN (%s)
+			UNION ALL
+			SELECT source_id AS neighbor_id, relation, strength FROM entity_edges WHERE target_id IN (%s)
+		) WHERE neighbor_id NOT IN (%s)
+		ORDER BY strength DESC
+		LIMIT ?`, placeholders, placeholders, placeholders)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("expand entities with edges: %w", err)
+	}
+	defer rows.Close()
+
+	var results []ExpandedEntityEdge
+	for rows.Next() {
+		var e ExpandedEntityEdge
+		if err := rows.Scan(&e.NeighborID, &e.Relation, &e.Strength); err != nil {
+			continue
+		}
+		results = append(results, e)
+	}
+	return results, rows.Err()
 }
 
 // --- Helpers ---

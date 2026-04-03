@@ -102,6 +102,28 @@ type GraphExpansionResult struct {
 	MatchedNodes []EntityNode // entities that matched the query
 }
 
+// CoChangeEdge represents a co-change relationship between two files.
+// Files that appear together in memories (or git commits) accumulate co-change strength.
+type CoChangeEdge struct {
+	SourcePath string    `json:"source_path"`
+	TargetPath string    `json:"target_path"`
+	Namespace  string    `json:"namespace"`
+	Strength   float64   `json:"strength"`   // Weighted by frequency + recency
+	CoCount    int       `json:"co_count"`    // Raw count of co-occurrences
+	MemoryIDs  []string  `json:"memory_ids"`  // Memory IDs that evidenced this co-change
+	Concepts   []string  `json:"concepts"`    // Entity names that bind these files
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// ExpandedEntityEdge is a neighbor entity ID with the edge that connects it.
+// Used by structure-aware graph boost to differentiate edge types and strengths.
+type ExpandedEntityEdge struct {
+	NeighborID string
+	Relation   string
+	Strength   float64
+}
+
 // GraphBoostConfig configures entity graph boosting in search.
 // When set, memories linked to entities matching the query get an additive score boost.
 type GraphBoostConfig struct {
@@ -610,6 +632,16 @@ type Store interface {
 	GetEntityStats(namespace string) (totalNodes int, totalEdges int, totalLinks int, err error)
 	GetTopEntities(namespace string, limit int) ([]EntityNode, error)
 	GetEntityEdges(entityID string) ([]EntityEdge, error)
+	// ExpandEntitiesWithEdges returns neighbor entity IDs with edge type and strength info.
+	ExpandEntitiesWithEdges(namespace string, entityIDs []string, maxNeighbors int) ([]ExpandedEntityEdge, error)
+
+	// Co-change graph
+	UpsertCoChange(namespace, source, target, memoryID string) error
+	GetCoChangeNeighbors(namespace, path string, minStrength float64, limit int) ([]CoChangeEdge, error)
+	GetCoChangePaths(namespace string, paths []string, limit int) ([]CoChangeEdge, error)
+	GetCoChangeAll(namespace string, limit int) ([]CoChangeEdge, error)
+	UpdateCoChangeConcepts(namespace, source, target, conceptsJSON string) error
+	DecayCoChange(namespace string, halfLifeDays int) error
 
 	// Lifecycle
 	Close() error

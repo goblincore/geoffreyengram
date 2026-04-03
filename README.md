@@ -211,6 +211,11 @@ dualmem entities search "SQLite"                        # find entities by name
 dualmem entities show "store_sqlite.go"                 # show entity + relationships
 dualmem entities top --limit 20                         # most-mentioned entities
 
+# Co-change graph — learned file relationships
+dualmem cochange auth.go                                # files that co-change with auth.go
+dualmem cochange auth.go --min-strength 2.0             # only strong relationships
+dualmem cochange --decay                                # apply 90-day half-life decay
+
 # Maintenance
 dualmem promote --id <memory-id>                        # move sketch → detail
 dualmem promote --all --type warning                    # batch re-evaluate all raw sketch entries
@@ -394,7 +399,17 @@ dualmem entities top --limit 20
 
 Entity nodes are upserted at every `add` (via the heuristic extractor) and during `distill` (via LLM-extracted triples with richer relationship types). Edges record source → relation → target with running-average strength across repeated observations.
 
-Graph boost is **automatic** in `dualmem context` — every context assembly call applies entity graph traversal (1-hop, +0.15 additive boost) to surface memories linked to entities matching the query. If no entities exist, the boost is a no-op. Disable with `--no-graph` for debugging:
+Graph boost is **automatic** in `dualmem context` — every context assembly call applies **structure-aware** entity graph traversal. Direct entity matches get a full boost (0.20), while expanded neighbors get a reduced boost scaled by edge type and strength:
+
+| Edge type | Multiplier | Meaning |
+|-----------|-----------|---------|
+| `depends_on` | 1.0 | Strong structural relationship |
+| `implements` | 0.9 | Strong behavioral relationship |
+| `modifies` | 0.8 | Moderate change relationship |
+| `uses` | 0.7 | Moderate usage relationship |
+| `relates` | 0.5 | Weak association |
+
+Disable with `--no-graph` for debugging:
 
 ```bash
 dualmem context "auth system" --budget 3000              # graph boost auto-enabled
@@ -402,6 +417,31 @@ dualmem context "auth system" --budget 3000 --no-graph   # graph boost disabled
 ```
 
 For programmatic use, set `DisableGraphBoost: true` in `ContextOpts`.
+
+### Co-change graph — learned file relationships
+
+When a memory mentions multiple files (e.g., `--files "auth.go,middleware.go,jwt.go"`), DualMem automatically builds co-change edges between all file pairs. Over time, this creates a learned structural map of which files change together and how strongly.
+
+```bash
+# Query co-change neighbors for a file
+dualmem cochange auth.go
+
+# With minimum strength filter
+dualmem cochange auth.go --min-strength 2.0
+
+# JSON output for scripting
+dualmem cochange auth.go --json
+
+# Run co-change decay (90-day half-life)
+dualmem cochange --decay
+```
+
+Co-change edges accumulate automatically — every `dualmem add --files "a.go,b.go"` strengthens the edge between those files. Edges include:
+- **Strength**: weighted by co-occurrence count with exponential time decay
+- **Memory IDs**: which memories evidenced the relationship
+- **Concept labels**: entity names that explain *why* files co-change (populated by `EnrichCoChangeWithEntities`)
+
+**Context assembly integration**: When assembling context, file hints from checkpoints and memories are expanded through co-change neighbors. If you're working on `auth.go`, the codemap will also highlight `middleware.go` and `jwt.go` if they historically co-change — even if their code structure (HDC vectors) is dissimilar.
 
 ### Knowledge documents — synthesized context
 

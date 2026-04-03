@@ -379,5 +379,181 @@ func TestCodemapRelevance_MemoryInformed(t *testing.T) {
 	})
 }
 
+// TestCodemapRelevance_CoChangeBoost demonstrates that co-change boosting
+// surfaces structurally related files that HDC similarity alone would miss.
+//
+// Scenario: A developer working on "auth.go" has historically also changed
+// "middleware.go" and "jwt.go" alongside it (evidenced by memories with
+// multiple --files). A new module "rate_limiter.go" was recently added to
+// the auth flow but has very different code structure (no shared types/imports).
+// Without co-change: rate_limiter.go ranks low (different HDC signature).
+// With co-change: rate_limiter.go is boosted because it co-changes with auth.go.
+func TestCodemapRelevance_CoChangeBoost(t *testing.T) {
+	enc := NewHDCEncoder()
+	modules := []ModuleMap{
+		// Auth-related cluster (should all appear)
+		{Path: "src/auth/", Language: "go", Summary: "Go module",
+			KeyTypes: []string{"AuthService", "TokenValidator"}, FileCount: 3,
+			Identifiers: []string{"validateJWT", "refreshToken"}, Imports: []string{"crypto/rsa"}},
+		{Path: "src/middleware/", Language: "go", Summary: "Go module",
+			KeyTypes: []string{"AuthMiddleware", "RateLimiterMiddleware"}, FileCount: 2,
+			Identifiers: []string{"requireAuth", "extractBearer"}, Imports: []string{"net/http"}},
+		// Rate limiter — structurally different from auth (no shared types/imports)
+		// but co-changes with auth.go in practice
+		{Path: "src/ratelimit/", Language: "go", Summary: "Go module",
+			KeyTypes: []string{"SlidingWindow", "TokenBucket"}, FileCount: 2,
+			Identifiers: []string{"allowRequest", "resetBucket"}, Imports: []string{"sync", "time"}},
+		// Unrelated modules
+		{Path: "src/storage/", Language: "go", Summary: "Go module",
+			KeyTypes: []string{"SQLiteStore", "PostgresStore"}, FileCount: 5,
+			Identifiers: []string{"openDB", "migrate"}, Imports: []string{"database/sql"}},
+		{Path: "src/ui/dashboard/", Language: "typescript", Summary: "TypeScript module",
+			KeyTypes: []string{"DashboardView"}, FileCount: 4},
+		{Path: "src/ui/settings/", Language: "typescript", Summary: "TypeScript module",
+			KeyTypes: []string{"SettingsForm"}, FileCount: 3},
+		{Path: "src/analytics/", Language: "go", Summary: "Go module",
+			KeyTypes: []string{"EventTracker"}, FileCount: 2,
+			Identifiers: []string{"trackEvent"}, Imports: []string{"encoding/json"}},
+		{Path: "src/notifications/", Language: "go", Summary: "Go module",
+			KeyTypes: []string{"NotificationService"}, FileCount: 3,
+			Identifiers: []string{"sendPush", "sendEmail"}, Imports: []string{"net/smtp"}},
+	}
+
+	cm := &CodeMap{
+		Zoom1: "Go + TypeScript project.",
+		Zoom2: modules,
+	}
+
+	moduleEmbs := make(map[string][]float32)
+	for _, m := range modules {
+		moduleEmbs[m.Path] = enc.EncodeModule(m)
+	}
+
+	// Query about auth — should find auth and middleware via HDC,
+	// but rate_limiter has very different code structure
+	authQuery := enc.EncodeQuery("authentication token validation")
+	boostPaths := []string{"auth.go"}
+
+	// Co-change neighbors: auth.go historically co-changes with ratelimit/ and middleware/
+	cochangeNeighbors := map[string]float64{
+		"src/ratelimit/": 3.0, // strong co-change (3 co-occurrences)
+		"src/middleware/": 2.0, // moderate co-change
+	}
+
+	t.Run("without_cochange", func(t *testing.T) {
+		out := cm.RenderAtBudget(400, authQuery, moduleEmbs, boostPaths)
+		t.Log("Without co-change:\n" + out)
+
+		rateLimitIdx := strings.Index(out, "src/ratelimit/")
+		authIdx := strings.Index(out, "src/auth/")
+
+		if rateLimitIdx < 0 {
+			t.Log("CONFIRMED: ratelimit not in output without co-change (HDC signal too weak)")
+		} else if authIdx >= 0 && rateLimitIdx > authIdx {
+			t.Log("ratelimit present but ranked below auth")
+		}
+	})
+
+	t.Run("with_cochange", func(t *testing.T) {
+		out := cm.RenderAtBudgetWithCoChange(400, authQuery, moduleEmbs, boostPaths, cochangeNeighbors)
+		t.Log("With co-change:\n" + out)
+
+		// Rate limiter should now appear because it co-changes with auth
+		if !strings.Contains(out, "src/ratelimit/") {
+			t.Error("expected src/ratelimit/ in co-change-boosted output — co-change should surface structurally dissimilar but historically related modules")
+		}
+		if !strings.Contains(out, "src/auth/") {
+			t.Error("expected src/auth/ in output")
+		}
+
+		// Unrelated modules should still be ranked low
+		authIdx := strings.Index(out, "src/auth/")
+		for _, irrelevant := range []string{"src/ui/dashboard/", "src/analytics/", "src/notifications/"} {
+			irIdx := strings.Index(out, irrelevant)
+			if irIdx >= 0 && authIdx >= 0 && irIdx < authIdx {
+				t.Errorf("expected src/auth/ before %s (auth is directly relevant)", irrelevant)
+			}
+		}
+	})
+
+	t.Run("value_delta", func(t *testing.T) {
+		// Quantify the improvement: count how many relevant modules appear
+		// in top results with and without co-change
+		withoutOut := cm.RenderAtBudget(400, authQuery, moduleEmbs, boostPaths)
+		withOut := cm.RenderAtBudgetWithCoChange(400, authQuery, moduleEmbs, boostPaths, cochangeNeighbors)
+
+		relevant := []string{"src/auth/", "src/middleware/", "src/ratelimit/"}
+		countWithout := 0
+		countWith := 0
+		for _, r := range relevant {
+			if strings.Contains(withoutOut, r) {
+				countWithout++
+			}
+			if strings.Contains(withOut, r) {
+				countWith++
+			}
+		}
+
+		t.Logf("Relevant modules surfaced: without co-change=%d/%d, with co-change=%d/%d",
+			countWithout, len(relevant), countWith, len(relevant))
+		if countWith > countWithout {
+			t.Logf("CO-CHANGE VALUE: +%d additional relevant modules surfaced", countWith-countWithout)
+		}
+	})
+}
+
+// TestGraphBoost_StructureAware verifies that structure-aware graph boosting
+// produces differentiated scores based on edge types, unlike the old flat +0.15.
+func TestGraphBoost_StructureAware(t *testing.T) {
+	store := testEntityStore(t)
+
+	// Create entities with different edge types
+	idAuth, _ := store.UpsertEntity(&EntityNode{Name: "auth", Type: "concept", Namespace: testNS})
+	idJWT, _ := store.UpsertEntity(&EntityNode{Name: "jwt", Type: "concept", Namespace: testNS})
+	idLogging, _ := store.UpsertEntity(&EntityNode{Name: "logging", Type: "concept", Namespace: testNS})
+
+	// auth → depends_on → jwt (strong structural relationship)
+	store.UpsertEdge(&EntityEdge{SourceID: idAuth, TargetID: idJWT, Relation: "depends_on", Namespace: testNS})
+	// auth → relates → logging (weak association)
+	store.UpsertEdge(&EntityEdge{SourceID: idAuth, TargetID: idLogging, Relation: "relates", Namespace: testNS})
+
+	// Create memories linked to each entity
+	store.InsertDetail(&DetailMemory{ID: "mem-jwt", Text: "JWT validation logic"}, []float32{0.1, 0.2}, testNS)
+	store.InsertDetail(&DetailMemory{ID: "mem-log", Text: "Added request logging"}, []float32{0.3, 0.4}, testNS)
+	store.LinkMemoryToEntity("mem-jwt", idJWT, testNS)
+	store.LinkMemoryToEntity("mem-log", idLogging, testNS)
+
+	// Compute graph boost — should differentiate by edge type
+	e := &Engine{store: store}
+	boostMap := e.computeGraphBoost(&GraphBoostConfig{
+		Namespace: testNS,
+		MaxHops:   1,
+	}, "auth system")
+
+	if boostMap == nil {
+		t.Fatal("expected non-nil boost map")
+	}
+
+	// Both memories should be boosted, but JWT should get higher boost
+	// because depends_on (1.0) > relates (0.5)
+	jwtBoost := boostMap["mem-jwt"]
+	logBoost := boostMap["mem-log"]
+
+	t.Logf("JWT boost: %.3f, Logging boost: %.3f", jwtBoost, logBoost)
+
+	if jwtBoost <= 0 {
+		t.Error("expected positive boost for JWT memory (linked via depends_on)")
+	}
+	if logBoost <= 0 {
+		t.Error("expected positive boost for logging memory (linked via relates)")
+	}
+
+	// The key assertion: structure-aware boost should produce different values
+	// (old flat boost would give both 0.15)
+	if jwtBoost == logBoost {
+		t.Error("expected differentiated boost scores (depends_on should boost more than relates)")
+	}
+}
+
 // Suppress unused import warning
 var _ = os.DevNull

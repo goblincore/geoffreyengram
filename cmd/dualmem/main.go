@@ -207,6 +207,8 @@ func main() {
 		cmdDocs(cfg)
 	case "distill":
 		cmdDistill(cfg)
+	case "cochange":
+		cmdCoChange(cfg)
 	case "entities":
 		cmdEntities(cfg)
 	case "file-context":
@@ -239,6 +241,7 @@ Commands:
   seed        Auto-generate semantic context memories from code structure
   synthesize  Cluster memories into knowledge docs (concept-oriented summaries)
   distill     Extract memories from a session transcript
+  cochange    Query the file co-change graph (which files change together)
   entities    Query the entity graph (stats, search, show, top)
   docs        List/show/delete/export knowledge docs
   file-context  Get memories associated with a specific file (warnings, decisions, maps)
@@ -1403,6 +1406,86 @@ func cmdEntities(cfg CLIConfig) {
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown entities subcommand: %s\nUsage: dualmem entities [stats|search|show|top]\n", subCmd)
 		os.Exit(1)
+	}
+}
+
+func cmdCoChange(cfg CLIConfig) {
+	fs := flag.NewFlagSet("cochange", flag.ExitOnError)
+	nsFlag := fs.String("ns", "", "Namespace override")
+	limitFlag := fs.Int("limit", 10, "Max results")
+	minStrength := fs.Float64("min-strength", 0.5, "Minimum co-change strength")
+	jsonFlag := fs.Bool("json", false, "JSON output")
+	decayFlag := fs.Bool("decay", false, "Run co-change decay before querying")
+
+	// Parse subcommand/file path before flags
+	subArgs := os.Args[2:]
+	filePath := ""
+	if len(subArgs) > 0 && subArgs[0] != "-" && !strings.HasPrefix(subArgs[0], "--") {
+		filePath = subArgs[0]
+		subArgs = subArgs[1:]
+	}
+	fs.Parse(subArgs)
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	store := engine.GetStore()
+	ns := resolveNamespace(*nsFlag, cfg)
+
+	if *decayFlag {
+		if err := store.DecayCoChange(ns, 90); err != nil {
+			fmt.Fprintf(os.Stderr, "Decay error: %v\n", err)
+		} else {
+			fmt.Fprintln(os.Stderr, "Co-change decay applied (90-day half-life)")
+		}
+	}
+
+	if filePath == "" {
+		// No file specified — show stats
+		allEdges, err := store.GetCoChangePaths(ns, []string{}, 1000)
+		if err != nil {
+			// No edges or empty — just show count
+			fmt.Printf("Co-change graph (%s): 0 edges\n", ns)
+			fmt.Println("\nUsage: dualmem cochange <file> [--min-strength 0.5] [--limit 10]")
+			return
+		}
+		fmt.Printf("Co-change graph (%s): %d edges\n", ns, len(allEdges))
+		fmt.Println("\nUsage: dualmem cochange <file> [--min-strength 0.5] [--limit 10]")
+		return
+	}
+
+	edges, err := store.GetCoChangeNeighbors(ns, filePath, *minStrength, *limitFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonFlag {
+		json.NewEncoder(os.Stdout).Encode(edges)
+		return
+	}
+
+	if len(edges) == 0 {
+		fmt.Printf("No co-change neighbors for %q (min strength: %.1f)\n", filePath, *minStrength)
+		return
+	}
+
+	fmt.Printf("Files that co-change with %s:\n", filePath)
+	for _, e := range edges {
+		neighbor := e.TargetPath
+		if neighbor == filePath {
+			neighbor = e.SourcePath
+		}
+		conceptStr := ""
+		if len(e.Concepts) > 0 {
+			conceptStr = fmt.Sprintf(" [%s]", strings.Join(e.Concepts, ", "))
+		}
+		fmt.Printf("  %-40s strength: %.1f  (co-changes: %d)%s\n",
+			neighbor, e.Strength, e.CoCount, conceptStr)
 	}
 }
 

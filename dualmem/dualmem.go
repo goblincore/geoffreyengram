@@ -198,6 +198,11 @@ func (e *Engine) AddWithOptions(ctx context.Context, input MemoryInput, userID s
 			e.linkEntitiesToGraph(dm.ID, ns, entities)
 		}
 
+		// Build co-change edges from file associations (best-effort)
+		if ns := e.namespace(); ns != "" && len(input.Files) >= 2 {
+			e.buildCoChangeEdges(ns, dm.ID, input.Files)
+		}
+
 		// If a memory was demoted, route it to sketch
 		if demoted != "" && demoted != content {
 			e.sketch.IngestRaw(ctx, userID, demoted, sector, input.SessionID, nil)
@@ -390,13 +395,26 @@ func (e *Engine) FileIndex(ctx context.Context, userID string) ([]string, error)
 	return files, nil
 }
 
+// Edge-type multipliers for structure-aware graph boosting.
+// These weight how strongly an edge type should contribute to memory boost.
+var edgeTypeMultiplier = map[string]float64{
+	"depends_on":  1.0,
+	"implements":  0.9,
+	"modifies":    0.8,
+	"uses":        0.7,
+	"relates":     0.5,
+}
+
 // computeGraphBoost extracts entity candidates from query text, expands them
 // through the entity graph, and returns a map of memory ID → boost weight
 // for memories connected to those entities.
+//
+// Structure-aware: direct entity matches get full boost, expanded neighbors
+// get a reduced boost scaled by edge type and edge strength.
 func (e *Engine) computeGraphBoost(cfg *GraphBoostConfig, queryText string) map[string]float64 {
 	boostWeight := cfg.BoostWeight
 	if boostWeight <= 0 {
-		boostWeight = 0.15
+		boostWeight = 0.20
 	}
 	maxHops := cfg.MaxHops
 	if maxHops <= 0 {
@@ -404,9 +422,6 @@ func (e *Engine) computeGraphBoost(cfg *GraphBoostConfig, queryText string) map[
 	}
 	ns := cfg.Namespace
 
-	// Extract entity name candidates from query words.
-	// We use each whitespace-delimited token (lowercased, trimmed of punctuation)
-	// and also try multi-word combinations (bigrams) for compound entity names.
 	candidates := extractEntityCandidates(queryText)
 	if len(candidates) == 0 {
 		return nil
@@ -431,40 +446,72 @@ func (e *Engine) computeGraphBoost(cfg *GraphBoostConfig, queryText string) map[
 		return nil
 	}
 
-	// Expand 1 hop (or more) to find neighbor entities
-	allEntityIDs := make([]string, len(matchedEntityIDs))
-	copy(allEntityIDs, matchedEntityIDs)
-	for hop := 0; hop < maxHops; hop++ {
-		neighborIDs, err := e.store.ExpandEntities(ns, allEntityIDs, 10)
-		if err != nil {
-			break
-		}
-		for _, nid := range neighborIDs {
-			if !seen[nid] {
-				seen[nid] = true
-				allEntityIDs = append(allEntityIDs, nid)
-			}
-		}
-	}
-
-	// Collect memory IDs linked to all matched+expanded entities
-	memoryIDs, err := e.store.GetMemoryIDsByEntities(allEntityIDs)
-	if err != nil || len(memoryIDs) == 0 {
-		return nil
-	}
-
-	// Build boost map: direct matches get full boost, expanded get half
+	// Track which entities are direct matches vs expanded
 	directEntitySet := make(map[string]bool, len(matchedEntityIDs))
 	for _, eid := range matchedEntityIDs {
 		directEntitySet[eid] = true
 	}
 
-	// For simplicity, all graph-matched memories get the same boost.
-	// A future refinement could differentiate direct vs expanded.
-	result := make(map[string]float64, len(memoryIDs))
-	for _, mid := range memoryIDs {
+	// Expand with edge info for structure-aware boosting
+	allEntityIDs := make([]string, len(matchedEntityIDs))
+	copy(allEntityIDs, matchedEntityIDs)
+
+	// Map from expanded entity ID → best (relation, strength) for boost calculation
+	expandedEdgeInfo := make(map[string]ExpandedEntityEdge)
+
+	for hop := 0; hop < maxHops; hop++ {
+		expanded, err := e.store.ExpandEntitiesWithEdges(ns, allEntityIDs, 10)
+		if err != nil {
+			break
+		}
+		for _, edge := range expanded {
+			if !seen[edge.NeighborID] {
+				seen[edge.NeighborID] = true
+				allEntityIDs = append(allEntityIDs, edge.NeighborID)
+				expandedEdgeInfo[edge.NeighborID] = edge
+			}
+		}
+	}
+
+	// Collect memory IDs linked to direct entities (full boost)
+	directMemIDs, err := e.store.GetMemoryIDsByEntities(matchedEntityIDs)
+	if err != nil {
+		directMemIDs = nil
+	}
+
+	if len(directMemIDs) == 0 && len(expandedEdgeInfo) == 0 {
+		return nil
+	}
+
+	result := make(map[string]float64)
+
+	// Direct matches get full boost weight
+	for _, mid := range directMemIDs {
 		result[mid] = boostWeight
 	}
+
+	// Expanded matches: query per-entity so we can apply the correct edge multiplier
+	expandedBase := boostWeight * 0.5
+	for eid, edge := range expandedEdgeInfo {
+		memIDs, err := e.store.GetMemoryIDsByEntities([]string{eid})
+		if err != nil || len(memIDs) == 0 {
+			continue
+		}
+		mult := 0.5 // default for unknown edge types
+		if m, ok := edgeTypeMultiplier[edge.Relation]; ok {
+			mult = m * edge.Strength
+		}
+		boost := expandedBase * mult
+		for _, mid := range memIDs {
+			if _, alreadyDirect := result[mid]; alreadyDirect {
+				continue // direct match takes precedence
+			}
+			if boost > result[mid] {
+				result[mid] = boost // keep best boost per memory
+			}
+		}
+	}
+
 	return result
 }
 
@@ -598,10 +645,15 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 				}
 				// Extract file hints from checkpoints and memories to boost relevant modules
 				boostPaths := extractFileHints(checkpoints, results.DetailMemories)
+				// Expand boost paths with co-change neighbors for structural awareness
+				var cochangeNeighbors map[string]float64
+				if ns := e.namespace(); ns != "" && len(boostPaths) > 0 {
+					cochangeNeighbors = e.GetCoChangeForPaths(ns, boostPaths, 1.0)
+				}
 				// For continue intent (vague queries like "what next"), use boost-only mode:
 				// show only modules referenced by checkpoints/memories instead of noisy HDC ranking
 				useBoostOnly := intent == IntentContinue && len(boostPaths) > 0
-				mapText := codeMap.RenderAtBudget(mapBudget, codemapQuery, moduleEmbs, boostPaths, useBoostOnly)
+				mapText := codeMap.RenderAtBudgetWithCoChange(mapBudget, codemapQuery, moduleEmbs, boostPaths, cochangeNeighbors, useBoostOnly)
 				mapTokens := estimateTokens(mapText)
 				parts = append(parts, "[Codebase Map]\n"+mapText)
 				sources = append(sources, SourceRef{Type: "codemap", ID: userID})
@@ -1681,6 +1733,12 @@ func (e *Engine) Synthesize(ctx context.Context, namespace string, opts *Synthes
 		} else {
 			result.Created = append(result.Created, *doc)
 		}
+	}
+
+	// Enrich co-change edges with concept labels from entity graph (best-effort).
+	// This runs after synthesis so that newly extracted entities are available.
+	if enriched, err := e.EnrichCoChangeWithEntities(namespace); err == nil && enriched > 0 {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("enriched %d co-change edges with concept labels", enriched))
 	}
 
 	return result, nil

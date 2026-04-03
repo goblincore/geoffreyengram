@@ -372,7 +372,17 @@ func synthesizeZoom1(modules []ModuleMap, rootDir string) string {
 // When boostOnly is true, only modules matching boostPaths are shown (ignores query similarity).
 // This is useful for vague queries like "what next" where HDC similarity is noise.
 // Otherwise falls back to file count (largest first).
+// RenderAtBudgetWithCoChange renders the codemap with co-change neighbor boosting.
+// cochangeNeighbors is a map of file path → strength from the co-change graph.
+func (cm *CodeMap) RenderAtBudgetWithCoChange(maxTokens int, queryEmbedding []float32, moduleEmbeddings map[string][]float32, boostPaths []string, cochangeNeighbors map[string]float64, boostOnly ...bool) string {
+	return cm.renderAtBudgetInternal(maxTokens, queryEmbedding, moduleEmbeddings, boostPaths, cochangeNeighbors, boostOnly...)
+}
+
 func (cm *CodeMap) RenderAtBudget(maxTokens int, queryEmbedding []float32, moduleEmbeddings map[string][]float32, boostPaths []string, boostOnly ...bool) string {
+	return cm.renderAtBudgetInternal(maxTokens, queryEmbedding, moduleEmbeddings, boostPaths, nil, boostOnly...)
+}
+
+func (cm *CodeMap) renderAtBudgetInternal(maxTokens int, queryEmbedding []float32, moduleEmbeddings map[string][]float32, boostPaths []string, cochangeNeighbors map[string]float64, boostOnly ...bool) string {
 	var sb strings.Builder
 
 	sb.WriteString(cm.Zoom1)
@@ -407,9 +417,11 @@ func (cm *CodeMap) RenderAtBudget(maxTokens int, queryEmbedding []float32, modul
 
 	useBoostOnly := len(boostOnly) > 0 && boostOnly[0] && len(boostSet) > 0
 
+	const cochangeBoostFactor float64 = 0.2
+
 	if useBoostOnly {
-		// Boost-only mode: show only modules matching checkpoint/memory files.
-		// Used for vague queries where HDC similarity is meaningless noise.
+		// Boost-only mode: show only modules matching checkpoint/memory files
+		// or their co-change neighbors.
 		type scored struct {
 			mod   ModuleMap
 			score float64
@@ -418,11 +430,13 @@ func (cm *CodeMap) RenderAtBudget(maxTokens int, queryEmbedding []float32, modul
 		for _, m := range sorted {
 			if moduleMatchesBoost(m.Path, boostSet) {
 				scoredMods = append(scoredMods, scored{mod: m, score: 1.0})
+			} else if strength := moduleCoChangeStrength(m.Path, cochangeNeighbors); strength > 0 {
+				scoredMods = append(scoredMods, scored{mod: m, score: cochangeBoostFactor * strength})
 			}
 		}
-		// Sort boosted modules by file count (most significant first)
+		// Sort boosted modules by score (direct boost first, then co-change)
 		sort.Slice(scoredMods, func(i, j int) bool {
-			return scoredMods[i].mod.FileCount > scoredMods[j].mod.FileCount
+			return scoredMods[i].score > scoredMods[j].score
 		})
 
 		sb.WriteString("\n")
@@ -447,6 +461,9 @@ func (cm *CodeMap) RenderAtBudget(maxTokens int, queryEmbedding []float32, modul
 			sim := float64(CosineSimilarity(queryEmbedding, moduleEmbeddings[m.Path]))
 			if len(boostSet) > 0 && moduleMatchesBoost(m.Path, boostSet) {
 				sim += boostFactor
+			}
+			if strength := moduleCoChangeStrength(m.Path, cochangeNeighbors); strength > 0 {
+				sim += cochangeBoostFactor * strength
 			}
 			scoredMods[i] = scored{mod: m, score: sim}
 		}
@@ -487,6 +504,25 @@ func (cm *CodeMap) RenderAtBudget(maxTokens int, queryEmbedding []float32, modul
 	}
 
 	return sb.String()
+}
+
+// moduleCoChangeStrength returns the max co-change strength for a module path
+// against the co-change neighbor map. Returns 0 if no match or nil map.
+func moduleCoChangeStrength(modulePath string, cochangeNeighbors map[string]float64) float64 {
+	if len(cochangeNeighbors) == 0 {
+		return 0
+	}
+	lowerPath := strings.ToLower(modulePath)
+	var maxStrength float64
+	for neighborPath, strength := range cochangeNeighbors {
+		if strings.Contains(lowerPath, strings.ToLower(neighborPath)) ||
+			strings.Contains(strings.ToLower(neighborPath), lowerPath) {
+			if strength > maxStrength {
+				maxStrength = strength
+			}
+		}
+	}
+	return maxStrength
 }
 
 // moduleMatchesBoost checks if a module path contains any of the boost path segments.
