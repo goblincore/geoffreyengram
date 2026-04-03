@@ -226,47 +226,71 @@ func (e *Engine) loadTranscript(opts DistillOpts) (string, string, error) {
 	return transcript, sessionID, nil
 }
 
+// projectSlug converts an absolute path to the Claude Code project directory
+// slug convention: /Users/donny/foo → -Users-donny-foo
+func projectSlug(rootDir string) string {
+	return strings.ReplaceAll(rootDir, string(filepath.Separator), "-")
+}
+
 // findLatestCCSession finds the most recent Claude Code session file.
+// It prefers sessions from the current project (derived from rootDir),
+// falling back to all projects if none are found.
 func findLatestCCSession(rootDir string) (string, string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", "", fmt.Errorf("get home dir: %w", err)
 	}
 
-	// Claude Code stores sessions in ~/.claude/projects/<hash>/sessions/
+	// Claude Code stores sessions as .jsonl files directly in
+	// ~/.claude/projects/<project-slug>/<session-uuid>.jsonl
 	claudeDir := filepath.Join(homeDir, ".claude", "projects")
-	entries, err := os.ReadDir(claudeDir)
-	if err != nil {
-		return "", "", fmt.Errorf("read claude projects dir: %w", err)
-	}
 
 	type sessionFile struct {
 		path    string
 		modTime time.Time
 	}
 
-	var sessions []sessionFile
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		sessDir := filepath.Join(claudeDir, entry.Name(), "sessions")
-		sessEntries, err := os.ReadDir(sessDir)
+	// collectSessions scans a directory for .jsonl session files.
+	collectSessions := func(dir string) []sessionFile {
+		entries, err := os.ReadDir(dir)
 		if err != nil {
-			continue
+			return nil
 		}
-		for _, se := range sessEntries {
-			if se.IsDir() || !strings.HasSuffix(se.Name(), ".jsonl") {
+		var out []sessionFile
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
 				continue
 			}
-			info, err := se.Info()
+			info, err := e.Info()
 			if err != nil {
 				continue
 			}
-			sessions = append(sessions, sessionFile{
-				path:    filepath.Join(sessDir, se.Name()),
+			out = append(out, sessionFile{
+				path:    filepath.Join(dir, e.Name()),
 				modTime: info.ModTime(),
 			})
+		}
+		return out
+	}
+
+	// Try current project first
+	var sessions []sessionFile
+	if rootDir != "" {
+		slug := projectSlug(rootDir)
+		sessions = collectSessions(filepath.Join(claudeDir, slug))
+	}
+
+	// Fall back to scanning all project directories
+	if len(sessions) == 0 {
+		entries, err := os.ReadDir(claudeDir)
+		if err != nil {
+			return "", "", fmt.Errorf("read claude projects dir: %w", err)
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			sessions = append(sessions, collectSessions(filepath.Join(claudeDir, entry.Name()))...)
 		}
 	}
 

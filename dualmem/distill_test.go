@@ -1,8 +1,11 @@
 package dualmem
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseTranscript_JSONL(t *testing.T) {
@@ -238,6 +241,166 @@ func TestCollectAllFiles(t *testing.T) {
 	}
 	if !fileSet["auth.go"] || !fileSet["middleware.go"] || !fileSet["jwt.go"] {
 		t.Errorf("missing expected files: %v", files)
+	}
+}
+
+func TestProjectSlug(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"/Users/donny/Projects/2026/geoffreyengram", "-Users-donny-Projects-2026-geoffreyengram"},
+		{"/Users/donny/Work/LearnCard", "-Users-donny-Work-LearnCard"},
+		{"/tmp/test", "-tmp-test"},
+	}
+	for _, tc := range tests {
+		got := projectSlug(tc.input)
+		if got != tc.want {
+			t.Errorf("projectSlug(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestFindLatestCCSession_CurrentProject(t *testing.T) {
+	// Create temp dir mimicking ~/.claude/projects/<slug>/
+	tmpHome := t.TempDir()
+	claudeProjects := filepath.Join(tmpHome, ".claude", "projects")
+	projectDir := filepath.Join(claudeProjects, "-tmp-myproject")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a fake session .jsonl file
+	sessionContent := `{"role":"user","content":"Hello world, this is a test session message"}
+{"role":"assistant","content":"I'll help you with that task right away."}`
+	sessionFile := filepath.Join(projectDir, "abc123.jsonl")
+	if err := os.WriteFile(sessionFile, []byte(sessionContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Override UserHomeDir for this test by using the exported function
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	transcript, sessionID, err := findLatestCCSession("/tmp/myproject")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sessionID != "abc123" {
+		t.Errorf("expected sessionID 'abc123', got %q", sessionID)
+	}
+	if !strings.Contains(transcript, "Hello world") {
+		t.Errorf("expected transcript to contain user message, got: %s", transcript)
+	}
+}
+
+func TestFindLatestCCSession_FallbackAllProjects(t *testing.T) {
+	tmpHome := t.TempDir()
+	claudeProjects := filepath.Join(tmpHome, ".claude", "projects")
+	otherProject := filepath.Join(claudeProjects, "-tmp-otherproject")
+	if err := os.MkdirAll(otherProject, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionContent := `{"role":"user","content":"Fallback session content is here for testing"}`
+	if err := os.WriteFile(filepath.Join(otherProject, "sess1.jsonl"), []byte(sessionContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	// rootDir doesn't match any project slug → falls back to all
+	transcript, _, err := findLatestCCSession("/tmp/nonexistent")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(transcript, "Fallback session") {
+		t.Errorf("expected fallback transcript, got: %s", transcript)
+	}
+}
+
+func TestFindLatestCCSession_PicksMostRecent(t *testing.T) {
+	tmpHome := t.TempDir()
+	projectDir := filepath.Join(tmpHome, ".claude", "projects", "-tmp-proj")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write older session
+	older := filepath.Join(projectDir, "old-session.jsonl")
+	if err := os.WriteFile(older, []byte(`{"role":"user","content":"This is the older session transcript content"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-1 * time.Hour)
+	os.Chtimes(older, oldTime, oldTime)
+
+	// Write newer session
+	newer := filepath.Join(projectDir, "new-session.jsonl")
+	if err := os.WriteFile(newer, []byte(`{"role":"user","content":"This is the newer session transcript content"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	_, sessionID, err := findLatestCCSession("/tmp/proj")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sessionID != "new-session" {
+		t.Errorf("expected newest session 'new-session', got %q", sessionID)
+	}
+}
+
+func TestFindLatestCCSession_NoSessions(t *testing.T) {
+	tmpHome := t.TempDir()
+	claudeProjects := filepath.Join(tmpHome, ".claude", "projects")
+	if err := os.MkdirAll(claudeProjects, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	_, _, err := findLatestCCSession("/tmp/noproject")
+	if err == nil {
+		t.Fatal("expected error for no sessions")
+	}
+	if !strings.Contains(err.Error(), "no Claude Code sessions found") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestFindLatestCCSession_IgnoresNonJSONL(t *testing.T) {
+	tmpHome := t.TempDir()
+	projectDir := filepath.Join(tmpHome, ".claude", "projects", "-tmp-proj")
+	subDir := filepath.Join(projectDir, "some-uuid-dir")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write non-jsonl files and a directory that should be ignored
+	os.WriteFile(filepath.Join(projectDir, "notes.txt"), []byte("not a session"), 0o644)
+	os.WriteFile(filepath.Join(projectDir, "real.jsonl"), []byte(`{"role":"user","content":"The real session content that should be found"}`), 0o644)
+
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	transcript, sessionID, err := findLatestCCSession("/tmp/proj")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sessionID != "real" {
+		t.Errorf("expected 'real', got %q", sessionID)
+	}
+	if !strings.Contains(transcript, "real session") {
+		t.Errorf("expected real session content, got: %s", transcript)
 	}
 }
 
