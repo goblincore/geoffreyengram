@@ -255,6 +255,59 @@ func (s *SQLiteStore) migrate() error {
 		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (8)`)
 	}
 
+	if version < 9 {
+		if _, err := s.db.Exec(`
+			CREATE TABLE IF NOT EXISTS context_snapshots (
+				id              TEXT PRIMARY KEY,
+				namespace       TEXT NOT NULL,
+				query           TEXT NOT NULL,
+				query_embedding BLOB,
+				source_ids_json TEXT NOT NULL DEFAULT '[]',
+				tokens_used     INTEGER DEFAULT 0,
+				created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+			);
+			CREATE INDEX IF NOT EXISTS idx_snapshots_ns ON context_snapshots(namespace, created_at);
+
+			CREATE TABLE IF NOT EXISTS context_ratings (
+				id          TEXT PRIMARY KEY,
+				namespace   TEXT NOT NULL,
+				snapshot_id TEXT NOT NULL,
+				memory_id   TEXT NOT NULL,
+				memory_type TEXT NOT NULL,
+				phase       TEXT NOT NULL DEFAULT 'late',
+				rating      INTEGER NOT NULL,
+				cosine_sim  REAL,
+				importance  REAL,
+				salience    REAL,
+				sector      TEXT,
+				mem_type    TEXT,
+				file_overlap INTEGER,
+				age_days    REAL,
+				text_length INTEGER,
+				created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+			);
+			CREATE INDEX IF NOT EXISTS idx_ratings_ns ON context_ratings(namespace);
+			CREATE INDEX IF NOT EXISTS idx_ratings_memory ON context_ratings(memory_id);
+			CREATE INDEX IF NOT EXISTS idx_ratings_snapshot ON context_ratings(snapshot_id);
+			CREATE INDEX IF NOT EXISTS idx_ratings_phase ON context_ratings(phase);
+
+			CREATE TABLE IF NOT EXISTS session_ratings (
+				id          TEXT PRIMARY KEY,
+				namespace   TEXT NOT NULL,
+				session_id  TEXT NOT NULL,
+				score       INTEGER NOT NULL,
+				explanation TEXT,
+				query_used  TEXT,
+				tokens_used INTEGER,
+				created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+			);
+			CREATE INDEX IF NOT EXISTS idx_session_ratings_ns ON session_ratings(namespace, created_at);
+		`); err != nil {
+			return fmt.Errorf("migrate v9 (context ratings): %w", err)
+		}
+		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (9)`)
+	}
+
 	return nil
 }
 
@@ -1608,6 +1661,168 @@ func scanCoChangeEdges(rows *sql.Rows) ([]CoChangeEdge, error) {
 		edges = append(edges, e)
 	}
 	return edges, rows.Err()
+}
+
+// --- Context snapshots & ratings ---
+
+func (s *SQLiteStore) InsertSnapshot(id, namespace, query string, queryEmbedding []byte, sourceIDsJSON string, tokensUsed int) error {
+	_, err := s.db.Exec(
+		`INSERT INTO context_snapshots (id, namespace, query, query_embedding, source_ids_json, tokens_used)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		id, namespace, query, queryEmbedding, sourceIDsJSON, tokensUsed,
+	)
+	return err
+}
+
+func (s *SQLiteStore) GetSnapshot(id string) (*storedSnapshot, error) {
+	var ss storedSnapshot
+	err := s.db.QueryRow(
+		`SELECT id, namespace, query, query_embedding, source_ids_json, tokens_used, created_at
+		 FROM context_snapshots WHERE id = ?`, id,
+	).Scan(&ss.ID, &ss.Namespace, &ss.Query, &ss.QueryEmbedding, &ss.SourceIDsJSON, &ss.TokensUsed, &ss.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &ss, nil
+}
+
+func (s *SQLiteStore) GetLatestSnapshot(namespace string) (*storedSnapshot, error) {
+	var ss storedSnapshot
+	err := s.db.QueryRow(
+		`SELECT id, namespace, query, query_embedding, source_ids_json, tokens_used, created_at
+		 FROM context_snapshots WHERE namespace = ? ORDER BY created_at DESC LIMIT 1`, namespace,
+	).Scan(&ss.ID, &ss.Namespace, &ss.Query, &ss.QueryEmbedding, &ss.SourceIDsJSON, &ss.TokensUsed, &ss.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &ss, nil
+}
+
+func (s *SQLiteStore) InsertRating(r *ContextRating) error {
+	_, err := s.db.Exec(
+		`INSERT INTO context_ratings (id, namespace, snapshot_id, memory_id, memory_type, phase, rating,
+		 cosine_sim, importance, salience, sector, mem_type, file_overlap, age_days, text_length)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.Namespace, r.SnapshotID, r.MemoryID, r.MemoryType, r.Phase, r.Rating,
+		r.CosineSim, r.Importance, r.Salience, r.Sector, r.MemType, r.FileOverlap, r.AgeDays, r.TextLength,
+	)
+	return err
+}
+
+func (s *SQLiteStore) GetAllRatings(namespace string) ([]ContextRating, error) {
+	rows, err := s.db.Query(
+		`SELECT id, namespace, snapshot_id, memory_id, memory_type, phase, rating,
+		 cosine_sim, importance, salience, sector, mem_type, file_overlap, age_days, text_length, created_at
+		 FROM context_ratings WHERE namespace = ? ORDER BY created_at`, namespace,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ratings []ContextRating
+	for rows.Next() {
+		var r ContextRating
+		var createdAt string
+		if err := rows.Scan(&r.ID, &r.Namespace, &r.SnapshotID, &r.MemoryID, &r.MemoryType,
+			&r.Phase, &r.Rating, &r.CosineSim, &r.Importance, &r.Salience, &r.Sector,
+			&r.MemType, &r.FileOverlap, &r.AgeDays, &r.TextLength, &createdAt); err != nil {
+			continue
+		}
+		r.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+		ratings = append(ratings, r)
+	}
+	return ratings, rows.Err()
+}
+
+func (s *SQLiteStore) InsertSessionRating(sr *SessionRating) error {
+	_, err := s.db.Exec(
+		`INSERT INTO session_ratings (id, namespace, session_id, score, explanation, query_used, tokens_used)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		sr.ID, sr.Namespace, sr.SessionID, sr.Score, sr.Explanation, sr.QueryUsed, sr.TokensUsed,
+	)
+	return err
+}
+
+func (s *SQLiteStore) GetRatingStats(namespace string) (*RatingStats, error) {
+	stats := &RatingStats{
+		ByMemType: make(map[string]TypeStats),
+	}
+
+	// Total item ratings
+	s.db.QueryRow(`SELECT COUNT(*) FROM context_ratings WHERE namespace = ?`, namespace).Scan(&stats.TotalRatings)
+
+	// Total sessions (distinct snapshots)
+	s.db.QueryRow(`SELECT COUNT(DISTINCT snapshot_id) FROM context_ratings WHERE namespace = ?`, namespace).Scan(&stats.TotalSessions)
+
+	// Average precision (items rated >= 1 / total)
+	var relevant int
+	s.db.QueryRow(`SELECT COUNT(*) FROM context_ratings WHERE namespace = ? AND rating >= 1`, namespace).Scan(&relevant)
+	if stats.TotalRatings > 0 {
+		stats.AvgPrecision = float64(relevant) / float64(stats.TotalRatings)
+	}
+
+	// Average session score
+	var avgScore sql.NullFloat64
+	s.db.QueryRow(`SELECT AVG(CAST(score AS REAL)) FROM session_ratings WHERE namespace = ?`, namespace).Scan(&avgScore)
+	if avgScore.Valid {
+		stats.AvgSessionScore = avgScore.Float64
+	}
+
+	// Per memory type
+	typeRows, err := s.db.Query(
+		`SELECT COALESCE(mem_type, ''), AVG(CAST(rating AS REAL)), COUNT(*),
+		 SUM(CASE WHEN rating >= 1 THEN 1 ELSE 0 END)
+		 FROM context_ratings WHERE namespace = ? GROUP BY COALESCE(mem_type, '')`, namespace,
+	)
+	if err == nil {
+		defer typeRows.Close()
+		for typeRows.Next() {
+			var memType string
+			var avgRating float64
+			var count, relevantCount int
+			if err := typeRows.Scan(&memType, &avgRating, &count, &relevantCount); err != nil {
+				continue
+			}
+			if memType == "" {
+				memType = "general"
+			}
+			pct := 0.0
+			if count > 0 {
+				pct = float64(relevantCount) / float64(count) * 100
+			}
+			stats.ByMemType[memType] = TypeStats{
+				AvgRating:   avgRating,
+				RelevantPct: pct,
+				Count:       count,
+			}
+		}
+	}
+
+	// Recent precision (per snapshot, last 7)
+	precRows, err := s.db.Query(
+		`SELECT snapshot_id,
+		 CAST(SUM(CASE WHEN rating >= 1 THEN 1 ELSE 0 END) AS REAL) / COUNT(*) as prec
+		 FROM context_ratings WHERE namespace = ?
+		 GROUP BY snapshot_id ORDER BY MAX(created_at) DESC LIMIT 7`, namespace,
+	)
+	if err == nil {
+		defer precRows.Close()
+		for precRows.Next() {
+			var snapID string
+			var prec float64
+			if err := precRows.Scan(&snapID, &prec); err != nil {
+				continue
+			}
+			stats.RecentPrecision = append(stats.RecentPrecision, prec)
+		}
+		// Reverse so oldest is first
+		for i, j := 0, len(stats.RecentPrecision)-1; i < j; i, j = i+1, j-1 {
+			stats.RecentPrecision[i], stats.RecentPrecision[j] = stats.RecentPrecision[j], stats.RecentPrecision[i]
+		}
+	}
+
+	return stats, nil
 }
 
 // ExpandEntitiesWithEdges returns neighbor entity IDs with their connecting edge info.

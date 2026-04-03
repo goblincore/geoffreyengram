@@ -25,6 +25,13 @@ var allTasks = []task{
 	taskRespectWarning,
 	taskSessionContinuity,
 	taskNoiseFiltering,
+	// Code generation guidance
+	taskConstrainedGeneration,
+	taskWarningAwareRefactor,
+	taskPatternContinuation,
+	// Context triage
+	taskPrecisionTriage,
+	taskRecallTriage,
 }
 
 func taskByName(name string) *task {

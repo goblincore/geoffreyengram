@@ -210,6 +210,7 @@ type ContextBlock struct {
 	TokenCount int         // Estimated tokens used (chars/4 heuristic)
 	Sources    []SourceRef // For attribution/debugging
 	Intent     Intent      // Detected or explicit intent used for assembly
+	SnapshotID string      // ID of persisted context snapshot (for retrospective rating)
 }
 
 // SourceRef traces a context fragment back to its source.
@@ -642,6 +643,15 @@ type Store interface {
 	GetCoChangeAll(namespace string, limit int) ([]CoChangeEdge, error)
 	UpdateCoChangeConcepts(namespace, source, target, conceptsJSON string) error
 	DecayCoChange(namespace string, halfLifeDays int) error
+
+	// Context snapshots & ratings
+	InsertSnapshot(id, namespace, query string, queryEmbedding []byte, sourceIDsJSON string, tokensUsed int) error
+	GetSnapshot(id string) (*storedSnapshot, error)
+	GetLatestSnapshot(namespace string) (*storedSnapshot, error)
+	InsertRating(r *ContextRating) error
+	GetAllRatings(namespace string) ([]ContextRating, error)
+	InsertSessionRating(sr *SessionRating) error
+	GetRatingStats(namespace string) (*RatingStats, error)
 
 	// Lifecycle
 	Close() error

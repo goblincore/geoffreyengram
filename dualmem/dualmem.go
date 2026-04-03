@@ -776,12 +776,22 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 		e.recordSessionMarker(userID)
 	}
 
-	return &ContextBlock{
+	block := &ContextBlock{
 		Text:       text,
 		TokenCount: tokensUsed,
 		Sources:    sources,
 		Intent:     intent,
-	}, nil
+	}
+
+	// Persist context snapshot for retrospective rating.
+	// Best-effort — snapshot failure must not break context assembly.
+	snapID := fmt.Sprintf("snap_%d", time.Now().UnixNano())
+	snapshot := BuildSnapshot(snapID, userID, query, block, results.DetailMemories, time.Now())
+	if err := e.SaveSnapshot(snapshot); err == nil {
+		block.SnapshotID = snapID
+	}
+
+	return block, nil
 }
 
 // extractFileHints collects file paths from checkpoints and detail memories
@@ -1377,6 +1387,16 @@ func (e *Engine) Close() error {
 		e.pipeline.Stop()
 	}
 	return e.store.Close()
+}
+
+// GetConfigValue reads a config value from the store.
+func (e *Engine) GetConfigValue(key string) (string, error) {
+	return e.store.GetConfigValue(key)
+}
+
+// SetConfigValue writes a config value to the store.
+func (e *Engine) SetConfigValue(key, value string) error {
+	return e.store.SetConfigValue(key, value)
 }
 
 // notifyPipeline signals the compression pipeline that new sketch data is available.

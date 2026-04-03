@@ -215,6 +215,12 @@ func main() {
 		cmdFileContext(cfg)
 	case "file-index":
 		cmdFileIndex(cfg)
+	case "rate":
+		cmdRate(cfg)
+	case "train":
+		cmdTrain(cfg)
+	case "stats":
+		cmdStats(cfg)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -246,6 +252,9 @@ Commands:
   docs        List/show/delete/export knowledge docs
   file-context  Get memories associated with a specific file (warnings, decisions, maps)
   file-index    Generate file index for Read hook fast-path filtering
+  rate        Submit context quality ratings (item-level or session-level)
+  train       Train the re-ranker model from accumulated ratings
+  stats       Show context quality statistics and re-ranker status
   gc          Garbage collect stale/expired memories
 
 Flags (all commands):
@@ -459,7 +468,11 @@ func cmdContext(cfg CLIConfig) {
 	if intentLabel == "" {
 		intentLabel = "default"
 	}
-	fmt.Printf("\n(%d tokens, %d sources, intent: %s)\n", block.TokenCount, len(block.Sources), intentLabel)
+	snapInfo := ""
+	if block.SnapshotID != "" {
+		snapInfo = fmt.Sprintf(", snapshot: %s", block.SnapshotID)
+	}
+	fmt.Printf("\n(%d tokens, %d sources, intent: %s%s)\n", block.TokenCount, len(block.Sources), intentLabel, snapInfo)
 }
 
 func cmdProfile(cfg CLIConfig) {
@@ -1597,6 +1610,198 @@ func cmdFileIndex(cfg CLIConfig) {
 		json.NewEncoder(os.Stdout).Encode(indexData)
 	} else {
 		fmt.Printf("File index: %s (%d files)\n", indexPath, len(files))
+	}
+}
+
+// --- Rate command ---
+
+func cmdRate(cfg CLIConfig) {
+	fs := flag.NewFlagSet("rate", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace")
+	snapshot := fs.String("snapshot", "", "Snapshot ID to rate items for")
+	phase := fs.String("phase", "late", "Rating phase: early or late")
+	ratingsJSON := fs.String("ratings", "", `Item ratings as JSON: {"mem_id": 0-2, ...}`)
+	// Session-level rating
+	session := fs.Bool("session", false, "Submit a session-level rating instead")
+	score := fs.Int("score", 0, "Session score (1-5)")
+	explanation := fs.String("explanation", "", "Session rating explanation")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	namespace := resolveNamespace(*ns, cfg)
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	if *session {
+		if *score < 1 || *score > 5 {
+			fmt.Fprintln(os.Stderr, "session score must be 1-5")
+			os.Exit(1)
+		}
+		sr := &dualmem.SessionRating{
+			ID:          fmt.Sprintf("sr_%d", time.Now().UnixNano()),
+			Namespace:   namespace,
+			SessionID:   fmt.Sprintf("sess_%d", time.Now().UnixNano()),
+			Score:       *score,
+			Explanation: *explanation,
+		}
+		if err := engine.SubmitSessionRating(sr); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		if *jsonOut {
+			json.NewEncoder(os.Stdout).Encode(map[string]any{"status": "ok", "session_rating_id": sr.ID})
+		} else {
+			fmt.Printf("Session rating saved (score=%d)\n", *score)
+		}
+		return
+	}
+
+	// Item-level rating
+	if *snapshot == "" || *ratingsJSON == "" {
+		fmt.Fprintln(os.Stderr, "usage: dualmem rate --snapshot <id> --ratings '{\"mem_id\": 2, ...}'")
+		fmt.Fprintln(os.Stderr, "       dualmem rate --session --score 4 --explanation 'helpful'")
+		os.Exit(1)
+	}
+
+	var ratings map[string]int
+	if err := json.Unmarshal([]byte(*ratingsJSON), &ratings); err != nil {
+		fmt.Fprintf(os.Stderr, "invalid ratings JSON: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := engine.SubmitRatings(namespace, *snapshot, *phase, ratings); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(map[string]any{"status": "ok", "items_rated": len(ratings), "phase": *phase})
+	} else {
+		fmt.Printf("Rated %d items (phase=%s, snapshot=%s)\n", len(ratings), *phase, *snapshot)
+	}
+}
+
+// --- Train command ---
+
+func cmdTrain(cfg CLIConfig) {
+	fs := flag.NewFlagSet("train", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	namespace := resolveNamespace(*ns, cfg)
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	rows, err := engine.GetTrainingRows(namespace)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error loading training data: %v\n", err)
+		os.Exit(1)
+	}
+
+	weights, err := dualmem.TrainReranker(rows)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "training failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Store weights in config
+	weightsJSON, _ := json.Marshal(weights)
+	if err := engine.SetConfigValue("reranker_weights", string(weightsJSON)); err != nil {
+		fmt.Fprintf(os.Stderr, "error saving weights: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(weights)
+	} else {
+		fmt.Printf("Re-ranker trained on %d samples\n", weights.SampleCount)
+		fmt.Printf("Coefficients:\n")
+		featureNames := []string{"cosine_sim", "importance", "salience", "type_is_warning",
+			"type_is_decision", "type_is_continuity", "file_overlap", "age_days", "text_length", "sector_match"}
+		for i, name := range featureNames {
+			if weights.Coefficients[i] != 0 {
+				fmt.Printf("  %-20s %+.3f\n", name, weights.Coefficients[i])
+			}
+		}
+		fmt.Printf("  %-20s %+.3f\n", "bias", weights.Bias)
+	}
+}
+
+// --- Stats command ---
+
+func cmdStats(cfg CLIConfig) {
+	fs := flag.NewFlagSet("stats", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	namespace := resolveNamespace(*ns, cfg)
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	stats, err := engine.GetRatingStats(namespace)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(stats)
+		return
+	}
+
+	fmt.Printf("Context Quality Stats (%s)\n", namespace)
+	fmt.Println(strings.Repeat("─", 45))
+	fmt.Printf("  Total ratings:     %d items across %d sessions\n", stats.TotalRatings, stats.TotalSessions)
+	fmt.Printf("  Avg precision:     %.2f (items rated 1-2 / total)\n", stats.AvgPrecision)
+	if stats.AvgSessionScore > 0 {
+		fmt.Printf("  Avg session score: %.1f / 5.0\n", stats.AvgSessionScore)
+	}
+
+	if len(stats.ByMemType) > 0 {
+		fmt.Println()
+		fmt.Println("  By memory type:")
+		for memType, ts := range stats.ByMemType {
+			fmt.Printf("    %-14s avg=%.2f  (%.0f%% relevant, n=%d)\n", memType, ts.AvgRating, ts.RelevantPct, ts.Count)
+		}
+	}
+
+	// Re-ranker status
+	weightsJSON, _ := engine.GetConfigValue("reranker_weights")
+	if weightsJSON != "" {
+		var weights dualmem.RerankerWeights
+		if json.Unmarshal([]byte(weightsJSON), &weights) == nil {
+			fmt.Printf("\n  Re-ranker: trained (%d samples, %s)\n", weights.SampleCount, weights.TrainedAt.Format("2006-01-02"))
+			if weights.IsStale(60) {
+				fmt.Println("  ⚠ Weights are stale (>60 days) — run `dualmem train` to refresh")
+			}
+		}
+	} else {
+		fmt.Printf("\n  Re-ranker: not trained (need 50+ ratings)\n")
+	}
+
+	if len(stats.RecentPrecision) > 0 {
+		fmt.Print("\n  Trend (recent sessions): ")
+		for i, p := range stats.RecentPrecision {
+			if i > 0 {
+				fmt.Print(" → ")
+			}
+			fmt.Printf("%.2f", p)
+		}
+		fmt.Println()
 	}
 }
 

@@ -36,6 +36,9 @@ func benchScenarios() []benchScenario {
 		scenarioNoiseResistance(),
 		scenarioCrossSector(),
 		scenarioIntentAware(),
+		scenarioCoChangeBoost(),
+		scenarioEntityGraphBoost(),
+		scenarioKnowledgeDocPreference(),
 	}
 }
 
@@ -260,4 +263,86 @@ func fillerMemory(i int) string {
 		"Set up codecov integration with minimum coverage threshold",
 	}
 	return fillers[i%len(fillers)]
+}
+
+// scenarioCoChangeBoost tests whether memories about file A surface when querying about file B,
+// when A and B co-change together.
+func scenarioCoChangeBoost() benchScenario {
+	return benchScenario{
+		Name:        "Co-Change Boost",
+		Description: "Tests co-change: memory about file A should surface when querying about co-changing file B",
+		Memories: []benchMemory{
+			// Memory about auth/jwt.go
+			{Text: "JWT validation uses RS256 signing with key rotation every 90 days", Type: "decision", Sector: "decision", Salience: 0.7, Files: []string{"auth/jwt.go"}, Tag: "jwt-decision"},
+			// Memory about auth/middleware.go (co-changes with jwt.go)
+			{Text: "Auth middleware extracts bearer token from Authorization header", Type: "", Sector: "map", Salience: 0.5, Files: []string{"auth/middleware.go"}, Tag: "middleware-map"},
+			// Noise
+			{Text: "Frontend uses React 18 with concurrent rendering mode", Sector: "map", Salience: 0.3, Tag: "frontend-react"},
+			{Text: "Docker compose exposes port 3000 for development", Sector: "map", Salience: 0.3, Tag: "docker-dev"},
+			{Text: "CI pipeline runs on every push to main branch", Sector: "map", Salience: 0.3, Tag: "ci-pipeline"},
+		},
+		Queries: []benchQuery{
+			{
+				// Querying about jwt.go should also surface middleware.go memory via co-change
+				Query:        "JWT token validation in auth/jwt.go",
+				TokenBudget:  2000,
+				ExpectedTags: []string{"jwt-decision", "middleware-map"},
+				ForbidTags:   []string{"frontend-react", "docker-dev"},
+			},
+		},
+	}
+}
+
+// scenarioEntityGraphBoost tests whether entity graph connections cause related memories to surface.
+func scenarioEntityGraphBoost() benchScenario {
+	return benchScenario{
+		Name:        "Entity Graph Boost",
+		Description: "Tests entity graph: memories linked to related entities should get boosted",
+		Memories: []benchMemory{
+			// Auth-related memories with overlapping entities
+			{Text: "AuthService handles JWT generation and validation for all API endpoints", Type: "decision", Sector: "decision", Salience: 0.7, Files: []string{"auth/service.go"}, Tag: "auth-service"},
+			{Text: "TokenStore persists refresh tokens in Redis with 7-day TTL", Type: "decision", Sector: "decision", Salience: 0.6, Files: []string{"auth/token_store.go"}, Tag: "token-store"},
+			// Indirectly related (shares entity "authentication")
+			{Text: "OAuth2 provider integration for Google and GitHub SSO login", Type: "decision", Sector: "decision", Salience: 0.6, Files: []string{"auth/oauth.go"}, Tag: "oauth-provider"},
+			// Noise
+			{Text: "Payment webhook validates Stripe signature before processing", Type: "warning", Sector: "warning", Salience: 0.8, Files: []string{"payments/webhook.go"}, Tag: "payment-webhook"},
+			{Text: "Email service uses SendGrid API v3 with templates", Sector: "map", Salience: 0.4, Tag: "email-sendgrid"},
+			{Text: "Search uses Elasticsearch 8 with custom analyzers", Sector: "map", Salience: 0.3, Tag: "search-elastic"},
+		},
+		Queries: []benchQuery{
+			{
+				Query:        "authentication service and token management",
+				TokenBudget:  2000,
+				ExpectedTags: []string{"auth-service", "token-store", "oauth-provider"},
+				ForbidTags:   []string{"email-sendgrid", "search-elastic"},
+			},
+		},
+	}
+}
+
+// scenarioKnowledgeDocPreference tests that knowledge docs are preferred over raw memories
+// when they cover the same content.
+func scenarioKnowledgeDocPreference() benchScenario {
+	return benchScenario{
+		Name:        "Knowledge Doc Preference",
+		Description: "Tests knowledge doc preference: synthesized docs should surface instead of covered raw memories",
+		Memories: []benchMemory{
+			// Raw memories about database decisions (would be synthesized into a knowledge doc)
+			{Text: "Database uses PostgreSQL 15 with pgvector extension for embeddings", Type: "decision", Sector: "decision", Salience: 0.7, Files: []string{"store/postgres.go"}, Tag: "db-postgres"},
+			{Text: "Connection pool configured with max 20 connections per service instance", Type: "decision", Sector: "decision", Salience: 0.5, Files: []string{"store/pool.go"}, Tag: "db-pool"},
+			{Text: "Migrations managed with golang-migrate, auto-run on startup in dev mode", Type: "decision", Sector: "decision", Salience: 0.5, Files: []string{"store/migrate.go"}, Tag: "db-migrate"},
+			// Non-database noise
+			{Text: "API gateway uses rate limiting with 100 req/s per IP", Sector: "map", Salience: 0.4, Tag: "api-ratelimit"},
+			{Text: "Monitoring uses Prometheus metrics with Grafana dashboards", Sector: "map", Salience: 0.3, Tag: "monitoring-prom"},
+		},
+		Queries: []benchQuery{
+			{
+				// Should surface all three database memories (or a knowledge doc covering them)
+				Query:        "database architecture and configuration",
+				TokenBudget:  2000,
+				ExpectedTags: []string{"db-postgres", "db-pool", "db-migrate"},
+				ForbidTags:   []string{"api-ratelimit", "monitoring-prom"},
+			},
+		},
+	}
 }
