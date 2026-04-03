@@ -200,6 +200,11 @@ dualmem distill --dry-run                               # preview extracted fact
 dualmem distill --file session.jsonl                    # explicit transcript file
 dualmem distill --auto                                  # idempotent (used by hook)
 
+# File-scoped recall — proactive memory at point of use
+dualmem file-context rate_limiter.go                    # memories for a specific file
+dualmem file-context store_sqlite.go --json             # JSON output
+dualmem file-index                                      # regenerate file index for hook
+
 # Entity graph
 dualmem entities                                        # graph stats (nodes, edges, links)
 dualmem entities search "SQLite"                        # find entities by name
@@ -219,6 +224,41 @@ dualmem status
 ### Claude Code integration
 
 Copy [`docs/example-claude-md.md`](docs/example-claude-md.md) into your `~/.claude/CLAUDE.md` to give Claude Code cross-session memory. It teaches the agent to automatically load context at session start, save decisions/warnings/checkpoints during work, search memory before exploring, and use `search-code` for HDC-powered file discovery.
+
+### File-scoped recall — proactive memory at point of use
+
+Memories are normally loaded at session start based on the initial task query. But a warning about `rate_limiter.go` won't surface if the session task is "refactor error handling." File-scoped recall solves this by injecting relevant memories when Claude opens a file.
+
+```bash
+# Query memories associated with a specific file (no LLM, pure SQLite)
+dualmem file-context rate_limiter.go
+
+# Generate the file index (list of files that have associated memories)
+dualmem file-index
+```
+
+**How it works:** A Claude Code `PreToolUse` hook fires before every `Read` tool call. It checks a pre-built file index (JSON in `$TMPDIR`) — if the file has associated warnings, decisions, or maps, it queries `dualmem file-context` and injects the results as context. For files with no memories (~95% of reads), the hook exits immediately with zero overhead.
+
+**Setup:** Add the Read hook to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [{
+          "type": "command",
+          "command": "~/.claude/hooks/dualmem-file-recall.sh",
+          "timeout": 5
+        }]
+      }
+    ]
+  }
+}
+```
+
+The file index auto-regenerates after `dualmem add --files`, `dualmem distill`, and `dualmem context` (session start). Only high-signal memory types are indexed: warnings, decisions, and maps.
 
 ### Memory types
 
@@ -330,7 +370,7 @@ cat transcript.jsonl | dualmem distill --stdin
 }
 ```
 
-The `--auto` flag is idempotent — it tracks the last distilled session ID and skips if already done. Distillation extracts up to 20 facts per session, skips near-duplicates (cosine > 0.90), floors salience at 0.60, and auto-triggers `synthesize` when 3+ new memories are added.
+The `--auto` flag is idempotent — it tracks the last distilled session ID and skips if already done. Distillation extracts up to 20 facts per session, skips near-duplicates (cosine > 0.90), floors salience at 0.60, persists a session summary as a continuity memory (salience 0.75, with the union of all extracted file paths), and auto-triggers `synthesize` when 3+ new memories are added.
 
 Extracted entity triples (e.g., `store_sqlite.go → implements → Store interface`) are written into the entity graph, enabling cross-memory traversal in future searches.
 
@@ -603,6 +643,7 @@ geoffreyengram/
 │   ├── classify_embedding.go  # EmbeddingClassifier (ported from engram)
 │   ├── summarize_gemini.go    # GeminiSummarizer (episode/arc/profile compression)
 │   ├── knowledge.go       # Knowledge doc synthesis (clustering, prompts, staleness)
+│   ├── distill.go         # Session transcript distillation (fact extraction, summary persistence)
 │   ├── store_sqlite.go    # SQLite backend (migrations v1-v6)
 │   └── project.go         # Random projection, cosine similarity
 ├── cmd/
@@ -616,7 +657,7 @@ geoffreyengram/
 
 ## Status
 
-Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 253 tests passing.
+Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 250+ tests passing.
 
 ## License
 
