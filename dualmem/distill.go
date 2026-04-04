@@ -426,6 +426,7 @@ For each fact, classify it:
 - "warning": Something that must not be changed, is fragile, or requires caution
 - "continuity": Work in progress — what was done and what remains
 - "map": Where things are in the codebase, file relationships
+- "trace": A code flow discovery — sequences where the assistant traced how code connects across files (e.g., function A calls B which triggers C). Include structured trace (file:line → file:line) followed by prose explanation. Salience: 0.8
 - "general": Other useful context
 
 Extract entity relationships as triples (source → relation → target).
@@ -459,6 +460,7 @@ Rules:
 - Salience: 0.9 for warnings/critical decisions, 0.7-0.8 for important context, 0.6 for general
 - Skip trivial exchanges, greetings, and tool-only interactions
 - Focus on what a future AI agent needs to know to continue this work
+- Look for exploration patterns: sequences of grep/read across multiple files that trace code flows. Extract these as "trace" type with structured paths and what was discovered
 
 TRANSCRIPT:
 %s`, maxFacts, transcript)
@@ -493,7 +495,7 @@ func parseDistillResponse(response string) (*distillExtractionResponse, error) {
 		}
 		// Validate type
 		switch result.Facts[i].Type {
-		case "decision", "warning", "continuity", "map", "general":
+		case "decision", "warning", "continuity", "map", "trace", "general":
 			// valid
 		default:
 			result.Facts[i].Type = "general"

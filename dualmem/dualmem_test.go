@@ -1501,3 +1501,69 @@ func TestFileIndex(t *testing.T) {
 		t.Errorf("FileIndex should NOT contain qux.go (general type), got %v", files)
 	}
 }
+
+func TestTraceType(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Add a trace memory with default salience (should be 0.8)
+	if err := engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "routes/index.ts:320 (verifiedContactRoute)\n  → contact-methods.ts:187 (extractContactMethod)\n\nOTP verification delegates to brain-service contact-methods",
+		SectorHint:  "procedural",
+		Type:        "trace",
+		Files:       []string{"routes/index.ts", "contact-methods.ts"},
+	}, "user1"); err != nil {
+		t.Fatalf("AddWithOptions trace: %v", err)
+	}
+
+	// Verify trace appears in FileContext for associated files
+	results, err := engine.FileContext(ctx, "user1", "contact-methods.ts", 0)
+	if err != nil {
+		t.Fatalf("FileContext: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("Expected 1 trace result for contact-methods.ts, got %d", len(results))
+	}
+	if results[0].Type != "trace" {
+		t.Errorf("Expected type 'trace', got %q", results[0].Type)
+	}
+	if results[0].Salience != 0.8 {
+		t.Errorf("Expected default trace salience 0.8, got %.2f", results[0].Salience)
+	}
+
+	// Verify trace has same sort priority as decision/continuity
+	tracePriority := typePriority("trace")
+	decisionPriority := typePriority("decision")
+	warningPriority := typePriority("warning")
+	generalPriority := typePriority("")
+
+	if tracePriority != decisionPriority {
+		t.Errorf("trace priority (%d) should equal decision priority (%d)", tracePriority, decisionPriority)
+	}
+	if tracePriority <= generalPriority {
+		t.Errorf("trace priority (%d) should be > general priority (%d)", tracePriority, generalPriority)
+	}
+	if tracePriority >= warningPriority {
+		t.Errorf("trace priority (%d) should be < warning priority (%d)", tracePriority, warningPriority)
+	}
+
+	// Verify TypeMultiplier routes trace same as map
+	exploreProfile := IntentProfiles[IntentExplore]
+	traceMult := exploreProfile.TypeMultiplier("trace")
+	mapMult := exploreProfile.TypeMultiplier("map")
+	if traceMult != mapMult {
+		t.Errorf("trace multiplier (%.2f) should equal map multiplier (%.2f) for explore intent", traceMult, mapMult)
+	}
+
+	// Verify explore intent boosts traces
+	now := time.Now()
+	recent := now.Add(-1 * time.Hour)
+	trace := DetailMemory{Type: "trace", LastAccessedAt: recent}
+	general := DetailMemory{Type: "", LastAccessedAt: recent}
+
+	traceScore := detailSortScore(trace, &exploreProfile, now, "")
+	generalScore := detailSortScore(general, &exploreProfile, now, "")
+	if traceScore <= generalScore {
+		t.Errorf("explore intent: trace (%.2f) should score > general (%.2f)", traceScore, generalScore)
+	}
+}

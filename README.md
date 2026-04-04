@@ -69,9 +69,10 @@ Memories are classified into sectors and scored by importance. Typed memories (`
 dualmem add --type warning --text "Don't touch rateLimiter cleanup()" --files "rate_limiter.go" --salience 0.9
 dualmem add --type decision --text "Rejected Postgres, chose SQLite" --files "store_sqlite.go"
 dualmem add --type continuity --text "Done: JWT. Remaining: refresh tokens" --files "auth.go,jwt.go"
+dualmem add --type trace --text "routes/index.ts:320 → contact-methods.ts:187\nOTP verification flow" --files "index.ts,contact-methods.ts"
 ```
 
-Context assembly prioritizes: warnings first, then decisions, then general memories. Intent-aware weighting adjusts per query — debugging boosts warnings (2x), resuming boosts continuity (2x).
+Context assembly prioritizes: warnings first, then decisions/continuity/traces, then general memories. Intent-aware weighting adjusts per query — debugging boosts warnings (2x), exploring boosts traces and maps (2x), resuming boosts continuity (2x).
 
 ### Checkpoints — structured session handoffs
 
@@ -149,7 +150,7 @@ dualmem distill --auto       # idempotent (for hooks)
 Inject relevant memories when Claude opens a file — warnings about `rate_limiter.go` surface even if the session task is "refactor error handling":
 
 ```bash
-dualmem file-context rate_limiter.go   # memories for a specific file
+dualmem file-context rate_limiter.go   # memories for a specific file (warnings, decisions, maps, traces)
 dualmem file-index                     # regenerate file index for hook
 ```
 
@@ -198,10 +199,13 @@ The agent's fetch/skip behavior feeds directly into the re-ranker training pipel
 
 ### Auto-capture — ambient file interaction logging
 
-A PostToolUse hook logs file interactions during the session to a local JSONL buffer (no API calls, ~5ms). At distill time, this enriches the transcript with a complete file-touch timeline:
+A PostToolUse hook logs file interactions during the session to a local JSONL buffer (no API calls, ~5ms). At distill time, this enriches the transcript with a complete file-touch timeline.
+
+The hook also detects **exploration patterns** — when the agent does 4+ grep/read calls across 3+ files within 2 minutes (tracing a code flow), it nudges the agent to save what it discovered as a `trace` memory. This captures the structured path and semantic understanding before it's lost:
 
 ```bash
-# Hook auto-logs: {tool, files, timestamp} for Read/Write/Edit/Grep/Glob/Bash
+# Hook auto-logs: {tool, files, timestamp, query, lines} for Read/Write/Edit/Grep/Glob/Bash
+# Exploration detection triggers nudge: "Consider saving: dualmem add --type trace ..."
 # At session end:
 dualmem distill --auto  # transcript + file interactions → richer memory extraction
 ```

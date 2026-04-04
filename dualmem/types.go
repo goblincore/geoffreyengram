@@ -346,7 +346,7 @@ func (ip IntentProfile) TypeMultiplier(memType string) float64 {
 		return ip.Decision
 	case "continuity":
 		return ip.Continuity
-	case "map":
+	case "map", "trace":
 		return ip.Map
 	case "seed":
 		if ip.Seed != 0 {

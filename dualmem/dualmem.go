@@ -134,7 +134,12 @@ func (e *Engine) AddWithOptions(ctx context.Context, input MemoryInput, userID s
 	// Determine salience
 	salience := input.Salience
 	if salience == 0 {
-		salience = 0.5
+		switch input.Type {
+		case "trace":
+			salience = 0.8 // exploration traces represent significant effort
+		default:
+			salience = 0.5
+		}
 	}
 
 	// Embed first — needed for EmbeddingClassifier (zero extra API calls)
@@ -338,7 +343,7 @@ func (e *Engine) FileContext(ctx context.Context, userID string, filename string
 		limit = 5
 	}
 
-	rows, err := e.store.GetDetailsByFiles(userID, basename, []string{"warning", "decision", "map"}, limit)
+	rows, err := e.store.GetDetailsByFiles(userID, basename, []string{"warning", "decision", "map", "trace"}, limit)
 	if err != nil {
 		return nil, fmt.Errorf("dualmem: file context: %w", err)
 	}
@@ -1822,7 +1827,7 @@ func typePriority(t string) int {
 	switch t {
 	case "warning":
 		return 2
-	case "decision", "continuity":
+	case "decision", "continuity", "trace":
 		return 1
 	default:
 		return 0
@@ -1838,6 +1843,8 @@ func formatTypeLabel(memType, sector string, importance float64) string {
 		return fmt.Sprintf("[Decision — %s (importance: %.2f)]", sector, importance)
 	case "continuity":
 		return fmt.Sprintf("[Continuity — %s (importance: %.2f)]", sector, importance)
+	case "trace":
+		return fmt.Sprintf("[🔍 Trace — %s (importance: %.2f)]", sector, importance)
 	case "seed":
 		return fmt.Sprintf("[Codebase Context — %s]", sector)
 	default:
