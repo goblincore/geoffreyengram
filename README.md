@@ -42,7 +42,7 @@ graph TB
 
 **Dual-path routing**: Memories are scored at insert time (no LLM calls). High-importance memories (decisions, warnings) stay at full fidelity in the Detail Path. Everything else is compressed into a hierarchical sketch: episodes (30-day retention) → narrative arcs (90-day, 128d projection) → user profile (64d projection).
 
-**Context assembly**: Given a query and token budget, `AssembleContext` packs the most relevant context in priority order: structural diff → checkpoints → code map (HDC-ranked, co-change-expanded) → knowledge docs → profile → arcs → detail memories → episodes. Task-aware: auto-detects intent (debug/continue/feature/explore) and adjusts memory type weights.
+**Context assembly**: Given a query and token budget, `AssembleContext` packs the most relevant context in priority order: structural diff → checkpoints → code map (HDC-ranked, co-change-expanded) → knowledge docs → profile → arcs → detail memories → episodes. Task-aware: auto-detects intent (debug/continue/feature/explore) and adjusts memory type weights. Supports **progressive disclosure** (`--index` mode) — outputs a compact index of available items with token costs, then the agent fetches only what it needs via `dualmem show`.
 
 ## Quickstart
 
@@ -180,6 +180,32 @@ dualmem train   # fits logistic regression from ratings → stores weights
 
 The re-ranker adjusts candidate memory ordering during `AssembleContext` using 10 features (cosine similarity, importance, salience, memory type, file overlap, age, etc.). Late-phase ratings are weighted 2x over early-phase in training. Safety rails: coefficients bounded to [-5, 5], re-ranker only adjusts ordering (never filters), `--no-rerank` flag for comparison.
 
+### Progressive disclosure — index-then-fetch
+
+Instead of committing the full token budget upfront, probe what's available first:
+
+```bash
+dualmem context "auth refactor" --budget 3000 --index
+# → compact table (~300 tokens): type icons, IDs, titles, token costs
+# → includes snapshot ID for relevance tracking
+
+dualmem show --snapshot snap_17753... mem_a3f2 kdoc_dualmem chk_auth
+# → full text of selected items only (~700 tokens instead of 3000)
+# → implicitly rates fetched items as relevant, skipped as irrelevant
+```
+
+The agent's fetch/skip behavior feeds directly into the re-ranker training pipeline — no explicit rating step needed. Fetched items get rating=2, skipped items get rating=0, with training weight 1.5 (between early=1.0 and late=2.0).
+
+### Auto-capture — ambient file interaction logging
+
+A PostToolUse hook logs file interactions during the session to a local JSONL buffer (no API calls, ~5ms). At distill time, this enriches the transcript with a complete file-touch timeline:
+
+```bash
+# Hook auto-logs: {tool, files, timestamp} for Read/Write/Edit/Grep/Glob/Bash
+# At session end:
+dualmem distill --auto  # transcript + file interactions → richer memory extraction
+```
+
 ### Seed — cold-start context
 
 Pre-seed context for new projects by analyzing codebase structure:
@@ -203,6 +229,8 @@ dualmem search-code "authentication middleware"
 # Context assembly
 dualmem context "auth system" --budget 3000
 dualmem context "fix the bug" --intent debug
+dualmem context "task" --budget 3000 --index              # progressive disclosure
+dualmem show --snapshot snap_xxx mem_a kdoc_b              # fetch specific items
 
 # Session management
 dualmem checkpoint --task "auth refactor" --status in_progress --files "auth.go" --done "JWT" --remaining "refresh,logout"
@@ -254,6 +282,7 @@ Copy [`docs/example-claude-md.md`](docs/example-claude-md.md) into your `~/.clau
 **Hooks** (add to `.claude/settings.json`):
 - **Stop hook**: `dualmem distill --auto` — ambient memory capture at session end
 - **PreToolUse Read hook**: `dualmem file-context` — inject file-scoped memories when Claude opens a file
+- **PostToolUse hook**: `dualmem-autocapture.sh` — log file interactions to session JSONL for distill enrichment
 
 See [`docs/example-claude-md.md`](docs/example-claude-md.md) for the full template.
 

@@ -556,6 +556,30 @@ func (s *SQLiteStore) GetLowestImportanceDetail(userID string) (*detailWithVecto
 	return &d, nil
 }
 
+func (s *SQLiteStore) GetDetailByID(id string) (*detailWithVector, error) {
+	row := s.db.QueryRow(`
+		SELECT id, user_id, text, embedding, importance_score, sector, entities_json, session_id, salience, created_at, last_accessed_at, access_count, type, files_json
+		FROM detail_memories WHERE id = ?`, id)
+
+	var d detailWithVector
+	var vecBlob []byte
+	var entitiesJSON, filesJSON, createdAt, lastAccessed string
+	if err := row.Scan(&d.ID, &d.UserID, &d.Text, &vecBlob, &d.ImportanceScore,
+		&d.Sector, &entitiesJSON, &d.SessionID, &d.Salience,
+		&createdAt, &lastAccessed, &d.AccessCount, &d.Type, &filesJSON); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	d.Vector = decodeVector(vecBlob)
+	d.Entities = decodeEntities(entitiesJSON)
+	d.Files = decodeStringSlice(filesJSON)
+	d.CreatedAt = parseTime(createdAt)
+	d.LastAccessedAt = parseTime(lastAccessed)
+	return &d, nil
+}
+
 func (s *SQLiteStore) DeleteDetail(id string) error {
 	_, err := s.db.Exec(`DELETE FROM detail_memories WHERE id = ?`, id)
 	return err

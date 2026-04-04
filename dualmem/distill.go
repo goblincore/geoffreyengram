@@ -2,6 +2,7 @@ package dualmem
 
 import (
 	"context"
+	"crypto/md5"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -79,6 +80,9 @@ func (e *Engine) Distill(ctx context.Context, opts DistillOpts, userID string) (
 			return &DistillResult{SessionID: sessionID, Summary: "already distilled"}, nil
 		}
 	}
+
+	// Step 1b: Enrich transcript with auto-captured file interactions (if available)
+	transcript = enrichWithSessionLog(transcript, opts.Namespace, e.cfg.RootDir)
 
 	// Step 2: Extract facts via LLM
 	extraction, err := e.extractFromTranscript(ctx, transcript, opts.MaxFacts)
@@ -506,6 +510,122 @@ func collectAllFiles(facts []DistilledFact) []string {
 		}
 	}
 	return result
+}
+
+// enrichWithSessionLog appends a file-touch summary from the auto-capture hook
+// to the transcript. This gives the LLM a complete picture of which files were
+// read/written during the session, even if the transcript was truncated.
+func enrichWithSessionLog(transcript, namespace, rootDir string) string {
+	// Resolve namespace hash the same way the hook does
+	nsBase := ""
+	if rootDir != "" {
+		nsBase = filepath.Base(rootDir)
+	} else if namespace != "" {
+		// Strip "claude:" prefix if present
+		nsBase = strings.TrimPrefix(namespace, "claude:")
+	}
+	if nsBase == "" {
+		return transcript
+	}
+
+	// Try to find session logs matching the namespace
+	tmpDir := os.TempDir()
+	pattern := filepath.Join(tmpDir, fmt.Sprintf("dualmem-session-%s-*.jsonl", md5Short(nsBase)))
+	matches, err := filepath.Glob(pattern)
+	if err != nil || len(matches) == 0 {
+		return transcript
+	}
+
+	// Use the most recently modified log
+	sort.Slice(matches, func(i, j int) bool {
+		fi, _ := os.Stat(matches[i])
+		fj, _ := os.Stat(matches[j])
+		if fi == nil || fj == nil {
+			return false
+		}
+		return fi.ModTime().After(fj.ModTime())
+	})
+
+	data, err := os.ReadFile(matches[0])
+	if err != nil {
+		return transcript
+	}
+
+	// Parse JSONL entries and deduplicate file paths
+	type logEntry struct {
+		Ts    string `json:"ts"`
+		Tool  string `json:"tool"`
+		Files string `json:"files"`
+	}
+
+	fileSet := make(map[string]int) // file → count of interactions
+	toolCounts := make(map[string]int)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var entry logEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if entry.Files != "" {
+			fileSet[entry.Files]++
+		}
+		toolCounts[entry.Tool]++
+	}
+
+	if len(fileSet) == 0 {
+		return transcript
+	}
+
+	// Build compact summary
+	var sb strings.Builder
+	sb.WriteString("\n\n--- FILE INTERACTIONS (auto-captured) ---\n")
+
+	// Tool usage summary
+	var tools []string
+	for tool, count := range toolCounts {
+		tools = append(tools, fmt.Sprintf("%s(%d)", tool, count))
+	}
+	sort.Strings(tools)
+	sb.WriteString("Tools: " + strings.Join(tools, ", ") + "\n")
+
+	// Files touched (sorted by frequency)
+	type fileCount struct {
+		path  string
+		count int
+	}
+	var files []fileCount
+	for f, c := range fileSet {
+		files = append(files, fileCount{f, c})
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].count > files[j].count
+	})
+
+	sb.WriteString("Files touched:\n")
+	for i, f := range files {
+		if i >= 30 { // cap at 30 files
+			sb.WriteString(fmt.Sprintf("  ... and %d more\n", len(files)-30))
+			break
+		}
+		sb.WriteString(fmt.Sprintf("  %s (%dx)\n", f.path, f.count))
+	}
+
+	return transcript + sb.String()
+}
+
+// md5Short returns the first 8 chars of the md5 hex hash of "claude:<s>".
+// Matches the namespace hashing in dualmem-autocapture.sh.
+func md5Short(s string) string {
+	input := fmt.Sprintf("claude:%s", s)
+	sum := md5.Sum([]byte(input))
+	h := fmt.Sprintf("%x", sum)
+	if len(h) > 8 {
+		return h[:8]
+	}
+	return h
 }
 
 // isNearDuplicate checks if content is too similar to existing memories.

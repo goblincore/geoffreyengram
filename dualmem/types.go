@@ -219,6 +219,27 @@ type SourceRef struct {
 	ID   string
 }
 
+// IndexEntry is a compact descriptor for a single memory item,
+// used in progressive disclosure to let the agent choose what to fetch.
+type IndexEntry struct {
+	ID         string   `json:"id"`
+	Type       string   `json:"type"`       // "warning", "decision", "continuity", "checkpoint", "knowledge", "episode", "arc", "memory", "seed"
+	TypeIcon   string   `json:"type_icon"`  // "⚠", "★", "↻", "📋", "📖", "📝", ""
+	Title      string   `json:"title"`      // First ~60 chars of content
+	TokenCount int      `json:"tokens"`     // Estimated tokens if fetched
+	Files      []string `json:"files,omitempty"`
+}
+
+// ContextIndex is the progressive disclosure output of AssembleContextIndex.
+// It lists what's available without committing the full token budget.
+type ContextIndex struct {
+	Items         []IndexEntry `json:"items"`
+	TotalTokens   int          `json:"total_tokens"`    // Sum of all item token estimates
+	Intent        Intent       `json:"intent"`
+	AlsoAvailable string       `json:"also_available"`  // Summary of structural items (codemap, diff, episodes)
+	SnapshotID    string       `json:"snapshot_id,omitempty"`
+}
+
 // --- Checkpoints ---
 
 // Checkpoint is a structured session handoff record.
@@ -558,6 +579,9 @@ type Store interface {
 	DeleteDetail(id string) error
 	UpdateDetailImportance(id string, score float64) error
 	TouchDetail(id string) error
+
+	// Detail Path — by ID
+	GetDetailByID(id string) (*detailWithVector, error)
 
 	// Detail Path — filtered queries
 	GetDetailsByType(userID, memType string) ([]detailWithVector, error)

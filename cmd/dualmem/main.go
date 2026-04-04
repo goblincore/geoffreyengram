@@ -219,6 +219,8 @@ func main() {
 		cmdRate(cfg)
 	case "train":
 		cmdTrain(cfg)
+	case "show":
+		cmdShow(cfg)
 	case "stats":
 		cmdStats(cfg)
 	case "help", "-h", "--help":
@@ -420,6 +422,7 @@ func cmdContext(cfg CLIConfig) {
 	intent := fs.String("intent", "", "Task intent override: debug, continue, feature, explore (default: auto-detect)")
 	noGraph := fs.Bool("no-graph", false, "Disable entity graph boosting")
 	jsonOut := fs.Bool("json", false, "JSON output")
+	indexMode := fs.Bool("index", false, "Progressive disclosure: output compact index instead of full context")
 	fs.Parse(os.Args[2:])
 
 	query := strings.Join(fs.Args(), " ")
@@ -445,6 +448,79 @@ func cmdContext(cfg CLIConfig) {
 	}
 
 	ctx := context.Background()
+
+	if *indexMode {
+		idx, err := engine.AssembleContextIndex(ctx, namespace, query, *budget, opts)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+
+		go regenerateFileIndex(cfg, namespace)
+
+		if *jsonOut {
+			json.NewEncoder(os.Stdout).Encode(idx)
+			return
+		}
+
+		if len(idx.Items) == 0 {
+			fmt.Println("[No cross-session memories found. Run /codebase-onboard for initial context.]")
+			return
+		}
+
+		intentLabel := string(idx.Intent)
+		if intentLabel == "" {
+			intentLabel = "default"
+		}
+		fmt.Printf("[Context Index] %d items available (~%d tokens total), intent: %s\n\n", len(idx.Items), idx.TotalTokens, intentLabel)
+
+		// Render compact table
+		fmt.Printf("  %-6s | %-14s | %-52s | %s\n", "Type", "ID", "Title", "Tokens")
+		fmt.Printf("  %s-|-%s-|-%s-|-%s\n",
+			strings.Repeat("-", 6), strings.Repeat("-", 14), strings.Repeat("-", 52), strings.Repeat("-", 6))
+		for _, item := range idx.Items {
+			icon := item.TypeIcon
+			if icon == "" {
+				icon = " "
+			}
+			typeLabel := item.Type
+			if len(typeLabel) > 4 {
+				typeLabel = typeLabel[:4]
+			}
+			label := fmt.Sprintf("%s %-4s", icon, typeLabel)
+			id := item.ID
+			if len(id) > 14 {
+				id = id[:14]
+			}
+			title := item.Title
+			if len([]rune(title)) > 52 {
+				title = string([]rune(title)[:51]) + "…"
+			}
+			fmt.Printf("  %-8s| %-14s | %-52s | ~%d\n", label, id, title, item.TokenCount)
+		}
+
+		if idx.AlsoAvailable != "" {
+			fmt.Printf("\n  Also: %s\n", idx.AlsoAvailable)
+		}
+
+		// Show fetch hint with first few IDs and snapshot reference
+		if len(idx.Items) > 0 {
+			var sampleIDs []string
+			for i, item := range idx.Items {
+				if i >= 3 {
+					break
+				}
+				sampleIDs = append(sampleIDs, item.ID)
+			}
+			snapFlag := ""
+			if idx.SnapshotID != "" {
+				snapFlag = " --snapshot " + idx.SnapshotID
+			}
+			fmt.Printf("\n  Fetch: ~/go/bin/dualmem show%s %s\n", snapFlag, strings.Join(sampleIDs, " "))
+		}
+		return
+	}
+
 	block, err := engine.AssembleContextWith(ctx, namespace, query, *budget, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -473,6 +549,45 @@ func cmdContext(cfg CLIConfig) {
 		snapInfo = fmt.Sprintf(", snapshot: %s", block.SnapshotID)
 	}
 	fmt.Printf("\n(%d tokens, %d sources, intent: %s%s)\n", block.TokenCount, len(block.Sources), intentLabel, snapInfo)
+}
+
+func cmdShow(cfg CLIConfig) {
+	fs := flag.NewFlagSet("show", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace")
+	snapshotID := fs.String("snapshot", "", "Snapshot ID from context --index (enables implicit relevance tracking)")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	ids := fs.Args()
+	if len(ids) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: dualmem show [--snapshot <snap_id>] <id1> [id2] [id3] ...")
+		fmt.Fprintln(os.Stderr, "  IDs: mem_* (detail), chk_* (checkpoint), kdoc_* (knowledge), ep_* (episode)")
+		fmt.Fprintln(os.Stderr, "  --snapshot: links fetch to an index snapshot for implicit relevance tracking")
+		os.Exit(1)
+	}
+
+	namespace := resolveNamespace(*ns, cfg)
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+	text, err := engine.ShowItems(ctx, namespace, ids, *snapshotID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(map[string]string{"text": text, "token_count": fmt.Sprintf("%d", len(text)/4)})
+		return
+	}
+
+	fmt.Println(text)
 }
 
 func cmdProfile(cfg CLIConfig) {

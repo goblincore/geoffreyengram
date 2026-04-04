@@ -181,6 +181,55 @@ func (e *Engine) SubmitRatings(namespace, snapshotID, phase string, ratings map[
 	return nil
 }
 
+// SubmitImplicitRatings records behavioral signals from progressive disclosure.
+// Items the agent chose to fetch get rating=2 (highly relevant); items in the
+// snapshot but not fetched get rating=0 (not relevant enough to spend tokens on).
+// Phase is "implicit" with training weight 1.5 (between early=1.0 and late=2.0).
+func (e *Engine) SubmitImplicitRatings(namespace, snapshotID string, fetchedIDs []string) error {
+	snapshot, err := e.store.GetSnapshot(snapshotID)
+	if err != nil {
+		return fmt.Errorf("get snapshot %s: %w", snapshotID, err)
+	}
+
+	var sources []SnapshotSource
+	if err := json.Unmarshal([]byte(snapshot.SourceIDsJSON), &sources); err != nil {
+		return fmt.Errorf("unmarshal sources: %w", err)
+	}
+
+	fetched := make(map[string]bool, len(fetchedIDs))
+	for _, id := range fetchedIDs {
+		fetched[id] = true
+	}
+
+	for _, src := range sources {
+		rating := 0
+		if fetched[src.ID] {
+			rating = 2
+		}
+		cr := &ContextRating{
+			ID:          generateID(),
+			Namespace:   namespace,
+			SnapshotID:  snapshotID,
+			MemoryID:    src.ID,
+			MemoryType:  src.Type,
+			Phase:       "implicit",
+			Rating:      rating,
+			CosineSim:   src.CosineSim,
+			Importance:  src.Importance,
+			Salience:    src.Salience,
+			Sector:      src.Sector,
+			MemType:     src.MemType,
+			FileOverlap: src.FileOverlap,
+			AgeDays:     src.AgeDays,
+			TextLength:  src.TextLength,
+		}
+		if err := e.store.InsertRating(cr); err != nil {
+			return fmt.Errorf("insert implicit rating for %s: %w", src.ID, err)
+		}
+	}
+	return nil
+}
+
 // SubmitSessionRating stores a session-level quality score.
 func (e *Engine) SubmitSessionRating(sr *SessionRating) error {
 	return e.store.InsertSessionRating(sr)
@@ -202,17 +251,19 @@ func (e *Engine) GetTrainingRows(namespace string) ([]TrainingRow, error) {
 		return nil, err
 	}
 
-	// Deduplicate: late phase takes precedence over early for same snapshot+memory
+	// Deduplicate: late > implicit > early for same snapshot+memory pair.
+	// Higher-priority phases override lower ones.
 	type key struct {
 		snapshotID string
 		memoryID   string
 	}
+	phasePriority := map[string]int{"early": 0, "implicit": 1, "late": 2}
 	best := make(map[key]*ContextRating)
 	for i := range ratings {
 		r := &ratings[i]
 		k := key{r.SnapshotID, r.MemoryID}
 		existing, ok := best[k]
-		if !ok || r.Phase == "late" && existing.Phase == "early" {
+		if !ok || phasePriority[r.Phase] > phasePriority[existing.Phase] {
 			best[k] = r
 		}
 	}
@@ -224,7 +275,10 @@ func (e *Engine) GetTrainingRows(namespace string) ([]TrainingRow, error) {
 			label = 1.0
 		}
 		weight := 1.0
-		if r.Phase == "late" {
+		switch r.Phase {
+		case "implicit":
+			weight = 1.5
+		case "late":
 			weight = 2.0
 		}
 

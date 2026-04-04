@@ -769,6 +769,15 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 		tokensUsed += epTokens
 	}
 
+	// If no meaningful content was assembled (no memories, no knowledge docs, no checkpoints),
+	// suggest running codebase-onboard for initial context.
+	hasMemories := len(results.DetailMemories) > 0
+	hasKnowledge := len(kdocs) > 0
+	hasCheckpoints := len(checkpoints) > 0
+	if !hasMemories && !hasKnowledge && !hasCheckpoints {
+		parts = append(parts, "[No cross-session memories found. Run /codebase-onboard for initial context.]")
+	}
+
 	text := strings.Join(parts, "\n\n")
 
 	// Record session marker for next time
@@ -823,6 +832,332 @@ func extractFileHints(checkpoints []Checkpoint, memories []DetailMemory) []strin
 		}
 	}
 	return hints
+}
+
+// AssembleContextIndex returns a compact index of available context items
+// without rendering their full text. This implements progressive disclosure:
+// the agent sees what exists and the token cost, then fetches specific items
+// via ShowItems. Much cheaper than AssembleContext for session-start probing.
+func (e *Engine) AssembleContextIndex(ctx context.Context, userID string, query string, tokenBudget int, opts *ContextOpts) (*ContextIndex, error) {
+	if tokenBudget <= 0 {
+		tokenBudget = 2000
+	}
+
+	intent := IntentDefault
+	if opts != nil && opts.Intent != "" {
+		intent = opts.Intent
+	} else {
+		intent = DetectIntent(query)
+	}
+
+	// Embed query for search
+	var queryEmb []float32
+	if query != "" {
+		var err error
+		queryEmb, err = e.embedder.Embed(ctx, query, "RETRIEVAL_QUERY")
+		if err != nil {
+			return nil, fmt.Errorf("dualmem: embed query: %w", err)
+		}
+	}
+
+	var minSim float64
+	if opts != nil {
+		minSim = opts.MinSimilarity
+	}
+	searchOpts := SearchOpts{
+		Limit:          20, // fetch more candidates for index
+		IncludeSketch:  true,
+		QueryEmbedding: queryEmb,
+		MinSimilarity:  minSim,
+		QueryText:      query,
+	}
+	if opts == nil || !opts.DisableGraphBoost {
+		searchOpts.GraphBoost = &GraphBoostConfig{
+			Namespace:   userID,
+			BoostWeight: 0.15,
+			MaxHops:     1,
+		}
+	}
+	results, err := e.DualSearch(ctx, userID, query, searchOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	var items []IndexEntry
+	totalTokens := 0
+
+	// Checkpoints
+	checkpoints, _ := e.GetCheckpoints(ctx, userID)
+	for _, cp := range checkpoints {
+		cpText := cp.FormatForContext()
+		toks := estimateTokens(cpText)
+		items = append(items, IndexEntry{
+			ID:         "chk_" + sanitizeID(cp.Task),
+			Type:       "checkpoint",
+			TypeIcon:   "📋",
+			Title:      truncateTitle(cpText, 60),
+			TokenCount: toks,
+			Files:      cp.FilesActive,
+		})
+		totalTokens += toks
+	}
+
+	// Knowledge docs
+	kdocs, _ := e.GetKnowledgeDocs(ctx, userID, query, queryEmb, 0)
+	coveredIDs := make(map[string]bool)
+	for _, kd := range kdocs {
+		toks := kd.TokenCount
+		if toks == 0 {
+			toks = estimateTokens(kd.FormatForContext())
+		}
+		items = append(items, IndexEntry{
+			ID:         "kdoc_" + sanitizeID(kd.Topic),
+			Type:       "knowledge",
+			TypeIcon:   "📖",
+			Title:      truncateTitle(kd.Content, 60),
+			TokenCount: toks,
+			Files:      kd.Files,
+		})
+		totalTokens += toks
+		for _, id := range kd.SourceIDs {
+			coveredIDs[id] = true
+		}
+	}
+
+	// Detail memories — sorted by importance, excluding covered and checkpoints
+	now := time.Now()
+	var intentProfile *IntentProfile
+	if profile, ok := IntentProfiles[intent]; ok {
+		intentProfile = &profile
+	}
+	sort.SliceStable(results.DetailMemories, func(i, j int) bool {
+		si := detailSortScore(results.DetailMemories[i], intentProfile, now, query)
+		sj := detailSortScore(results.DetailMemories[j], intentProfile, now, query)
+		return si > sj
+	})
+	for _, dm := range results.DetailMemories {
+		if dm.Type == "checkpoint" || coveredIDs[dm.ID] {
+			continue
+		}
+		toks := estimateTokens(dm.Text) + estimateTokens(strings.Join(dm.Files, ", "))
+		icon := typeIcon(dm.Type)
+		typeLabel := dm.Type
+		if typeLabel == "" {
+			typeLabel = "memory"
+		}
+		items = append(items, IndexEntry{
+			ID:         dm.ID,
+			Type:       typeLabel,
+			TypeIcon:   icon,
+			Title:      truncateTitle(dm.Text, 60),
+			TokenCount: toks,
+			Files:      dm.Files,
+		})
+		totalTokens += toks
+	}
+
+	// Structural items: summarize availability without detailed entries
+	var alsoItems []string
+	if len(results.Episodes) > 0 {
+		epTokens := 0
+		for _, ep := range results.Episodes {
+			epTokens += estimateTokens(ep.SummaryText)
+		}
+		alsoItems = append(alsoItems, fmt.Sprintf("%d episodes (~%d tokens)", len(results.Episodes), epTokens))
+		totalTokens += epTokens
+	}
+	if len(results.Arcs) > 0 {
+		arcTokens := 0
+		for _, arc := range results.Arcs {
+			arcTokens += estimateTokens(arc.SummaryText)
+		}
+		alsoItems = append(alsoItems, fmt.Sprintf("%d arcs (~%d tokens)", len(results.Arcs), arcTokens))
+		totalTokens += arcTokens
+	}
+	if e.cfg.RootDir != "" {
+		alsoItems = append(alsoItems, "codemap available")
+	}
+
+	also := ""
+	if len(alsoItems) > 0 {
+		also = strings.Join(alsoItems, ", ")
+	}
+
+	idx := &ContextIndex{
+		Items:         items,
+		TotalTokens:   totalTokens,
+		Intent:        intent,
+		AlsoAvailable: also,
+	}
+
+	// Persist a context snapshot for the rating pipeline.
+	// All index items are recorded as candidates — ShowItems will later
+	// mark which ones were actually fetched (implicit relevance signal).
+	snapID := fmt.Sprintf("snap_%d", time.Now().UnixNano())
+	snapshot := buildIndexSnapshot(snapID, userID, query, items, results.DetailMemories, now)
+	if err := e.SaveSnapshot(snapshot); err == nil {
+		idx.SnapshotID = snapID
+	}
+
+	return idx, nil
+}
+
+// buildIndexSnapshot creates a ContextSnapshot from index items, enriching
+// detail memory items with their search features for re-ranker training.
+func buildIndexSnapshot(id, namespace, query string, items []IndexEntry, details []DetailMemory, now time.Time) *ContextSnapshot {
+	// Build lookup for detail memory features
+	detailMap := make(map[string]*DetailMemory, len(details))
+	for i := range details {
+		detailMap[details[i].ID] = &details[i]
+	}
+
+	var sources []SnapshotSource
+	for _, item := range items {
+		ss := SnapshotSource{
+			ID:         item.ID,
+			Type:       item.Type,
+			TextLength: item.TokenCount,
+		}
+		// Enrich with detail memory features if this is a detail memory
+		if dm, ok := detailMap[item.ID]; ok {
+			ss.CosineSim = dm.Similarity
+			ss.Importance = dm.ImportanceScore
+			ss.Salience = dm.Salience
+			ss.Sector = dm.Sector
+			ss.MemType = dm.Type
+			ss.AgeDays = now.Sub(dm.CreatedAt).Hours() / 24
+		}
+		sources = append(sources, ss)
+	}
+
+	totalTokens := 0
+	for _, item := range items {
+		totalTokens += item.TokenCount
+	}
+
+	return &ContextSnapshot{
+		ID:         id,
+		Namespace:  namespace,
+		Query:      query,
+		Sources:    sources,
+		TokensUsed: totalTokens,
+		CreatedAt:  now,
+	}
+}
+
+// ShowItems renders full text for specific memory items by ID.
+// Accepts mixed ID prefixes: raw IDs (detail memories), chk_* (checkpoints),
+// kdoc_* (knowledge docs), ep_* (episodes).
+// If snapshotID is non-empty, submits implicit ratings: fetched items get
+// rating=2 (relevant), all other items in the snapshot get rating=0 (skipped).
+func (e *Engine) ShowItems(ctx context.Context, namespace string, ids []string, snapshotID string) (string, error) {
+	var parts []string
+
+	for _, id := range ids {
+		var text string
+		switch {
+		case strings.HasPrefix(id, "chk_"):
+			task := id[4:]
+			checkpoints, _ := e.GetCheckpoints(ctx, namespace)
+			for _, cp := range checkpoints {
+				if sanitizeID(cp.Task) == task || cp.Task == task {
+					text = cp.FormatForContext()
+					break
+				}
+			}
+			if text == "" {
+				text = fmt.Sprintf("[Checkpoint %q not found]", task)
+			}
+
+		case strings.HasPrefix(id, "kdoc_"):
+			topic := id[5:]
+			docs, _ := e.store.GetKnowledgeDocs(namespace)
+			for _, kd := range docs {
+				if sanitizeID(kd.Topic) == topic || kd.Topic == topic {
+					text = kd.FormatForContext()
+					break
+				}
+			}
+			if text == "" {
+				text = fmt.Sprintf("[Knowledge doc %q not found]", topic)
+			}
+
+		case strings.HasPrefix(id, "ep_"):
+			epID := id[3:]
+			ep, err := e.store.GetEpisodeByID(epID)
+			if err == nil && ep != nil {
+				text = "[Recent Episode]\n" + ep.SummaryText
+			} else {
+				text = fmt.Sprintf("[Episode %q not found]", epID)
+			}
+
+		default:
+			// Assume it's a detail memory ID
+			d, err := e.store.GetDetailByID(id)
+			if err == nil && d != nil {
+				label := formatTypeLabel(d.Type, d.Sector, d.ImportanceScore)
+				text = label + "\n" + d.Text
+				if len(d.Files) > 0 {
+					text += "\n  Files: " + strings.Join(d.Files, ", ")
+				}
+				// Touch the memory to update access tracking
+				_ = e.store.TouchDetail(id)
+			} else {
+				text = fmt.Sprintf("[Memory %q not found]", id)
+			}
+		}
+		parts = append(parts, text)
+	}
+
+	// Record implicit ratings if a snapshot was provided
+	if snapshotID != "" {
+		_ = e.SubmitImplicitRatings(namespace, snapshotID, ids) // best-effort
+	}
+
+	return strings.Join(parts, "\n\n"), nil
+}
+
+// typeIcon returns a compact icon for a memory type, used in index listings.
+func typeIcon(memType string) string {
+	switch memType {
+	case "warning":
+		return "⚠"
+	case "decision":
+		return "★"
+	case "continuity":
+		return "↻"
+	case "seed":
+		return "🌱"
+	default:
+		return ""
+	}
+}
+
+// truncateTitle returns the first n characters of s, appending "…" if truncated.
+func truncateTitle(s string, n int) string {
+	// Strip newlines for compact display
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.TrimSpace(s)
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n]) + "…"
+}
+
+// sanitizeID converts a human-readable name to a stable ID component.
+// Lowercases, replaces spaces/special chars with hyphens.
+func sanitizeID(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.ReplaceAll(s, " ", "-")
+	// Strip anything that's not alphanumeric or hyphen
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // getOrGenerateCodeMap loads a stored code map or generates one on the fly.
