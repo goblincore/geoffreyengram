@@ -17,6 +17,7 @@ import (
 type DistillOpts struct {
 	File      string // Explicit transcript file path
 	Stdin     bool   // Read from stdin
+	Text      string // Raw transcript text (e.g. from MCP tool call)
 	Auto      bool   // Auto-detect CC session, skip if already distilled
 	DryRun    bool   // Preview without writing
 	Namespace string // Override namespace
@@ -213,7 +214,12 @@ func (e *Engine) loadTranscript(opts DistillOpts) (string, string, error) {
 		return parseTranscript(data), sessionID, nil
 	}
 
-	// Priority 2: Stdin
+	// Priority 2: Inline text (from MCP or programmatic callers)
+	if opts.Text != "" {
+		return parseTranscript([]byte(opts.Text)), "inline-" + time.Now().Format("20060102-150405"), nil
+	}
+
+	// Priority 3: Stdin
 	if opts.Stdin {
 		data, err := io.ReadAll(os.Stdin)
 		if err != nil {
