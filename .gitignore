@@ -34,3 +34,14 @@ vexp.toml
 
 # Worktrees
 .worktrees/
+
+# Built binaries (go build output in repo root)
+dispatch-ui
+dualmem-bench
+dualmem-mcp
+
+# Brainstorming sessions
+.superpowers/
+
+# Misc logs
+firebase-debug.log
