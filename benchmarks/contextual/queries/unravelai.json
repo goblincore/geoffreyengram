@@ -1,0 +1,198 @@
+[
+  {
+    "id": "un-FL-01",
+    "corpus": "unravelai",
+    "type": "feature_location",
+    "query": "Where is the knowledge graph built from file nodes and edges?",
+    "difficulty": "easy",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["unravel-mcp/core/graph-builder.js"],
+      "modules": ["unravel-mcp/core/"],
+      "concepts": ["GraphBuilder", "addFileWithAnalysis", "addImportEdge", "addCallEdge", "build"],
+      "explanation": "The GraphBuilder class in graph-builder.js accumulates nodes (file, function, class) and edges (contains, imports, calls) and produces a KnowledgeGraph via the build() method. The mergeGraphUpdate() function handles incremental graph updates."
+    }
+  },
+  {
+    "id": "un-FL-02",
+    "corpus": "unravelai",
+    "type": "feature_location",
+    "query": "How does Unravel detect floating promises and unawaited async calls in user code?",
+    "difficulty": "medium",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["unravel-mcp/core/ast-engine-ts.js", "unravel-mcp/core/pattern-store.js"],
+      "modules": ["unravel-mcp/core/"],
+      "concepts": ["detectFloatingPromises", "floating_promise", "unawaited_promise", "ASYNC_PRODUCING_APIS"],
+      "explanation": "The detectFloatingPromises() function in ast-engine-ts.js uses tree-sitter AST to find async function calls in expression-statement position without await. The pattern-store.js has a pre-loaded 'floating_promise' pattern (id: floating_promise) that matches the signature ['async_call', 'no_await', 'expression_statement']. Risk signals for unawaited_promise are also emitted in ast-project.js emitRiskSignals() for async-producing APIs like fetch that lack await."
+    }
+  },
+  {
+    "id": "un-FL-03",
+    "corpus": "unravelai",
+    "type": "feature_location",
+    "query": "Where is the MCP server entry point and what tools does it expose?",
+    "difficulty": "easy",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["unravel-mcp/index.js"],
+      "modules": ["unravel-mcp/"],
+      "concepts": ["McpServer", "StdioServerTransport", "analyze", "verify", "build_map", "query_graph", "query_visual", "consult"],
+      "explanation": "The MCP server is defined in unravel-mcp/index.js. It redirects all console output to stderr to preserve the STDIO JSON-RPC channel, then registers six tools: analyze (AST evidence extraction), verify (claim cross-checking), build_map (knowledge graph construction), query_graph (file relevance routing), query_visual (image-based file routing), and consult (project oracle, currently paused)."
+    }
+  },
+  {
+    "id": "un-DT-01",
+    "corpus": "unravelai",
+    "type": "dependency_tracing",
+    "query": "Trace the full dependency chain when a user calls unravel.analyze: which modules are loaded and in what order?",
+    "difficulty": "hard",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["unravel-mcp/index.js", "unravel-mcp/core/orchestrate.js", "unravel-mcp/core/ast-engine-ts.js", "unravel-mcp/core/ast-project.js", "unravel-mcp/core/search.js", "unravel-mcp/core/pattern-store.js", "unravel-mcp/core/graph-storage.js", "unravel-mcp/core/graph-builder.js", "unravel-mcp/core/config.js", "unravel-mcp/core/provider.js", "unravel-mcp/embedding.js"],
+      "modules": ["unravel-mcp/", "unravel-mcp/core/"],
+      "concepts": ["loadCoreModules", "orchestrate", "initParser", "runMultiFileAnalysis", "runCrossFileAnalysis", "queryGraphForFiles", "matchPatterns", "buildSemanticScores"],
+      "explanation": "index.js lazily loads core modules via loadCoreModules() on first tool call. The analyze tool calls orchestrate() which runs: Phase 0.5 (KG router via search.js queryGraphForFiles + embedding.js buildSemanticScores + pattern-store.js getNodeBoosts), Phase 1 (AST via ast-engine-ts.js initParser/runMultiFileAnalysis), Phase 1b (cross-file via ast-project.js runCrossFileAnalysis), Phase 1e (pattern matching via pattern-store.js matchPatterns). In MCP mode it short-circuits before the LLM call and returns the evidence packet."
+    }
+  },
+  {
+    "id": "un-DT-02",
+    "corpus": "unravelai",
+    "type": "dependency_tracing",
+    "query": "How do embeddings flow from the Gemini API through to graph-based file routing in query_graph?",
+    "difficulty": "medium",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["unravel-mcp/embedding.js", "unravel-mcp/core/search.js", "unravel-mcp/index.js"],
+      "modules": ["unravel-mcp/", "unravel-mcp/core/"],
+      "concepts": ["embedText", "embedChangedNodes", "buildSemanticScores", "cosineSimilarity", "expandWeighted", "queryGraphForFiles", "semanticScores"],
+      "explanation": "During build_map, embedChangedNodes() embeds KG node summaries via embedText() using Gemini Embedding 2 (768-dim vectors stored on nodes). During query_graph, buildSemanticScores() embeds the symptom as RETRIEVAL_QUERY, computes cosineSimilarity against all node embeddings, and returns a Map<nodeId, similarity>. This map is passed as semanticScores into queryGraphForFiles() in search.js, which feeds it to expandWeighted() where the semantic bonus biases the priority-queue graph traversal: newScore = parentScore * 0.7 + edgeWeight * 0.3 + semBonus."
+    }
+  },
+  {
+    "id": "un-CS-01",
+    "corpus": "unravelai",
+    "type": "concept_search",
+    "query": "How does the search engine score and rank nodes in the knowledge graph?",
+    "difficulty": "easy",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["unravel-mcp/core/search.js"],
+      "modules": ["unravel-mcp/core/"],
+      "concepts": ["SearchEngine", "scoreNode", "expandWeighted", "expandOneHop", "queryGraphForFiles"],
+      "explanation": "The SearchEngine class in search.js scores nodes against query tokens using weighted fields: name=0.4, tags=0.3, summary=0.2, filePath=0.1. Scoring blends 70% best single-token score + 30% average across tokens to prevent dilution. After keyword matching, expandWeighted() performs priority-queue multi-hop traversal with edge-type weights (calls=1.0, mutates=0.95, async-calls=0.85, imports=0.7, contains=0.5) and beam search (TOP_K=5, MIN_SCORE=0.2). queryGraphForFiles() orchestrates the full pipeline: keyword search, weighted expansion, then file-level score aggregation."
+    }
+  },
+  {
+    "id": "un-CS-02",
+    "corpus": "unravelai",
+    "type": "concept_search",
+    "query": "What is the sandwich architecture and how does it ensure zero-hallucination debugging?",
+    "difficulty": "easy",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["unravel-mcp/index.js", "unravel-mcp/core/orchestrate.js"],
+      "modules": ["unravel-mcp/", "unravel-mcp/core/"],
+      "concepts": ["analyze", "verify", "verifyClaims", "orchestrate", "MCP_SHORT_CIRCUIT"],
+      "explanation": "The sandwich architecture is Unravel's core protocol: (1) Agent calls analyze to get deterministic AST evidence (mutations, closures, timing, races), (2) Agent's own LLM reasons about the evidence to produce a diagnosis, (3) Agent calls verify which cross-checks every claim against real code via verifyClaims(), returning PASSED or REJECTED. In MCP mode, orchestrate() short-circuits after structural analysis phases (0-1d) and returns the evidence packet without making any LLM call, leaving reasoning to the calling agent."
+    }
+  },
+  {
+    "id": "un-CS-03",
+    "corpus": "unravelai",
+    "type": "concept_search",
+    "query": "How does cross-file mutation chain tracking work?",
+    "difficulty": "medium",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["unravel-mcp/core/ast-project.js"],
+      "modules": ["unravel-mcp/core/"],
+      "concepts": ["buildModuleMap", "resolveSymbolOrigins", "expandMutationChains", "emitRiskSignals", "runCrossFileAnalysis", "cross_file_mutation"],
+      "explanation": "Cross-file mutation tracking is a 5-step pipeline in ast-project.js: Step 1 (buildModuleMap) scans import/export declarations across all files using tree-sitter. Step 2 (resolveSymbolOrigins) traces each imported symbol back to its source file export. Step 3 (expandMutationChains) merges per-file mutation data using symbol origins to build cross-file chains keyed by origin. Step 4 (emitRiskSignals) detects patterns like exported variables mutated outside their origin file (cross_file_mutation), async state races, and unawaited promises. Step 5 (buildCallGraph) tracks cross-file function calls by matching call expressions against imported function names."
+    }
+  },
+  {
+    "id": "un-BL-01",
+    "corpus": "unravelai",
+    "type": "bug_localization",
+    "query": "If the MCP server crashes with 'invalid character' JSON-RPC errors, where is the likely root cause?",
+    "difficulty": "medium",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["unravel-mcp/index.js"],
+      "modules": ["unravel-mcp/"],
+      "concepts": ["console.log", "process.stderr.write", "StdioServerTransport"],
+      "explanation": "The root cause would be in the console output redirection at the top of index.js (lines 35-50). MCP uses STDIO transport where stdout is the JSON-RPC channel. If any console.log/warn/info/debug calls leak to stdout instead of being redirected to stderr, JSON-RPC framing breaks with 'invalid character' errors. The file explicitly redirects all console methods to process.stderr.write as its very first executable code, with a comment marking this as CRITICAL. A new module imported before these redirections, or a native module writing directly to stdout, would cause this bug."
+    }
+  },
+  {
+    "id": "un-BL-02",
+    "corpus": "unravelai",
+    "type": "bug_localization",
+    "query": "Pattern matching keeps firing stale_closure false positives on debounce/throttle utility functions. Where is the bug?",
+    "difficulty": "hard",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["unravel-mcp/core/pattern-store.js", "unravel-mcp/core/ast-engine-ts.js"],
+      "modules": ["unravel-mcp/core/"],
+      "concepts": ["extractSignature", "stale_var_access", "matchPatterns", "globalWriteRaces", "penalizePattern", "coverage"],
+      "explanation": "The stale_closure_async_delay pattern requires THREE simultaneous conditions in extractSignature(): (1) closure_capture, (2) globalWriteRaces (module-scope vars written before async boundary), and (3) async_delay (setTimeout/setInterval). Debounce/throttle utilities have closures with setTimeout but their timer variables are closure-local, NOT in globalWriteRaces (which only tracks module-scope globals). If false positives still fire, the issue is in extractSignature() in pattern-store.js where the stale_var_access event emission logic depends on all three conditions. The matchPatterns() function requires >=70% coverage of signature events (raised from 60% to prevent partial matches). The penalizePattern() function applies a soft decay of 0.03 per rejection with a floor of 0.3."
+    }
+  },
+  {
+    "id": "un-SU-01",
+    "corpus": "unravelai",
+    "type": "structural_understanding",
+    "query": "What is the trust level system in the knowledge graph and how are AST-verified facts distinguished from LLM-inferred metadata?",
+    "difficulty": "medium",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["unravel-mcp/core/graph-builder.js"],
+      "modules": ["unravel-mcp/core/"],
+      "concepts": ["trustLevel", "AST_VERIFIED", "LLM_INFERRED", "addFileWithAnalysis"],
+      "explanation": "The GraphBuilder in graph-builder.js assigns trustLevel to every node and edge. File nodes get trustLevel 'LLM_INFERRED' because their summaries and tags come from LLM metadata. Function and class child nodes get 'AST_VERIFIED' because they come from structural AST analysis. All edges (contains, imports, calls) are 'AST_VERIFIED' since they are derived from deterministic code analysis. This dual-trust system lets consumers weight verified structural facts over inferred metadata when routing or ranking."
+    }
+  },
+  {
+    "id": "un-SU-02",
+    "corpus": "unravelai",
+    "type": "structural_understanding",
+    "query": "How does the AST engine handle different runtime environments (Node.js native vs browser WASM)?",
+    "difficulty": "medium",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["unravel-mcp/core/ast-engine-ts.js"],
+      "modules": ["unravel-mcp/core/"],
+      "concepts": ["initParser", "_IS_NODE", "parseCode", "_nativeTreeSitter", "TreeSitter", "UNRAVEL_NATIVE_BASE"],
+      "explanation": "ast-engine-ts.js detects its environment via _IS_NODE (checks process.versions.node and absence of window). In Node.js, initParser() uses native tree-sitter bindings loaded via createRequire() from a base path set by UNRAVEL_NATIVE_BASE env var — this resolves tree-sitter-typescript and tree-sitter-javascript packages from unravel-mcp/node_modules. In browser, it imports web-tree-sitter (WASM) with an elaborate 8-candidate resolution chain (A through H) to handle different Emscripten build/bundler export shapes. Both paths wire a shared parserInstance that parseCode() uses with setLanguage() for JS/TS/TSX grammars."
+    }
+  },
+  {
+    "id": "un-FE-01",
+    "corpus": "unravelai",
+    "type": "feasibility",
+    "query": "How feasible would it be to add Python support to the cross-file analysis pipeline?",
+    "difficulty": "hard",
+    "confidence": "medium",
+    "ground_truth": {
+      "files": ["unravel-mcp/core/ast-project.js", "unravel-mcp/core/ast-engine-ts.js", "unravel-mcp/core/graph-builder.js"],
+      "modules": ["unravel-mcp/core/"],
+      "concepts": ["buildModuleMap", "import_statement", "export_statement", "resolveModuleName", "isLikelyNodeModule", "detectLanguage"],
+      "explanation": "Moderate-to-high effort. The cross-file pipeline in ast-project.js is deeply coupled to JS/TS AST node types: it looks for 'import_statement', 'export_statement', 'import_clause', 'named_imports', 'export_clause' etc., all specific to tree-sitter-typescript grammar. Python uses 'import_from_statement' and has no export declarations (all module-level names are implicitly exported). buildModuleMap() would need a parallel Python branch for import parsing, resolveModuleName() would need to handle Python's dot-separated module paths, and isLikelyNodeModule() would need pip package detection. The graph-builder.js detectLanguage() already maps .py to 'python'. The AST engine would need tree-sitter-python grammar loaded alongside TS/JS, but the initParser() dual-env architecture already supports multiple grammars."
+    }
+  },
+  {
+    "id": "un-FE-02",
+    "corpus": "unravelai",
+    "type": "feasibility",
+    "query": "Could the pattern store be extended with user-defined custom patterns, and what would need to change?",
+    "difficulty": "hard",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["unravel-mcp/core/pattern-store.js", "unravel-mcp/index.js"],
+      "modules": ["unravel-mcp/core/"],
+      "concepts": ["STARTER_PATTERNS", "_store", "hashSignature", "extractSignature", "matchPatterns", "loadPatterns", "savePatterns", "learnFromDiagnosis"],
+      "explanation": "Feasible with moderate effort. The pattern store already supports persistence via loadPatterns()/savePatterns() which read/write .unravel/patterns.json, and the in-memory _store is a Map<hash, pattern> that accepts any pattern with the right schema (id, signature, bugType, description, severity, cwe, weight, hitCount). Custom patterns would need: (1) a new MCP tool or CLI command to register patterns, (2) validation that signature event tokens are from the set extractSignature() can emit (write_shared, await_boundary, closure_capture, etc.), (3) the hashSignature() FNV-1a function already generates collision-safe hashes for any signature. The learning system (learnFromDiagnosis/penalizePattern) would automatically apply to custom patterns since it operates on _store entries by hash. Main challenge: users would need to understand the event token vocabulary emitted by extractSignature()."
+    }
+  }
+]
