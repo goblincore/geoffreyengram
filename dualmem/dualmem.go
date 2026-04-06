@@ -546,6 +546,99 @@ func extractEntityCandidates(query string) []string {
 	return candidates
 }
 
+// GetStructuralNeighborPaths returns a map of file path -> blended score for paths
+// reachable from the given seed paths via the structural edge graph.
+// Uses Unravel's blended scoring: score = parentScore * 0.7 + edgeWeight * 0.3
+// with beam search (top-K per hop, prune below threshold).
+func (e *Engine) GetStructuralNeighborPaths(namespace string, seedPaths []string, maxHops int) map[string]float64 {
+	if len(seedPaths) == 0 {
+		return nil
+	}
+	if maxHops <= 0 {
+		maxHops = 2
+	}
+
+	const (
+		beamWidth      = 5   // top-K paths per hop
+		pruneThreshold = 0.2 // minimum score to continue expansion
+		parentDecay    = 0.7 // parent score contribution
+		edgeContrib    = 0.3 // edge weight contribution
+	)
+
+	// Initialize seed paths with score 1.0
+	scores := make(map[string]float64)
+	for _, p := range seedPaths {
+		scores[p] = 1.0
+	}
+
+	// Multi-hop expansion with beam search
+	frontier := make([]string, len(seedPaths))
+	copy(frontier, seedPaths)
+
+	for hop := 0; hop < maxHops; hop++ {
+		type candidate struct {
+			path  string
+			score float64
+		}
+		var candidates []candidate
+
+		for _, path := range frontier {
+			parentScore := scores[path]
+			if parentScore < pruneThreshold {
+				continue
+			}
+
+			neighbors, err := e.store.GetStructuralNeighbors(namespace, path, nil, 20)
+			if err != nil {
+				continue
+			}
+
+			for _, edge := range neighbors {
+				// Determine the neighbor path (the other end of the edge)
+				neighborPath := edge.TargetPath
+				if edge.TargetPath == path {
+					neighborPath = edge.SourcePath
+				}
+
+				// Blended score: parentScore * decay + edgeWeight * contrib
+				score := parentScore*parentDecay + edge.Weight*edgeContrib
+
+				if score >= pruneThreshold {
+					candidates = append(candidates, candidate{path: neighborPath, score: score})
+				}
+			}
+		}
+
+		if len(candidates) == 0 {
+			break
+		}
+
+		// Beam search: sort by score, keep top-K
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].score > candidates[j].score
+		})
+		if len(candidates) > beamWidth {
+			candidates = candidates[:beamWidth]
+		}
+
+		// Update scores and build next frontier
+		frontier = frontier[:0]
+		for _, c := range candidates {
+			if existing, ok := scores[c.path]; !ok || c.score > existing {
+				scores[c.path] = c.score
+				frontier = append(frontier, c.path)
+			}
+		}
+	}
+
+	// Remove seed paths from result (we only want the expansion)
+	for _, p := range seedPaths {
+		delete(scores, p)
+	}
+
+	return scores
+}
+
 // AssembleContext is the key differentiator: token-budget-aware context assembly.
 // It retrieves from both paths and formats a structured context block that fits
 // within the given token budget. If Config.RootDir is set, includes structural
@@ -655,6 +748,18 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 				var cochangeNeighbors map[string]float64
 				if ns := e.namespace(); ns != "" && len(boostPaths) > 0 {
 					cochangeNeighbors = e.GetCoChangeForPaths(ns, boostPaths, 1.0)
+					// Expand via structural graph (calls/imports) — blended multi-hop scoring
+					structuralNeighbors := e.GetStructuralNeighborPaths(ns, boostPaths, 2)
+					// Merge structural into co-change map (take the higher score)
+					if cochangeNeighbors == nil {
+						cochangeNeighbors = structuralNeighbors
+					} else {
+						for path, score := range structuralNeighbors {
+							if existing, ok := cochangeNeighbors[path]; !ok || score > existing {
+								cochangeNeighbors[path] = score
+							}
+						}
+					}
 				}
 				// For continue intent (vague queries like "what next"), use boost-only mode:
 				// show only modules referenced by checkpoints/memories instead of noisy HDC ranking
