@@ -366,6 +366,8 @@ The dashboard reads your existing `~/.claude/dispatch/plans/` directory. Existin
 - **Live log streaming** — watch agent output in real-time via SSE
 - **Task creation** — write a short description, Opus generates the full plan, review and dispatch
 - **Task management** — cancel running tasks, retry failed ones, adjust priority, delete
+- **Multi-harness** — dispatch to Claude CLI, Pi, or OpenCode (set `harness:` in plan frontmatter)
+- **Dualmem integration** — Pi tasks get project memory injected + CLI instructions for saving memories
 
 ### Creating a task from the UI
 
@@ -385,9 +387,7 @@ title: "My task title"
 status: pending
 project: /path/to/your/project
 model: glm-5.1
-api_key_env: ZAI_API_KEY
-base_url: https://api.z.ai/api/anthropic
-branch: dispatch/my-task
+harness: claude          # "claude" (default), "pi", or "opencode"
 priority: 2
 max_runtime: 25m
 allowed_tools: Edit,Write,Bash,Read,Glob,Grep
@@ -424,11 +424,42 @@ API keys go in `~/.claude/dispatch/.env`:
 ```bash
 export ZAI_API_KEY="your-key"
 export ANTHROPIC_API_KEY="your-key"
+export GEMINI_API_KEY="your-key"   # needed for dualmem embedding search
 ```
+
+### Harness comparison (GLM 5.1)
+
+| Harness | Time | Streaming | Edit tool | Notes |
+|---------|------|-----------|-----------|-------|
+| **Pi** | 1m 50s | ✅ Real-time | ✅ Native works | Recommended. Minimal, fast, no Edit issues |
+| **Claude CLI** | 4m 37s | ✅ Real-time | ⚠️ Needs Python workaround | Auto-injected preamble tells GLM to use Python for edits |
+| **OpenCode** | 15m+ timeout | ❌ Buffers until exit | N/A | Not recommended — stdout buffering makes it unusable |
+
+Pi setup: `npm install -g @mariozechner/pi-coding-agent`, configure `~/.pi/agent/models.json` with your provider.
+
+## Structural Graph
+
+AST-based extraction of typed edges (calls, imports, contains) from Go, TypeScript, Python, and Rust codebases. Built automatically alongside the code map.
+
+```bash
+dualmem map          # rebuilds code map + structural graph
+dualmem graph        # print edge statistics
+dualmem graph --json # JSON output
+```
+
+### Weighted multi-hop traversal
+
+Structural neighbors are expanded using a blended scoring formula inspired by UnravelAI:
+
+```
+score = parentScore * 0.7 + edgeWeight * 0.3
+```
+
+With beam search (top-5 per hop) and pruning (threshold 0.2) to prevent score collapse across hops. Structural neighbors are merged into co-change neighbors for codemap module ranking.
 
 ## Status
 
-Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 260+ tests passing.
+Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 270+ tests passing.
 
 ## License
 
