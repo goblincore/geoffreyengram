@@ -435,7 +435,8 @@ func (s *Server) handleSSELogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// No live buffer — try reading the report file
+	// No live buffer — check if the task is running (started by dispatch.sh)
+	// and tail the report file, or send it all at once if done.
 	path := filepath.Join(s.eng.Config.PlansDir, name+".md")
 	plan, err := parsePlanFile(path)
 	if err != nil {
@@ -444,8 +445,51 @@ func (s *Server) handleSSELogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if plan.Report != "" {
-		f, err := os.Open(plan.Report)
+	reportPath := plan.Report
+	if reportPath == "" {
+		// Try the reports dir with the plan name
+		reportPath = filepath.Join(s.eng.Config.ReportsDir, name+".md")
+	}
+
+	if plan.Status == "running" {
+		// Tail the report file while the task is running
+		var offset int64
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			default:
+			}
+
+			f, err := os.Open(reportPath)
+			if err != nil {
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			f.Seek(offset, 0)
+			scanner := bufio.NewScanner(f)
+			for scanner.Scan() {
+				fmt.Fprintf(w, "data: %s\n\n", scanner.Text())
+				flusher.Flush()
+			}
+			newOffset, _ := f.Seek(0, 1) // current position
+			f.Close()
+			offset = newOffset
+
+			// Check if task is still running
+			p2, err := parsePlanFile(path)
+			if err != nil || p2.Status != "running" {
+				fmt.Fprintf(w, "event: done\ndata: %s\n\n", p2.Status)
+				flusher.Flush()
+				return
+			}
+			time.Sleep(2 * time.Second)
+		}
+	}
+
+	// Task is done/failed — send report all at once
+	if reportPath != "" {
+		f, err := os.Open(reportPath)
 		if err == nil {
 			defer f.Close()
 			scanner := bufio.NewScanner(f)
