@@ -223,6 +223,8 @@ func main() {
 		cmdShow(cfg)
 	case "stats":
 		cmdStats(cfg)
+	case "health":
+		cmdHealth(cfg)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -258,6 +260,7 @@ Commands:
   train       Train the re-ranker model from accumulated ratings
   stats       Show context quality statistics and re-ranker status
   gc          Garbage collect stale/expired memories
+  health      Inspect database and report health findings
 
 Flags (all commands):
   --ns     Namespace (default: auto-detect from cwd or config)
@@ -926,6 +929,106 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// --- Health command ---
+
+func cmdHealth(cfg CLIConfig) {
+	fs := flag.NewFlagSet("health", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	namespace := resolveNamespace(*ns, cfg)
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	hc, err := engine.Health(context.Background(), namespace)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(hc)
+		return
+	}
+
+	fmt.Println("=== DualMem Health Report ===")
+	fmt.Printf("Namespace: %s\n\n", namespace)
+
+	fmt.Println("Summary:")
+	fmt.Printf("  Detail memories:  %d\n", hc.Summary.TotalDetailMemories)
+	fmt.Printf("  Sketch raw:       %d\n", hc.Summary.TotalSketchRaw)
+	fmt.Printf("  Episodes:         %d\n", hc.Summary.TotalEpisodes)
+	fmt.Printf("  Arcs:             %d\n", hc.Summary.TotalArcs)
+	fmt.Printf("  Knowledge docs:   %d\n", hc.Summary.TotalKnowledgeDocs)
+	fmt.Printf("  Entity nodes:     %d\n", hc.Summary.TotalEntityNodes)
+	fmt.Printf("  Entity edges:     %d\n", hc.Summary.TotalEntityEdges)
+	if !hc.Summary.OldestMemory.IsZero() {
+		fmt.Printf("  Oldest memory:    %s\n", hc.Summary.OldestMemory.Format("2006-01-02"))
+		fmt.Printf("  Newest memory:    %s\n", hc.Summary.NewestMemory.Format("2006-01-02"))
+	}
+	fmt.Printf("  Database size:    %s\n", formatDBSize(hc.Summary.DatabaseSize))
+
+	fmt.Println("\nChecks:")
+	for _, check := range hc.Checks {
+		icon := "✓"
+		switch check.Status {
+		case "warning":
+			icon = "⚠"
+		case "error":
+			icon = "✗"
+		}
+		fmt.Printf("  %s %-30s %s\n", icon, check.Name, check.Message)
+	}
+
+	switch hc.Status {
+	case "healthy":
+		fmt.Println("\nStatus: HEALTHY")
+	case "warnings":
+		warnCount := 0
+		for _, c := range hc.Checks {
+			if c.Status == "warning" {
+				warnCount++
+			}
+		}
+		fmt.Printf("\nStatus: WARNINGS (%d warning(s))\n", warnCount)
+	case "issues":
+		errCount := 0
+		warnCount := 0
+		for _, c := range hc.Checks {
+			if c.Status == "error" {
+				errCount++
+			} else if c.Status == "warning" {
+				warnCount++
+			}
+		}
+		fmt.Printf("\nStatus: ISSUES (%d error(s), %d warning(s))\n", errCount, warnCount)
+	}
+}
+
+func formatDBSize(bytes int64) string {
+	const (
+		KB = 1024
+		MB = KB * 1024
+		GB = MB * 1024
+	)
+	switch {
+	case bytes >= GB:
+		return fmt.Sprintf("%.1f GB", float64(bytes)/float64(GB))
+	case bytes >= MB:
+		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(MB))
+	case bytes >= KB:
+		return fmt.Sprintf("%.1f KB", float64(bytes)/float64(KB))
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
 }
 
 // --- Map command ---

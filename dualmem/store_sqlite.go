@@ -1898,6 +1898,78 @@ func (s *SQLiteStore) ExpandEntitiesWithEdges(namespace string, entityIDs []stri
 	return results, rows.Err()
 }
 
+// --- Health check helpers ---
+
+func (s *SQLiteStore) GetEmbeddingModelCounts(userID string) (map[string]int, error) {
+	rows, err := s.db.Query(
+		`SELECT embedding_model, COUNT(*) FROM detail_memories WHERE user_id = ? GROUP BY embedding_model`,
+		userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[string]int)
+	for rows.Next() {
+		var model string
+		var count int
+		if err := rows.Scan(&model, &count); err != nil {
+			return nil, err
+		}
+		result[model] = count
+	}
+	return result, rows.Err()
+}
+
+func (s *SQLiteStore) GetStaleSketchRawCount(userID string, olderThan time.Time) (int, error) {
+	var count int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM sketch_raw WHERE user_id = ? AND processed = 0 AND created_at < ?`,
+		userID, olderThan.Format("2006-01-02 15:04:05"),
+	).Scan(&count)
+	return count, err
+}
+
+func (s *SQLiteStore) GetMemoryTimeRange(userID string) (oldest, newest time.Time, err error) {
+	var oldestStr, newestStr sql.NullString
+	err = s.db.QueryRow(
+		`SELECT MIN(created_at), MAX(created_at) FROM detail_memories WHERE user_id = ?`,
+		userID,
+	).Scan(&oldestStr, &newestStr)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	if oldestStr.Valid {
+		oldest = parseTime(oldestStr.String)
+	}
+	if newestStr.Valid {
+		newest = parseTime(newestStr.String)
+	}
+	return oldest, newest, nil
+}
+
+func (s *SQLiteStore) GetIsolatedEntityNodeCount(namespace string) (int, error) {
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM entity_nodes n
+		WHERE n.namespace = ?
+		AND NOT EXISTS (
+			SELECT 1 FROM entity_edges e
+			WHERE e.namespace = n.namespace
+			AND (e.source_id = n.id OR e.target_id = n.id)
+		)`,
+		namespace,
+	).Scan(&count)
+	return count, err
+}
+
+func (s *SQLiteStore) GetSketchRawCount(userID string) (int, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM sketch_raw WHERE user_id = ?`, userID).Scan(&count)
+	return count, err
+}
+
 // --- Helpers ---
 
 func generateID() string {

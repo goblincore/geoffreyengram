@@ -677,6 +677,13 @@ type Store interface {
 	InsertSessionRating(sr *SessionRating) error
 	GetRatingStats(namespace string) (*RatingStats, error)
 
+	// Health check helpers
+	GetEmbeddingModelCounts(userID string) (map[string]int, error)
+	GetStaleSketchRawCount(userID string, olderThan time.Time) (int, error)
+	GetMemoryTimeRange(userID string) (oldest, newest time.Time, err error)
+	GetIsolatedEntityNodeCount(namespace string) (int, error)
+	GetSketchRawCount(userID string) (int, error)
+
 	// Lifecycle
 	Close() error
 }

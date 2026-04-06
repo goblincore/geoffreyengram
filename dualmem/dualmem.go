@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -1714,6 +1715,218 @@ func truncateGC(s string, max int) string {
 		return s[:max-3] + "..."
 	}
 	return s
+}
+
+// --- Health check ---
+
+// HealthCheck is the result of a database health inspection.
+type HealthCheck struct {
+	Status  string        // "healthy", "warnings", "issues"
+	Checks  []HealthEntry
+	Summary HealthSummary
+}
+
+// HealthEntry describes a single health check result.
+type HealthEntry struct {
+	Name    string // e.g. "Embedding model consistency"
+	Status  string // "ok", "warning", "error"
+	Message string // human-readable description
+	Detail  string // optional extra info
+}
+
+// HealthSummary contains aggregate counts from the health inspection.
+type HealthSummary struct {
+	TotalDetailMemories int
+	TotalSketchRaw      int
+	TotalEpisodes       int
+	TotalArcs           int
+	TotalKnowledgeDocs  int
+	TotalEntityNodes    int
+	TotalEntityEdges    int
+	OldestMemory        time.Time
+	NewestMemory        time.Time
+	Namespaces          []string
+	DatabaseSize        int64 // bytes
+}
+
+// Health inspects the database for the given namespace and returns a report
+// with actionable findings. Works without an API key (no embedding calls).
+func (e *Engine) Health(ctx context.Context, namespace string) (*HealthCheck, error) {
+	hc := &HealthCheck{Status: "healthy"}
+
+	// --- Gather data ---
+
+	detailCount, _ := e.store.GetDetailCount(namespace)
+	sketchRawCount, _ := e.store.GetSketchRawCount(namespace)
+
+	episodes, _ := e.store.GetEpisodes(namespace, nil)
+	episodeCount := len(episodes)
+
+	arcs, _ := e.store.GetArcs(namespace)
+	arcCount := len(arcs)
+
+	docs, _ := e.store.GetKnowledgeDocs(namespace)
+	docCount := len(docs)
+
+	entityNodes, entityEdges, _, _ := e.store.GetEntityStats(namespace)
+
+	oldestMem, newestMem, _ := e.store.GetMemoryTimeRange(namespace)
+
+	namespaces, _ := e.store.ListNamespaces()
+
+	var dbSize int64
+	if info, err := os.Stat(e.cfg.SQLitePath); err == nil {
+		dbSize = info.Size()
+	}
+
+	// --- Run checks ---
+
+	// 1. Embedding model consistency
+	modelCounts, _ := e.store.GetEmbeddingModelCounts(namespace)
+	if len(modelCounts) == 0 {
+		hc.addCheck("Embedding model consistency", "ok", "No memories to check")
+	} else if len(modelCounts) == 1 {
+		for model, count := range modelCounts {
+			hc.addCheck("Embedding model consistency", "ok",
+				fmt.Sprintf("All %d memories use %s", count, model))
+			break
+		}
+	} else {
+		var parts []string
+		total := 0
+		for model, count := range modelCounts {
+			parts = append(parts, fmt.Sprintf("%s (%d)", model, count))
+			total += count
+		}
+		sort.Strings(parts)
+		hc.addCheck("Embedding model consistency", "warning",
+			fmt.Sprintf("Mixed embedding models across %d memories", total),
+			strings.Join(parts, ", "))
+	}
+
+	// 2. Orphaned sketch raw
+	sevenDaysAgo := time.Now().AddDate(0, 0, -7)
+	staleCount, _ := e.store.GetStaleSketchRawCount(namespace, sevenDaysAgo)
+	if staleCount > 0 {
+		hc.addCheck("Orphaned sketch records", "warning",
+			fmt.Sprintf("%d unprocessed records older than 7 days", staleCount),
+			"Run 'dualmem gc' or check the compression pipeline")
+	} else {
+		hc.addCheck("Orphaned sketch records", "ok", "No stale unprocessed records")
+	}
+
+	// 3. Knowledge doc staleness
+	allMemories, _ := e.store.GetDetailMemories(namespace)
+	staleDocs := 0
+	for i := range docs {
+		if isDocStale(&docs[i], allMemories) {
+			staleDocs++
+		}
+	}
+	if staleDocs > 0 {
+		hc.addCheck("Knowledge doc staleness", "warning",
+			fmt.Sprintf("%d docs may need re-synthesis", staleDocs),
+			"Run 'dualmem synthesize' to update")
+	} else {
+		hc.addCheck("Knowledge doc staleness", "ok",
+			fmt.Sprintf("All %d knowledge docs are up to date", docCount))
+	}
+
+	// 4. Empty namespace detection
+	if detailCount == 0 {
+		hc.addCheck("Namespace populated", "error",
+			"No memories in namespace",
+			"Add memories with 'dualmem add'")
+	} else {
+		hc.addCheck("Namespace populated", "ok",
+			fmt.Sprintf("%d memories in active namespace", detailCount))
+	}
+
+	// 5. Entity graph connectivity
+	isolatedNodes, _ := e.store.GetIsolatedEntityNodeCount(namespace)
+	if isolatedNodes > 0 {
+		hc.addCheck("Entity graph connectivity", "warning",
+			fmt.Sprintf("%d nodes, %d edges, %d isolated nodes",
+				entityNodes, entityEdges, isolatedNodes))
+	} else {
+		hc.addCheck("Entity graph connectivity", "ok",
+			fmt.Sprintf("%d nodes, %d edges, no isolated nodes",
+				entityNodes, entityEdges))
+	}
+
+	// 6. Memory recency
+	if newestMem.IsZero() {
+		hc.addCheck("Memory recency", "ok", "No memories yet")
+	} else {
+		daysSinceLast := time.Since(newestMem).Hours() / 24
+		if daysSinceLast > 30 {
+			hc.addCheck("Memory recency", "warning",
+				fmt.Sprintf("Last memory added %.0f days ago", daysSinceLast),
+				"System may not be actively used")
+		} else {
+			hc.addCheck("Memory recency", "ok",
+				fmt.Sprintf("Last memory added %.0f days ago", daysSinceLast))
+		}
+	}
+
+	// 7. Database size
+	hc.addCheck("Database size", "ok", fmtDBSize(dbSize))
+
+	// --- Build summary ---
+	hc.Summary = HealthSummary{
+		TotalDetailMemories: detailCount,
+		TotalSketchRaw:      sketchRawCount,
+		TotalEpisodes:       episodeCount,
+		TotalArcs:           arcCount,
+		TotalKnowledgeDocs:  docCount,
+		TotalEntityNodes:    entityNodes,
+		TotalEntityEdges:    entityEdges,
+		OldestMemory:        oldestMem,
+		NewestMemory:        newestMem,
+		Namespaces:          namespaces,
+		DatabaseSize:        dbSize,
+	}
+
+	return hc, nil
+}
+
+func (hc *HealthCheck) addCheck(name, status, message string, detail ...string) {
+	entry := HealthEntry{
+		Name:    name,
+		Status:  status,
+		Message: message,
+	}
+	if len(detail) > 0 {
+		entry.Detail = detail[0]
+	}
+	hc.Checks = append(hc.Checks, entry)
+
+	switch status {
+	case "error":
+		hc.Status = "issues"
+	case "warning":
+		if hc.Status != "issues" {
+			hc.Status = "warnings"
+		}
+	}
+}
+
+func fmtDBSize(bytes int64) string {
+	const (
+		KB = 1024
+		MB = KB * 1024
+		GB = MB * 1024
+	)
+	switch {
+	case bytes >= GB:
+		return fmt.Sprintf("%.1f GB", float64(bytes)/float64(GB))
+	case bytes >= MB:
+		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(MB))
+	case bytes >= KB:
+		return fmt.Sprintf("%.1f KB", float64(bytes)/float64(KB))
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
 }
 
 // GetStore returns the underlying store for direct entity graph queries.
