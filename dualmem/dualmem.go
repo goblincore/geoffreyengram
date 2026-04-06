@@ -1202,6 +1202,11 @@ func (e *Engine) getOrGenerateCodeMap(ctx context.Context, namespace string) (*C
 
 	e.store.UpsertCodeMap(namespace, e.cfg.RootDir, cm.Zoom1, cm.MarshalZoom2(), cm.GitCommit)
 
+	// Build structural graph (call/import edges) alongside the code map
+	if edges, sgErr := BuildStructuralGraph(e.cfg.RootDir, namespace); sgErr == nil && len(edges) > 0 {
+		e.store.InsertStructuralEdges(namespace, edges)
+	}
+
 	return cm, BuildCodeIndex(cm)
 }
 
@@ -1213,7 +1218,8 @@ func flattenEmbeddings(embs map[string]ModuleEmbedding) map[string][]float32 {
 	return flat
 }
 
-// StoreCodeMap persists a code map to the database and embeds modules. Called by the CLI `map` command.
+// StoreCodeMap persists a code map to the database, embeds modules, and builds
+// the structural graph (call/import edges). Called by the CLI `map` command.
 func (e *Engine) StoreCodeMap(ctx context.Context, namespace string, cm *CodeMap) error {
 	err := e.store.UpsertCodeMap(namespace, cm.RootDir, cm.Zoom1, cm.MarshalZoom2(), cm.GitCommit)
 	if err != nil {
@@ -1222,6 +1228,10 @@ func (e *Engine) StoreCodeMap(ctx context.Context, namespace string, cm *CodeMap
 	embs, embErr := EmbedCodeMap(ctx, cm, e.embedder)
 	if embErr == nil && embs != nil {
 		e.store.UpsertCodeMapEmbeddings(namespace, embs, e.embedder.ModelName())
+	}
+	// Build structural graph alongside the code map
+	if edges, sgErr := BuildStructuralGraph(cm.RootDir, namespace); sgErr == nil && len(edges) > 0 {
+		e.store.InsertStructuralEdges(namespace, edges)
 	}
 	return nil
 }
