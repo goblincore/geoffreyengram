@@ -552,8 +552,8 @@ Save memories when you:
 		return fmt.Errorf("start command: %w", err)
 	}
 
-	// Stream lines in a goroutine. Parse stream-json events for the UI log,
-	// write raw JSON to the report file.
+	// Stream lines in a goroutine. Parse events for both the UI log and report.
+	// Report gets human-readable parsed lines; raw JSON is only kept if no parse succeeds.
 	scanDone := make(chan struct{})
 	go func() {
 		defer close(scanDone)
@@ -561,9 +561,9 @@ Save memories when you:
 		scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB for large JSON lines
 		for scanner.Scan() {
 			raw := scanner.Text()
-			fmt.Fprintln(reportFile, raw) // raw to report
 			if line := parseStreamEvent(raw); line != "" {
 				lb.Append(line)
+				fmt.Fprintln(reportFile, line)
 			}
 		}
 	}()
