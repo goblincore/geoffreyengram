@@ -11,6 +11,21 @@ import (
 // unravelAdapterPath is the path to the Node.js adapter script.
 var unravelAdapterPath = filepath.Join("benchmarks", "contextual", "adapters", "unravel.js")
 
+// nodeBinary returns the path to the node binary, checking common locations.
+func nodeBinary() string {
+	// Check PATH first
+	if p, err := exec.LookPath("node"); err == nil {
+		return p
+	}
+	// Common locations
+	for _, p := range []string{"/usr/local/bin/node", "/opt/homebrew/bin/node"} {
+		if _, err := exec.LookPath(p); err == nil {
+			return p
+		}
+	}
+	return "node" // fallback, will fail with clear error
+}
+
 // runUnravel executes UnravelAI search for IR metrics.
 func runUnravel(q Query) AdapterOutput {
 	corpusPath, ok := corpusPaths[q.Corpus]
@@ -19,8 +34,14 @@ func runUnravel(q Query) AdapterOutput {
 		return AdapterOutput{}
 	}
 
+	node := nodeBinary()
+	if _, err := exec.LookPath(node); err != nil {
+		fmt.Printf("  WARNING: node not found — install Node.js to run UnravelAI adapter\n")
+		return AdapterOutput{}
+	}
+
 	start := time.Now()
-	cmd := exec.Command("node", unravelAdapterPath,
+	cmd := exec.Command(node, unravelAdapterPath,
 		"--mode", "search",
 		"--corpus", corpusPath,
 		"--query", q.Query)
@@ -65,7 +86,7 @@ func getUnravelReport(q Query) string {
 		return ""
 	}
 
-	cmd := exec.Command("node", unravelAdapterPath,
+	cmd := exec.Command(nodeBinary(), unravelAdapterPath,
 		"--mode", "consult",
 		"--corpus", corpusPath,
 		"--query", q.Query)
