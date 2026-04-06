@@ -166,11 +166,19 @@ body {
   font-size: 14px;
 }
 
+#detail-empty[hidden] {
+  display: none;
+}
+
 #detail-content {
   display: flex;
   flex-direction: column;
   flex: 1;
   overflow: hidden;
+}
+
+#detail-content[hidden] {
+  display: none;
 }
 
 #detail-header {

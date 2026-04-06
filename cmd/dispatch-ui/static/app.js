@@ -3,6 +3,7 @@ let tasks = [];
 let selectedTask = null;
 let eventSource = null;
 let config = null;
+let currentView = null; // tracks what the detail panel is showing: 'logs', 'plan', 'report', or null
 
 // Init
 async function init() {
@@ -20,7 +21,10 @@ async function refreshTasks() {
   renderTaskList();
   if (selectedTask) {
     const updated = tasks.find(t => t.name === selectedTask);
-    if (updated) renderDetail(updated);
+    if (updated) {
+      // Only update header/meta/actions — don't clobber the body if user is viewing plan/report
+      updateDetailHeader(updated);
+    }
   }
 }
 
@@ -63,8 +67,8 @@ function selectTask(name) {
   renderTaskList();
 }
 
-// Render detail panel
-function renderDetail(task) {
+// Update just the header/meta/actions without touching the body
+function updateDetailHeader(task) {
   document.getElementById('detail-empty').hidden = true;
   document.getElementById('detail-content').hidden = false;
   document.getElementById('detail-title').textContent = task.title || task.name;
@@ -76,6 +80,10 @@ function renderDetail(task) {
     ${task.started_at ? '· ' + timeAgo(task.started_at) : ''}
   `;
 
+  renderActionButtons(task);
+}
+
+function renderActionButtons(task) {
   const actions = document.getElementById('detail-actions');
   let btns = `<button class="btn-sm" onclick="viewPlan('${task.name}')">View Plan</button>`;
   if (task.status === 'running') {
@@ -89,18 +97,26 @@ function renderDetail(task) {
   }
   btns += `<button class="btn-sm btn-danger" onclick="deleteTask('${task.name}')">Delete</button>`;
   actions.innerHTML = btns;
+}
+
+// Render full detail panel (header + body) — called on task selection
+function renderDetail(task) {
+  updateDetailHeader(task);
 
   const body = document.getElementById('detail-body');
   if (task.status === 'running') {
+    currentView = 'logs';
     body.innerHTML = '<div class="log-viewer" id="log-output"></div>';
     connectLogs(task.name);
   } else if (task.status === 'done' || task.status === 'failed') {
+    currentView = 'report';
     fetch(`/api/tasks/${task.name}/report`).then(r => r.text()).then(text => {
       body.innerHTML = `<div class="log-viewer"><pre>${escapeHtml(text)}</pre></div>`;
     }).catch(() => {
       body.innerHTML = '<p class="muted">No report available</p>';
     });
   } else {
+    currentView = 'plan';
     fetch(`/api/tasks/${task.name}/plan`).then(r => r.text()).then(text => {
       body.innerHTML = `<div class="plan-viewer"><pre>${escapeHtml(text)}</pre></div>`;
     });
@@ -155,11 +171,15 @@ async function deleteTask(name) {
 }
 
 async function viewPlan(name) {
+  if (eventSource) { eventSource.close(); eventSource = null; }
+  currentView = 'plan';
   const text = await (await fetch(`/api/tasks/${name}/plan`)).text();
   document.getElementById('detail-body').innerHTML = `<div class="plan-viewer"><pre>${escapeHtml(text)}</pre></div>`;
 }
 
 async function viewReport(name) {
+  if (eventSource) { eventSource.close(); eventSource = null; }
+  currentView = 'report';
   const text = await (await fetch(`/api/tasks/${name}/report`)).text();
   document.getElementById('detail-body').innerHTML = `<div class="log-viewer"><pre>${escapeHtml(text)}</pre></div>`;
 }
