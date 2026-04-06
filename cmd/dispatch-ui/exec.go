@@ -144,6 +144,10 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 	if h := os.Getenv("HOME"); h != "" {
 		envPairs = append(envPairs, "HOME="+h)
 	}
+	// Ensure dualmem uses the project's namespace, not the worktree directory name
+	projectName := filepath.Base(plan.Project)
+	envPairs = append(envPairs, "DUALMEM_NAMESPACE=claude:"+projectName)
+	envPairs = append(envPairs, "DUALMEM_ROOT_DIR="+plan.Project)
 
 	// 5. Create context with timeout
 	execCtx := ctx
