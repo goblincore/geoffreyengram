@@ -417,6 +417,66 @@ type SynthesizeResult struct {
 	DryRun   bool
 }
 
+// --- Consult report ---
+
+// ConsultReport is a structured intelligence report returned by Engine.Consult.
+// It provides a semantically complete explanation of a codebase subsystem or concept,
+// backed by structural evidence and ranked file references.
+type ConsultReport struct {
+	Query         string       `json:"query"`
+	Intent        Intent       `json:"intent"`
+	Confidence    float64      `json:"confidence"`
+	ConfLabel     string       `json:"conf_label"` // "high", "medium", "low"
+	Explanation   string       `json:"explanation"` // knowledge doc content
+	Evidence      string       `json:"evidence"`    // call graph + co-change text
+	RelevantFiles []RankedFile `json:"relevant_files"`
+	Synthesized   bool         `json:"synthesized"` // true if LLM called this invocation
+	DocTopic      string       `json:"doc_topic"`   // knowledge doc topic used/created
+	TokenCount    int          `json:"token_count"`
+}
+
+// RankedFile is a file relevant to a consult query, with its relevance source.
+type RankedFile struct {
+	Path   string  `json:"path"`
+	Score  float64 `json:"score"`
+	Source string  `json:"source"` // "hdc", "structural", "co-change", "memory"
+	Desc   string  `json:"desc"`   // one-line module description
+}
+
+// FormatText renders the ConsultReport as structured text with section headers.
+func (r *ConsultReport) FormatText() string {
+	var sb strings.Builder
+
+	// Header with confidence
+	sb.WriteString(fmt.Sprintf("Confidence: %.2f (%s)\n\n", r.Confidence, r.ConfLabel))
+
+	// Section 1: Explanation
+	sb.WriteString("=== Explanation ===\n")
+	sb.WriteString(r.Explanation)
+	sb.WriteString("\n\n")
+
+	// Section 2: Structural Evidence
+	if r.Evidence != "" {
+		sb.WriteString("=== Structural Evidence ===\n")
+		sb.WriteString(r.Evidence)
+		sb.WriteString("\n\n")
+	}
+
+	// Section 3: Relevant Files
+	if len(r.RelevantFiles) > 0 {
+		sb.WriteString("=== Relevant Files ===\n")
+		for i, f := range r.RelevantFiles {
+			desc := f.Desc
+			if desc == "" {
+				desc = f.Source
+			}
+			sb.WriteString(fmt.Sprintf("  %d. %-30s — %s (%.2f)\n", i+1, f.Path, desc, f.Score))
+		}
+	}
+
+	return sb.String()
+}
+
 // --- Import graph / clustering ---
 
 // ImportGraph represents import relationships between code modules.
