@@ -1,2 +1,92 @@
 <!DOCTYPE html>
-<html><body><h1>Dispatch UI</h1><p>Frontend coming soon.</p></body></html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dispatch</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <header id="topbar">
+      <div class="topbar-left">
+        <h1>Dispatch</h1>
+        <span id="task-count" class="badge">0</span>
+      </div>
+      <button id="btn-new-task" class="btn-primary">+ New Task</button>
+    </header>
+
+    <div id="main">
+      <aside id="sidebar">
+        <div class="sidebar-header">Queue</div>
+        <div id="task-list"></div>
+      </aside>
+
+      <section id="detail">
+        <div id="detail-empty">
+          <p>Select a task to view details</p>
+        </div>
+        <div id="detail-content" hidden>
+          <div id="detail-header">
+            <div>
+              <h2 id="detail-title"></h2>
+              <div id="detail-meta"></div>
+            </div>
+            <div id="detail-actions"></div>
+          </div>
+          <div id="detail-body"></div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- New Task Modal -->
+  <div id="modal-overlay" class="modal-overlay" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h2>New Task</h2>
+        <button class="modal-close" onclick="closeModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="step-form">
+          <label>Task Name<input type="text" id="inp-name" placeholder="e.g. add-auth-tests"></label>
+          <label>Description<textarea id="inp-desc" rows="4" placeholder="Short description..."></textarea></label>
+          <div class="form-row">
+            <label>Project<select id="inp-project"></select></label>
+            <label>Executor Model<select id="inp-model"></select></label>
+          </div>
+          <div class="form-row">
+            <label>Priority<select id="inp-priority">
+              <option value="1">1 (Highest)</option>
+              <option value="2">2</option>
+              <option value="3" selected>3 (Default)</option>
+              <option value="4">4</option>
+              <option value="5">5 (Lowest)</option>
+            </select></label>
+            <label>Max Runtime<select id="inp-runtime">
+              <option value="10m">10 minutes</option>
+              <option value="25m" selected>25 minutes</option>
+              <option value="30m">30 minutes</option>
+              <option value="1h">1 hour</option>
+            </select></label>
+          </div>
+          <button id="btn-generate" class="btn-primary" onclick="generatePlan()">Generate Plan</button>
+        </div>
+        <div id="step-review" hidden>
+          <div class="review-header">
+            <h3>Review Generated Plan</h3>
+            <span id="gen-status" class="badge">generating...</span>
+          </div>
+          <textarea id="inp-plan-body" rows="20"></textarea>
+          <div class="review-actions">
+            <button class="btn-secondary" onclick="backToForm()">Back</button>
+            <button id="btn-dispatch" class="btn-primary" onclick="dispatchTask()">Dispatch</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
