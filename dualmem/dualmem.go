@@ -889,6 +889,19 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 		parts = append(parts, "[No cross-session memories found. Run /codebase-onboard for initial context.]")
 	}
 
+	// Knowledge gap hint: if codemap exists but no knowledge docs cover this namespace,
+	// suggest consult for deeper understanding.
+	hasCodemap := false
+	if e.cfg.RootDir != "" {
+		cm, _ := e.getOrGenerateCodeMap(ctx, userID)
+		if cm != nil {
+			hasCodemap = true
+		}
+	}
+	if hasCodemap && !hasKnowledge {
+		parts = append(parts, "[Tip: Run `dualmem consult \"topic\"` for deeper understanding of this codebase's subsystems]")
+	}
+
 	text := strings.Join(parts, "\n\n")
 
 	// Record session marker for next time

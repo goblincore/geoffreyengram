@@ -225,6 +225,8 @@ func main() {
 		cmdStats(cfg)
 	case "health":
 		cmdHealth(cfg)
+	case "consult":
+		cmdConsult(cfg)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -261,6 +263,7 @@ Commands:
   stats       Show context quality statistics and re-ranker status
   gc          Garbage collect stale/expired memories
   health      Inspect database and report health findings
+  consult     Structured intelligence report (lazy-synthesis)
 
 Flags (all commands):
   --ns     Namespace (default: auto-detect from cwd or config)
@@ -1952,6 +1955,39 @@ func cmdTrain(cfg CLIConfig) {
 		}
 		fmt.Printf("  %-20s %+.3f\n", "bias", weights.Bias)
 	}
+}
+
+// --- Consult command ---
+
+func cmdConsult(cfg CLIConfig) {
+	fs := flag.NewFlagSet("consult", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace")
+	budget := fs.Int("budget", 2000, "Token budget")
+	fs.Parse(os.Args[2:])
+
+	query := strings.Join(fs.Args(), " ")
+	if query == "" {
+		fmt.Fprintf(os.Stderr, "usage: dualmem consult \"query\" [--budget N] [--ns namespace]\n")
+		os.Exit(1)
+	}
+
+	namespace := resolveNamespace(*ns, cfg)
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+	report, err := engine.Consult(ctx, namespace, query, *budget)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Print(report.FormatText())
 }
 
 // --- Stats command ---
