@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -71,6 +72,7 @@ func parsePlanFile(path string) (*Plan, error) {
 	}
 
 	plan := &Plan{
+		Name: strings.TrimSuffix(filepath.Base(path), ".md"),
 		Path: path,
 	}
 
@@ -280,7 +282,7 @@ func writePlanFile(p *Plan) error {
 	writeLine("created_by", p.CreatedBy)
 	writeLine("planning_model", p.PlanningModel)
 
-	sb.WriteString("---")
+	sb.WriteString("---\n")
 	sb.WriteString(p.Body)
 
 	return os.WriteFile(p.Path, []byte(sb.String()), 0644)
