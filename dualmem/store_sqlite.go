@@ -308,6 +308,28 @@ func (s *SQLiteStore) migrate() error {
 		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (9)`)
 	}
 
+	if version < 10 {
+		if _, err := s.db.Exec(`
+			CREATE TABLE IF NOT EXISTS structural_edges (
+				source_path        TEXT NOT NULL,
+				target_path        TEXT NOT NULL,
+				edge_type          TEXT NOT NULL,
+				weight             REAL NOT NULL DEFAULT 1.0,
+				line_number        INTEGER NOT NULL DEFAULT 0,
+				enclosing_function TEXT NOT NULL DEFAULT '',
+				callee_name        TEXT NOT NULL DEFAULT '',
+				namespace          TEXT NOT NULL,
+				created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+			);
+			CREATE INDEX IF NOT EXISTS idx_structural_source ON structural_edges(namespace, source_path);
+			CREATE INDEX IF NOT EXISTS idx_structural_target ON structural_edges(namespace, target_path);
+			CREATE INDEX IF NOT EXISTS idx_structural_type ON structural_edges(namespace, edge_type);
+		`); err != nil {
+			return fmt.Errorf("migrate v10 (structural edges): %w", err)
+		}
+		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (10)`)
+	}
+
 	return nil
 }
 
@@ -1682,6 +1704,117 @@ func scanCoChangeEdges(rows *sql.Rows) ([]CoChangeEdge, error) {
 		json.Unmarshal([]byte(conceptsJSON), &e.Concepts)
 		e.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
 		e.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAt)
+		edges = append(edges, e)
+	}
+	return edges, rows.Err()
+}
+
+// --- Structural graph ---
+
+func (s *SQLiteStore) InsertStructuralEdges(namespace string, edges []StructuralEdge) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("insert structural edges: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Full rebuild: clear existing edges for this namespace
+	if _, err := tx.Exec(`DELETE FROM structural_edges WHERE namespace = ?`, namespace); err != nil {
+		return fmt.Errorf("insert structural edges: clear: %w", err)
+	}
+
+	stmt, err := tx.Prepare(
+		`INSERT INTO structural_edges (source_path, target_path, edge_type, weight, line_number, enclosing_function, callee_name, namespace)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+	)
+	if err != nil {
+		return fmt.Errorf("insert structural edges: prepare: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, e := range edges {
+		if _, err := stmt.Exec(e.SourcePath, e.TargetPath, e.EdgeType, e.Weight, e.LineNumber, e.EnclosingFunction, e.CalleeName, namespace); err != nil {
+			return fmt.Errorf("insert structural edge %s->%s: %w", e.SourcePath, e.TargetPath, err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (s *SQLiteStore) GetStructuralNeighbors(namespace, path string, edgeTypes []string, limit int) ([]StructuralEdge, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	var rows *sql.Rows
+	var err error
+
+	if len(edgeTypes) > 0 {
+		// Build IN clause placeholders
+		placeholders := strings.Repeat("?,", len(edgeTypes))
+		placeholders = placeholders[:len(placeholders)-1]
+
+		args := make([]interface{}, 0, len(edgeTypes)+4)
+		args = append(args, namespace, path, path)
+		for _, et := range edgeTypes {
+			args = append(args, et)
+		}
+		args = append(args, limit)
+
+		query := fmt.Sprintf(
+			`SELECT source_path, target_path, edge_type, weight, line_number, enclosing_function, callee_name, namespace
+			 FROM structural_edges
+			 WHERE namespace = ? AND (source_path = ? OR target_path = ?) AND edge_type IN (%s)
+			 ORDER BY weight DESC
+			 LIMIT ?`,
+			placeholders,
+		)
+		rows, err = s.db.Query(query, args...)
+	} else {
+		rows, err = s.db.Query(
+			`SELECT source_path, target_path, edge_type, weight, line_number, enclosing_function, callee_name, namespace
+			 FROM structural_edges
+			 WHERE namespace = ? AND (source_path = ? OR target_path = ?)
+			 ORDER BY weight DESC
+			 LIMIT ?`,
+			namespace, path, path, limit,
+		)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("get structural neighbors: %w", err)
+	}
+	defer rows.Close()
+	return scanStructuralEdges(rows)
+}
+
+func (s *SQLiteStore) GetStructuralEdgesForPath(namespace, path string, limit int) ([]StructuralEdge, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.Query(
+		`SELECT source_path, target_path, edge_type, weight, line_number, enclosing_function, callee_name, namespace
+		 FROM structural_edges
+		 WHERE namespace = ? AND source_path = ?
+		 ORDER BY weight DESC
+		 LIMIT ?`,
+		namespace, path, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get structural edges for path: %w", err)
+	}
+	defer rows.Close()
+	return scanStructuralEdges(rows)
+}
+
+func scanStructuralEdges(rows *sql.Rows) ([]StructuralEdge, error) {
+	var edges []StructuralEdge
+	for rows.Next() {
+		var e StructuralEdge
+		if err := rows.Scan(&e.SourcePath, &e.TargetPath, &e.EdgeType, &e.Weight,
+			&e.LineNumber, &e.EnclosingFunction, &e.CalleeName, &e.Namespace); err != nil {
+			continue
+		}
 		edges = append(edges, e)
 	}
 	return edges, rows.Err()

@@ -116,6 +116,19 @@ type CoChangeEdge struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
+// StructuralEdge represents a typed relationship between code entities.
+// Extracted from AST analysis: function calls, imports, containment.
+type StructuralEdge struct {
+	SourcePath        string  `json:"source_path"`         // File path of the source (caller/importer)
+	TargetPath        string  `json:"target_path"`         // File path of the target (callee/imported)
+	EdgeType          string  `json:"edge_type"`           // "calls", "imports", or "contains"
+	Weight            float64 `json:"weight"`              // Edge weight: calls=1.0, imports=0.7, contains=0.5
+	LineNumber        int     `json:"line_number"`         // Line in source file where the relationship occurs
+	EnclosingFunction string  `json:"enclosing_function"`  // Function containing the call site (empty for imports)
+	CalleeName        string  `json:"callee_name"`         // Name of the called function or imported symbol
+	Namespace         string  `json:"namespace"`           // User/project namespace
+}
+
 // ExpandedEntityEdge is a neighbor entity ID with the edge that connects it.
 // Used by structure-aware graph boost to differentiate edge types and strengths.
 type ExpandedEntityEdge struct {
@@ -667,6 +680,11 @@ type Store interface {
 	GetCoChangeAll(namespace string, limit int) ([]CoChangeEdge, error)
 	UpdateCoChangeConcepts(namespace, source, target, conceptsJSON string) error
 	DecayCoChange(namespace string, halfLifeDays int) error
+
+	// Structural graph
+	InsertStructuralEdges(namespace string, edges []StructuralEdge) error
+	GetStructuralNeighbors(namespace, path string, edgeTypes []string, limit int) ([]StructuralEdge, error)
+	GetStructuralEdgesForPath(namespace, path string, limit int) ([]StructuralEdge, error)
 
 	// Context snapshots & ratings
 	InsertSnapshot(id, namespace, query string, queryEmbedding []byte, sourceIDsJSON string, tokensUsed int) error
