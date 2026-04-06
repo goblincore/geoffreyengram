@@ -338,11 +338,92 @@ geoffreyengram/
 ├── cmd/
 │   ├── dualmem/           # CLI tool
 │   ├── dualmem-mcp/       # MCP server
-│   └── engram-mcp/        # Engram MCP server
+│   ├── dispatch-ui/       # Dispatch dashboard (web UI)
+��   └── engram-mcp/        # Engram MCP server
 └── examples/
     ├── chat/              # Local REPL with Ollama
     ├── comparison/        # Memory mode comparison + LLM judge
     └── dualmem-bench/     # LLM-as-judge benchmark (9 tasks: QA, codegen, triage)
+```
+
+## Dispatch UI
+
+A web dashboard for managing headless Claude Code agent tasks. Replaces the `dispatch.sh` + cron system with a Go-native orchestrator.
+
+### Quick start
+
+```bash
+go build -o ~/go/bin/dispatch-ui ./cmd/dispatch-ui/
+dispatch-ui
+# Open http://localhost:8090
+```
+
+The dashboard reads your existing `~/.claude/dispatch/plans/` directory. Existing plan files appear automatically.
+
+### Features
+
+- **Task queue** — see pending, running, done, and failed tasks at a glance
+- **Live log streaming** — watch agent output in real-time via SSE
+- **Task creation** — write a short description, Opus generates the full plan, review and dispatch
+- **Task management** — cancel running tasks, retry failed ones, adjust priority, delete
+
+### Creating a task from the UI
+
+1. Click **"+ New Task"**
+2. Fill in: task name, short description, project path, executor model, priority, max runtime
+3. Click **"Generate Plan"** — the planning model (default: Opus via your subscription) expands the description into a full plan with context, instructions, and acceptance criteria
+4. Review/edit the generated plan
+5. Click **"Dispatch"** — the task enters the queue and runs on the next poll cycle (5s)
+
+### Creating a task manually
+
+Drop a `.md` file into `~/.claude/dispatch/plans/` with this format:
+
+```yaml
+---
+title: "My task title"
+status: pending
+project: /path/to/your/project
+model: glm-5.1
+api_key_env: ZAI_API_KEY
+base_url: https://api.z.ai/api/anthropic
+branch: dispatch/my-task
+priority: 2
+max_runtime: 25m
+allowed_tools: Edit,Write,Bash,Read,Glob,Grep
+---
+
+## Context
+What this task is about.
+
+## Instructions
+Step-by-step instructions for the agent.
+
+## Acceptance criteria
+- Tests pass
+- Code compiles
+```
+
+To use your Claude subscription instead of an API key, omit `api_key_env` and `base_url` — the CLI will use your subscription auth.
+
+### Configuration
+
+The server reads `~/.claude/dispatch/dispatch.conf`:
+
+```bash
+PLANS_DIR="$HOME/.claude/dispatch/plans"
+REPORTS_DIR="$HOME/.claude/dispatch/reports"
+CLAUDE_BIN="$HOME/.local/bin/claude"
+DEFAULT_MODEL="glm-5.1"
+LISTEN_ADDR="127.0.0.1:8090"
+PLANNING_MODEL="claude-opus-4-6"
+```
+
+API keys go in `~/.claude/dispatch/.env`:
+
+```bash
+export ZAI_API_KEY="your-key"
+export ANTHROPIC_API_KEY="your-key"
 ```
 
 ## Status
