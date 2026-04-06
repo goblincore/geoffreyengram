@@ -38,6 +38,17 @@ graph TB
         KDocs --> Context
         Context --> Output["Token-budgeted<br/>context block"]
     end
+
+    subgraph "Intelligence"
+        ConsultQ["Consult Query"] --> Consult["Consult"]
+        KDocs -->|"cache hit ≥0.75"| Consult
+        CodeMap -->|"HDC ranking"| Consult
+        CoChange --> Consult
+        Detail --> Consult
+        Consult -->|"cache miss"| LLM["Gemini Flash<br/>Synthesize"]
+        LLM -->|"save"| KDocs
+        Consult --> Report["3-section<br/>intelligence report"]
+    end
 ```
 
 **Dual-path routing**: Memories are scored at insert time (no LLM calls). High-importance memories (decisions, warnings) stay at full fidelity in the Detail Path. Everything else is compressed into a hierarchical sketch: episodes (30-day retention) → narrative arcs (90-day, 128d projection) → user profile (64d projection).
@@ -55,6 +66,7 @@ dualmem add --text "Don't touch rateLimiter cleanup()" --type warning --salience
 dualmem search "authentication" --limit 5
 dualmem search-code "authentication middleware"       # HDC-powered, no API calls
 dualmem context "fix the auth bug" --budget 3000      # token-budgeted context
+dualmem consult "how does auth work?"                 # synthesized intelligence report
 ```
 
 For Claude Code integration, copy [`docs/example-claude-md.md`](docs/example-claude-md.md) into your `~/.claude/CLAUDE.md`.
@@ -125,6 +137,17 @@ dualmem synthesize             # synthesize knowledge docs
 dualmem docs                   # list docs
 dualmem docs show <topic>      # read a doc
 ```
+
+### Consult — lazy-synthesis intelligence reports
+
+Ask a question about any subsystem and get a structured explanation. If a cached knowledge doc matches (cosine ≥ 0.75), it's served instantly. Otherwise, structural evidence is gathered (HDC codemap + call graph + co-change + memories) and Gemini Flash synthesizes a narrative — which is then cached as a knowledge doc for future queries.
+
+```bash
+dualmem consult "how does auth work?"
+dualmem consult "how does the HDC encoder work?" --budget 2000
+```
+
+Output is a 3-section report: **Explanation** (synthesized narrative), **Structural Evidence** (call graph edges + co-change neighbors), **Relevant Files** (HDC-ranked with relevance source). Includes a confidence score based on knowledge doc match, structural edge coverage, and memory count.
 
 ### HDC-powered code search
 
@@ -259,6 +282,7 @@ dualmem cochange <file> [--min-strength N] [--decay]
 # Knowledge docs
 dualmem docs [list|show|delete|export]
 dualmem synthesize [--dry-run] [--force] [--all]
+dualmem consult "how does X work?" [--budget 2000]  # lazy-synthesis intelligence report
 
 # Context quality
 dualmem rate --snapshot <id> --phase late --ratings '{"mem_id": 2}'
@@ -319,7 +343,7 @@ results := mem.Search("travel", "lily:player123", 5, nil)
 geoffreyengram/
 ├── engram.go              # Engram core (Init, Search, Add, Reflect)
 ├── dualmem/               # DualMem agent memory engine
-│   ├── dualmem.go         # Engine (Add, DualSearch, AssembleContext, Synthesize)
+│   ├── dualmem.go         # Engine (Add, DualSearch, AssembleContext, Consult, Synthesize)
 │   ├── types.go           # Config, Store interface, Intent, all data types
 │   ├── detail.go          # Detail Path (importance scoring, capacity management)
 │   ├── sketch.go          # Sketch Path (episodes, arcs, profiles)
@@ -459,7 +483,7 @@ With beam search (top-5 per hop) and pruning (threshold 0.2) to prevent score co
 
 ## Status
 
-Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 270+ tests passing.
+Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 280+ tests passing.
 
 ## License
 
