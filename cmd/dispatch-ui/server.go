@@ -497,7 +497,35 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleGeneratePlan is a stub for Task 6.
+// generatePlanRequest is the JSON body for POST /api/generate-plan.
+type generatePlanRequest struct {
+	Description string `json:"description"`
+	Project     string `json:"project"`
+}
+
+// handleGeneratePlan calls the planning model to expand a description into a
+// full plan body and returns it as JSON.
 func (s *Server) handleGeneratePlan(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "generate-plan not yet implemented")
+	var req generatePlanRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+
+	if req.Description == "" {
+		writeError(w, http.StatusBadRequest, "description is required")
+		return
+	}
+	if req.Project == "" {
+		writeError(w, http.StatusBadRequest, "project is required")
+		return
+	}
+
+	body, err := s.eng.GeneratePlan(r.Context(), req.Description, req.Project)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "generate plan: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"body": body})
 }
