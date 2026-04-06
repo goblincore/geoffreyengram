@@ -14,9 +14,37 @@ import (
 )
 
 // parseStreamEvent extracts a human-readable log line from a stream-json event.
+// Supports both Claude Code (stream-json) and OpenCode (--format json) event formats.
 func parseStreamEvent(raw string) string {
+	// Quick type peek to dispatch to the right parser
+	var peek struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal([]byte(raw), &peek); err != nil {
+		return ""
+	}
+
+	switch peek.Type {
+	// --- Claude Code events ---
+	case "assistant":
+		return parseClaudeEvent(raw)
+
+	// --- OpenCode events ---
+	case "text":
+		return parseOpenCodeTextEvent(raw)
+	case "tool_use":
+		return parseOpenCodeToolEvent(raw)
+	case "step_finish":
+		return parseOpenCodeStepFinish(raw)
+	case "error":
+		return parseOpenCodeError(raw)
+	}
+	return ""
+}
+
+// parseClaudeEvent handles Claude Code stream-json "assistant" events.
+func parseClaudeEvent(raw string) string {
 	var ev struct {
-		Type    string `json:"type"`
 		Message struct {
 			Content []struct {
 				Type  string          `json:"type"`
@@ -27,9 +55,6 @@ func parseStreamEvent(raw string) string {
 		} `json:"message"`
 	}
 	if err := json.Unmarshal([]byte(raw), &ev); err != nil {
-		return ""
-	}
-	if ev.Type != "assistant" {
 		return ""
 	}
 	var parts []string
@@ -62,6 +87,104 @@ func parseStreamEvent(raw string) string {
 		return strings.Join(parts, "\n")
 	}
 	return ""
+}
+
+// parseOpenCodeTextEvent handles OpenCode "text" events: {"type":"text","part":{"text":"..."}}.
+func parseOpenCodeTextEvent(raw string) string {
+	var ev struct {
+		Part struct {
+			Text string `json:"text"`
+		} `json:"part"`
+	}
+	if err := json.Unmarshal([]byte(raw), &ev); err != nil || ev.Part.Text == "" {
+		return ""
+	}
+	text := ev.Part.Text
+	if len(text) > 200 {
+		text = text[:200] + "..."
+	}
+	return text
+}
+
+// parseOpenCodeToolEvent handles OpenCode "tool_use" events:
+// {"type":"tool_use","part":{"tool":"Bash","state":{"input":{...},"output":"...","title":"...","status":"completed"}}}.
+func parseOpenCodeToolEvent(raw string) string {
+	var ev struct {
+		Part struct {
+			Tool  string `json:"tool"`
+			State struct {
+				Status string          `json:"status"`
+				Title  string          `json:"title"`
+				Input  json.RawMessage `json:"input"`
+				Output string          `json:"output"`
+			} `json:"state"`
+		} `json:"part"`
+	}
+	if err := json.Unmarshal([]byte(raw), &ev); err != nil {
+		return ""
+	}
+	tool := ev.Part.Tool
+	if tool == "" {
+		return ""
+	}
+
+	// Try to extract useful info from input
+	var input map[string]any
+	json.Unmarshal(ev.Part.State.Input, &input)
+
+	if ev.Part.State.Title != "" {
+		return fmt.Sprintf("[%s] %s", tool, ev.Part.State.Title)
+	}
+	if cmd, ok := input["command"].(string); ok && (tool == "Bash" || tool == "bash") {
+		cmd = strings.ReplaceAll(cmd, "\n", " ")
+		if len(cmd) > 120 {
+			cmd = cmd[:120] + "..."
+		}
+		return fmt.Sprintf("[%s] %s", tool, cmd)
+	}
+	if fp, ok := input["file_path"].(string); ok {
+		return fmt.Sprintf("[%s] %s", tool, fp)
+	}
+	if p, ok := input["pattern"].(string); ok {
+		return fmt.Sprintf("[%s] %s", tool, p)
+	}
+	return fmt.Sprintf("[%s]", tool)
+}
+
+// parseOpenCodeStepFinish handles OpenCode "step_finish" events with token/cost summary.
+func parseOpenCodeStepFinish(raw string) string {
+	var ev struct {
+		Part struct {
+			Reason string `json:"reason"`
+			Tokens struct {
+				Input  int `json:"input"`
+				Output int `json:"output"`
+				Total  int `json:"total"`
+			} `json:"tokens"`
+			Cost float64 `json:"cost"`
+		} `json:"part"`
+	}
+	if err := json.Unmarshal([]byte(raw), &ev); err != nil {
+		return ""
+	}
+	if ev.Part.Reason == "stop" {
+		return fmt.Sprintf("[step done] %d tokens (in=%d out=%d)",
+			ev.Part.Tokens.Total, ev.Part.Tokens.Input, ev.Part.Tokens.Output)
+	}
+	return ""
+}
+
+// parseOpenCodeError handles OpenCode "error" events.
+func parseOpenCodeError(raw string) string {
+	var ev struct {
+		Part struct {
+			Error string `json:"error"`
+		} `json:"part"`
+	}
+	if err := json.Unmarshal([]byte(raw), &ev); err != nil || ev.Part.Error == "" {
+		return ""
+	}
+	return fmt.Sprintf("[ERROR] %s", ev.Part.Error)
 }
 
 // parseMaxRuntime converts strings like "10m", "1h", "1800" to time.Duration.
