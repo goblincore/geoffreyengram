@@ -17,6 +17,7 @@ type DispatchConfig struct {
 	DefaultMaxRuntime   string
 	ClaudeBin           string
 	OpenCodeBin         string
+	PiBin               string
 	Preamble            string // Prepended to every plan body before dispatching
 	ListenAddr          string
 	PlanningModel       string
@@ -56,6 +57,8 @@ func loadDispatchConfig(confPath, envPath string) (*DispatchConfig, error) {
 			cfg.ClaudeBin = v
 		case "OPENCODE_BIN":
 			cfg.OpenCodeBin = v
+		case "PI_BIN":
+			cfg.PiBin = v
 		case "PREAMBLE":
 			cfg.Preamble = v
 		case "LISTEN_ADDR":

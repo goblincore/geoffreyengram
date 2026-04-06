@@ -36,6 +36,14 @@ func parseStreamEvent(raw string) string {
 		return parseOpenCodeToolEvent(raw)
 	case "step_finish":
 		return parseOpenCodeStepFinish(raw)
+
+	// --- Pi events ---
+	case "message_end":
+		return parsePiMessageEnd(raw)
+	case "tool_call":
+		return parsePiToolCall(raw)
+
+	// --- Shared ---
 	case "error":
 		return parseOpenCodeError(raw)
 	}
@@ -185,6 +193,88 @@ func parseOpenCodeError(raw string) string {
 		return ""
 	}
 	return fmt.Sprintf("[ERROR] %s", ev.Part.Error)
+}
+
+// parsePiMessageEnd handles Pi "message_end" events for assistant messages.
+// Pi format: {"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"..."}]}}
+func parsePiMessageEnd(raw string) string {
+	var ev struct {
+		Message struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type  string `json:"type"`
+				Text  string `json:"text"`
+				Name  string `json:"name"`
+				Input string `json:"input"`
+			} `json:"content"`
+			Usage struct {
+				Input  int `json:"input"`
+				Output int `json:"output"`
+			} `json:"usage"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(raw), &ev); err != nil {
+		return ""
+	}
+	if ev.Message.Role != "assistant" {
+		return ""
+	}
+	var parts []string
+	for _, c := range ev.Message.Content {
+		switch c.Type {
+		case "text":
+			if c.Text != "" {
+				text := c.Text
+				if len(text) > 200 {
+					text = text[:200] + "..."
+				}
+				parts = append(parts, text)
+			}
+		case "tool_use":
+			if c.Name != "" {
+				parts = append(parts, fmt.Sprintf("[%s]", c.Name))
+			}
+		}
+	}
+	if ev.Message.Usage.Output > 0 {
+		parts = append(parts, fmt.Sprintf("(%d tokens)", ev.Message.Usage.Input+ev.Message.Usage.Output))
+	}
+	if len(parts) > 0 {
+		return strings.Join(parts, "\n")
+	}
+	return ""
+}
+
+// parsePiToolCall handles Pi "tool_call" events.
+// Pi format: {"type":"tool_call","tool":{"name":"bash","input":{"command":"..."}}}
+func parsePiToolCall(raw string) string {
+	var ev struct {
+		Tool struct {
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
+		} `json:"tool"`
+	}
+	if err := json.Unmarshal([]byte(raw), &ev); err != nil || ev.Tool.Name == "" {
+		return ""
+	}
+	var input map[string]any
+	json.Unmarshal(ev.Tool.Input, &input)
+
+	name := ev.Tool.Name
+	if cmd, ok := input["command"].(string); ok && (name == "bash" || name == "Bash") {
+		cmd = strings.ReplaceAll(cmd, "\n", " ")
+		if len(cmd) > 120 {
+			cmd = cmd[:120] + "..."
+		}
+		return fmt.Sprintf("[%s] %s", name, cmd)
+	}
+	if fp, ok := input["file_path"].(string); ok {
+		return fmt.Sprintf("[%s] %s", name, fp)
+	}
+	if p, ok := input["path"].(string); ok {
+		return fmt.Sprintf("[%s] %s", name, p)
+	}
+	return fmt.Sprintf("[%s]", name)
 }
 
 // parseMaxRuntime converts strings like "10m", "1h", "1800" to time.Duration.
@@ -353,6 +443,19 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 		args = append(args, "--dir", workDir)
 		args = append(args, prompt)
 		cmd = exec.CommandContext(execCtx, opencodeBin, args...)
+
+	case "pi":
+		piBin := e.Config.PiBin
+		if piBin == "" {
+			piBin = "pi"
+		}
+		// pi -p --mode json --no-session --model provider/model "prompt"
+		args := []string{"-p", "--mode", "json", "--no-session"}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+		args = append(args, prompt)
+		cmd = exec.CommandContext(execCtx, piBin, args...)
 
 	default: // "claude"
 		claudeBin := e.Config.ClaudeBin
