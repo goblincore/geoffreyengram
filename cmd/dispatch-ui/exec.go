@@ -160,7 +160,38 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 	e.running = &RunningTask{Plan: plan, Cancel: cancel}
 	e.mu.Unlock()
 
-	// 7. Build command
+	// 7. Create a git worktree for isolation
+	workDir := plan.Project // fallback: run in project dir
+	branch := plan.Branch
+	if branch == "" {
+		branch = "dispatch/" + plan.Name
+	}
+
+	home, _ := os.UserHomeDir()
+	worktreeBase := filepath.Join(home, ".claude", "dispatch", "worktrees")
+	os.MkdirAll(worktreeBase, 0755)
+	worktreePath := filepath.Join(worktreeBase, plan.Name)
+
+	// Remove stale worktree if it exists from a previous run
+	exec.Command("git", "-C", plan.Project, "worktree", "remove", "--force", worktreePath).Run()
+	// Delete stale branch if it exists
+	exec.Command("git", "-C", plan.Project, "branch", "-D", branch).Run()
+
+	wtCmd := exec.Command("git", "-C", plan.Project, "worktree", "add", worktreePath, "-b", branch, "HEAD")
+	if out, err := wtCmd.CombinedOutput(); err != nil {
+		lb.Append(fmt.Sprintf("[dispatch] worktree creation failed: %s — running in project dir", strings.TrimSpace(string(out))))
+	} else {
+		workDir = worktreePath
+		lb.Append(fmt.Sprintf("[dispatch] created worktree at %s (branch: %s)", worktreePath, branch))
+
+		// Symlink .claude/ from main repo so Claude Code finds CLAUDE.md
+		claudeDir := filepath.Join(plan.Project, ".claude")
+		if _, err := os.Stat(claudeDir); err == nil {
+			os.Symlink(claudeDir, filepath.Join(worktreePath, ".claude"))
+		}
+	}
+
+	// 8. Build command
 	prompt := plan.Body
 	tools := plan.AllowedTools
 	if tools == "" {
@@ -181,12 +212,10 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 		"--no-session-persistence",
 	}
 	cmd := exec.CommandContext(execCtx, claudeBin, args...)
-	// WaitDelay: after context cancellation, wait up to this long for I/O to drain
-	// before forcibly closing pipes. A short value ensures we don't block forever.
 	cmd.WaitDelay = 1 * time.Second
 
-	// 8. Set working directory and environment
-	cmd.Dir = plan.Project
+	// 9. Set working directory and environment
+	cmd.Dir = workDir
 	cmd.Env = envPairs
 
 	// 9. Pipe stdout; let stderr go to os.Stderr
@@ -263,6 +292,9 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 	// 12. Write report footer
 	finishedAt := time.Now().UTC().Format(time.RFC3339)
 	footer := fmt.Sprintf("\nFinished: %s\nStatus: %s\nExit code: %d\n", finishedAt, status, exitCode)
+	if workDir != plan.Project {
+		footer += fmt.Sprintf("Worktree: %s\n", workDir)
+	}
 	fmt.Fprint(reportFile, footer)
 	lb.Append(strings.TrimSpace(footer))
 
@@ -271,6 +303,11 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 	_ = setFrontmatterField(plan.Path, "finished_at", finishedAt)
 	_ = setFrontmatterField(plan.Path, "exit_code", strconv.Itoa(exitCode))
 	_ = setFrontmatterField(plan.Path, "report", reportPath)
+
+	// Log worktree location for inspection
+	if workDir != plan.Project {
+		lb.Append(fmt.Sprintf("[dispatch] worktree preserved at %s for inspection", workDir))
+	}
 
 	// 13. Clear running
 	e.mu.Lock()
