@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,57 @@ import (
 	"strings"
 	"time"
 )
+
+// parseStreamEvent extracts a human-readable log line from a stream-json event.
+func parseStreamEvent(raw string) string {
+	var ev struct {
+		Type    string `json:"type"`
+		Message struct {
+			Content []struct {
+				Type  string          `json:"type"`
+				Text  string          `json:"text"`
+				Name  string          `json:"name"`
+				Input json.RawMessage `json:"input"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(raw), &ev); err != nil {
+		return ""
+	}
+	if ev.Type != "assistant" {
+		return ""
+	}
+	var parts []string
+	for _, c := range ev.Message.Content {
+		switch c.Type {
+		case "text":
+			if c.Text != "" {
+				parts = append(parts, c.Text)
+			}
+		case "tool_use":
+			var input map[string]any
+			json.Unmarshal(c.Input, &input)
+			name := c.Name
+			if cmd, ok := input["command"].(string); ok && name == "Bash" {
+				cmd = strings.ReplaceAll(cmd, "\n", " ")
+				if len(cmd) > 120 {
+					cmd = cmd[:120] + "..."
+				}
+				parts = append(parts, fmt.Sprintf("[%s] %s", name, cmd))
+			} else if fp, ok := input["file_path"].(string); ok {
+				parts = append(parts, fmt.Sprintf("[%s] %s", name, fp))
+			} else if p, ok := input["pattern"].(string); ok {
+				parts = append(parts, fmt.Sprintf("[%s] %s", name, p))
+			} else {
+				parts = append(parts, fmt.Sprintf("[%s]", name))
+			}
+		}
+	}
+	if len(parts) > 0 {
+		return strings.Join(parts, "\n")
+	}
+	return ""
+}
 
 // parseMaxRuntime converts strings like "10m", "1h", "1800" to time.Duration.
 // Returns 0 if the string is empty or unparseable.
@@ -124,7 +176,8 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 		"--bare",
 		"-p", prompt,
 		"--allowed-tools", tools,
-		"--output-format", "text",
+		"--output-format", "stream-json",
+		"--verbose",
 		"--no-session-persistence",
 	}
 	cmd := exec.CommandContext(execCtx, claudeBin, args...)
@@ -165,16 +218,19 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 		return fmt.Errorf("start command: %w", err)
 	}
 
-	// Stream lines in a goroutine. When the process exits (or is killed by context
-	// cancellation), it closes the write end of the pipe, which unblocks the scanner.
+	// Stream lines in a goroutine. Parse stream-json events for the UI log,
+	// write raw JSON to the report file.
 	scanDone := make(chan struct{})
 	go func() {
 		defer close(scanDone)
 		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB for large JSON lines
 		for scanner.Scan() {
-			line := scanner.Text()
-			fmt.Fprintln(reportFile, line)
-			lb.Append(line)
+			raw := scanner.Text()
+			fmt.Fprintln(reportFile, raw) // raw to report
+			if line := parseStreamEvent(raw); line != "" {
+				lb.Append(line)
+			}
 		}
 	}()
 
