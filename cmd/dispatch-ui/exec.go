@@ -426,15 +426,46 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 		// Pi has its own edit tool that works fine — only inject preamble for Claude CLI
 		prompt = e.Config.Preamble + "\n\n" + prompt
 	}
-	// Inject dualmem context for harnesses without MCP support (Pi).
+	// Inject dualmem context + CLI instructions for harnesses without MCP support (Pi).
 	// Claude CLI gets context via dualmem hooks; Pi doesn't have MCP, so we prepend it.
 	if harness == "pi" {
 		dualmemBin := filepath.Join(os.Getenv("HOME"), "go", "bin", "dualmem")
-		dualmemCmd := exec.Command(dualmemBin, "context", prompt, "--budget", "2000", "--ns", "claude:"+projectName)
+		ns := "claude:" + projectName
+
+		// Fetch project context
+		dualmemCmd := exec.Command(dualmemBin, "context", prompt, "--budget", "2000", "--ns", ns)
 		dualmemCmd.Dir = plan.Project
+		var contextBlock string
 		if ctxOut, err := dualmemCmd.Output(); err == nil && len(ctxOut) > 100 {
-			prompt = "[Project Context]\n" + string(ctxOut) + "\n\n[Task]\n" + prompt
+			contextBlock = "[Project Memory]\n" + string(ctxOut)
 		}
+
+		// Build dualmem CLI instructions so Pi can save memories during the session
+		dualmemInstructions := fmt.Sprintf(`[Memory System — dualmem CLI]
+You have access to a cross-session memory system via the dualmem CLI (%s).
+Use bash to run these commands when appropriate:
+
+SAVE important discoveries (decisions, warnings, file relationships):
+  %s add --text "what you learned" --ns "%s"
+  %s add --type decision --text "chose X over Y because..." --ns "%s" --files "file1.go,file2.go"
+  %s add --type warning --text "don't change X, it's intentional" --ns "%s" --salience 0.9
+
+SEARCH for existing knowledge before exploring:
+  %s search "query" --ns "%s" --limit 5
+
+SEARCH CODE by natural language:
+  %s search-code "what you're looking for"
+
+SAVE at end of task if you learned something non-obvious:
+  %s checkpoint --task "task name" --status done --done "what was completed" --ns "%s"
+
+Save memories when you:
+- Make a decision between alternatives
+- Discover a non-obvious file relationship or constraint
+- Find a root cause that took effort
+- Hit a dead end worth remembering`, dualmemBin, dualmemBin, ns, dualmemBin, ns, dualmemBin, ns, dualmemBin, ns, dualmemBin, dualmemBin, ns)
+
+		prompt = dualmemInstructions + "\n\n" + contextBlock + "\n\n[Task]\n" + prompt
 	}
 	tools := plan.AllowedTools
 	if tools == "" {
