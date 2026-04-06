@@ -70,14 +70,17 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 		model = e.Config.DefaultModel
 	}
 
+	// If no API key is resolved, inherit parent env so CLI uses subscription auth.
 	var envPairs []string
-	if baseURL != "" {
-		envPairs = append(envPairs,
-			"ANTHROPIC_AUTH_TOKEN="+apiKey,
-			"ANTHROPIC_BASE_URL="+baseURL,
-		)
-	} else {
-		envPairs = append(envPairs, "ANTHROPIC_API_KEY="+apiKey)
+	if apiKey != "" {
+		if baseURL != "" {
+			envPairs = append(envPairs,
+				"ANTHROPIC_AUTH_TOKEN="+apiKey,
+				"ANTHROPIC_BASE_URL="+baseURL,
+			)
+		} else {
+			envPairs = append(envPairs, "ANTHROPIC_API_KEY="+apiKey)
+		}
 	}
 	if model != "" {
 		envPairs = append(envPairs, "ANTHROPIC_DEFAULT_SONNET_MODEL="+model)

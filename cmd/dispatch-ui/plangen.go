@@ -131,18 +131,23 @@ Now write the plan:`, projectContext, description)
 	baseURL := e.Config.PlanningBaseURL
 
 	// 4. Build environment
+	// If no API key is configured, inherit the parent environment so the CLI
+	// uses the user's subscription auth (no key override needed).
 	var envPairs []string
-	if baseURL != "" {
-		envPairs = append(envPairs,
-			"ANTHROPIC_AUTH_TOKEN="+apiKey,
-			"ANTHROPIC_BASE_URL="+baseURL,
-		)
-	} else {
-		envPairs = append(envPairs, "ANTHROPIC_API_KEY="+apiKey)
+	if apiKey != "" {
+		if baseURL != "" {
+			envPairs = append(envPairs,
+				"ANTHROPIC_AUTH_TOKEN="+apiKey,
+				"ANTHROPIC_BASE_URL="+baseURL,
+			)
+		} else {
+			envPairs = append(envPairs, "ANTHROPIC_API_KEY="+apiKey)
+		}
 	}
 	if model := e.Config.PlanningModel; model != "" {
 		envPairs = append(envPairs, "ANTHROPIC_DEFAULT_SONNET_MODEL="+model)
 	}
+	// Always inherit PATH and HOME
 	if p := os.Getenv("PATH"); p != "" {
 		envPairs = append(envPairs, "PATH="+p)
 	}
