@@ -144,6 +144,10 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 	if h := os.Getenv("HOME"); h != "" {
 		envPairs = append(envPairs, "HOME="+h)
 	}
+	// Pass through all .env vars (ZAI_API_KEY, etc.) so opencode/other harnesses can use them
+	for k, v := range e.Config.EnvVars {
+		envPairs = append(envPairs, k+"="+v)
+	}
 	// Ensure dualmem uses the project's namespace, not the worktree directory name
 	projectName := filepath.Base(plan.Project)
 	envPairs = append(envPairs, "DUALMEM_NAMESPACE=claude:"+projectName)
