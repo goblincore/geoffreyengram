@@ -352,6 +352,9 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 	}
 	// Preserve PATH and HOME so the subprocess can find tools
 	if p := os.Getenv("PATH"); p != "" {
+		if e.Config.ExtraPath != "" {
+			p = e.Config.ExtraPath + ":" + p
+		}
 		envPairs = append(envPairs, "PATH="+p)
 	}
 	if h := os.Getenv("HOME"); h != "" {
@@ -413,18 +416,29 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 	}
 
 	// 8. Build command
+	harness := plan.Harness
+	if harness == "" {
+		harness = "claude"
+	}
+
 	prompt := plan.Body
-	if e.Config.Preamble != "" {
+	if e.Config.Preamble != "" && harness != "pi" {
+		// Pi has its own edit tool that works fine — only inject preamble for Claude CLI
 		prompt = e.Config.Preamble + "\n\n" + prompt
+	}
+	// Inject dualmem context for harnesses without MCP support (Pi).
+	// Claude CLI gets context via dualmem hooks; Pi doesn't have MCP, so we prepend it.
+	if harness == "pi" {
+		dualmemBin := filepath.Join(os.Getenv("HOME"), "go", "bin", "dualmem")
+		dualmemCmd := exec.Command(dualmemBin, "context", prompt, "--budget", "2000", "--ns", "claude:"+projectName)
+		dualmemCmd.Dir = plan.Project
+		if ctxOut, err := dualmemCmd.Output(); err == nil && len(ctxOut) > 100 {
+			prompt = "[Project Context]\n" + string(ctxOut) + "\n\n[Task]\n" + prompt
+		}
 	}
 	tools := plan.AllowedTools
 	if tools == "" {
 		tools = "Bash"
-	}
-
-	harness := plan.Harness
-	if harness == "" {
-		harness = "claude"
 	}
 
 	var cmd *exec.Cmd

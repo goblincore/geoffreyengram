@@ -18,6 +18,7 @@ type DispatchConfig struct {
 	ClaudeBin           string
 	OpenCodeBin         string
 	PiBin               string
+	ExtraPath           string // Additional PATH entries for subprocess tools (e.g., node for Pi)
 	Preamble            string // Prepended to every plan body before dispatching
 	ListenAddr          string
 	PlanningModel       string
@@ -59,6 +60,8 @@ func loadDispatchConfig(confPath, envPath string) (*DispatchConfig, error) {
 			cfg.OpenCodeBin = v
 		case "PI_BIN":
 			cfg.PiBin = v
+		case "EXTRA_PATH":
+			cfg.ExtraPath = v
 		case "PREAMBLE":
 			cfg.Preamble = v
 		case "LISTEN_ADDR":
