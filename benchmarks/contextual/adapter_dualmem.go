@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -28,8 +27,8 @@ func runDualMem(q Query) AdapterOutput {
 
 	start := time.Now()
 
-	// Run search-code from the corpus directory
-	cmd := exec.Command(dualmemBinary, "search-code", q.Query, "--json")
+	// Run search-code from the corpus directory (text output — no --json flag)
+	cmd := exec.Command(dualmemBinary, "search-code", q.Query)
 	cmd.Dir = corpusPath
 	out, err := cmd.Output()
 	latency := time.Since(start).Milliseconds()
@@ -39,51 +38,43 @@ func runDualMem(q Query) AdapterOutput {
 		return AdapterOutput{LatencyMs: latency}
 	}
 
-	var raw []struct {
-		Path        string  `json:"path"`
-		HybridScore float64 `json:"hybrid_score"`
-		Similarity  float64 `json:"similarity"`
-	}
-	if err := json.Unmarshal(out, &raw); err != nil {
-		// Try line-based parsing if not JSON array
-		return parseDualMemText(out, latency)
-	}
-
-	var results []SearchResult
-	for _, r := range raw {
-		score := r.HybridScore
-		if score == 0 {
-			score = r.Similarity
-		}
-		results = append(results, SearchResult{Path: r.Path, Score: score})
-	}
-
-	return AdapterOutput{
-		Results:   results,
-		LatencyMs: latency,
-		APICalls:  0, // HDC is deterministic, no API calls
-	}
+	return parseDualMemText(out, latency)
 }
 
-// parseDualMemText handles non-JSON output from search-code.
+// parseDualMemText handles text output from search-code.
+// Format: "  1. dualmem/                       score=0.7473 (hdc=0.28 kw=3.45)  Go package dualmem"
 func parseDualMemText(out []byte, latencyMs int64) AdapterOutput {
 	var results []SearchResult
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "=") {
+		// Match numbered result lines: "N. path/ score=X.XXX ..."
+		if len(line) == 0 {
 			continue
 		}
-		// Try to extract path and score from formatted output
-		// Format: "  0.826  ./dualmem/  (go, 8 types, ...)"
-		parts := strings.Fields(line)
-		if len(parts) >= 2 {
-			var score float64
-			fmt.Sscanf(parts[0], "%f", &score)
-			if score > 0 {
-				path := strings.TrimSuffix(parts[1], "/")
-				path = strings.TrimPrefix(path, "./")
-				results = append(results, SearchResult{Path: path, Score: score})
-			}
+		// Find "score=" in the line
+		scoreIdx := strings.Index(line, "score=")
+		if scoreIdx < 0 {
+			continue
+		}
+		// Extract path: between "N. " and first whitespace after path
+		dotIdx := strings.Index(line, ". ")
+		if dotIdx < 0 {
+			continue
+		}
+		rest := strings.TrimSpace(line[dotIdx+2:])
+		pathEnd := strings.IndexByte(rest, ' ')
+		if pathEnd < 0 {
+			continue
+		}
+		path := strings.TrimSpace(rest[:pathEnd])
+		path = strings.TrimSuffix(path, "/")
+		path = strings.TrimPrefix(path, "./")
+
+		// Extract score
+		var score float64
+		fmt.Sscanf(line[scoreIdx+6:], "%f", &score)
+		if score > 0 && path != "" {
+			results = append(results, SearchResult{Path: path, Score: score})
 		}
 	}
 	return AdapterOutput{Results: results, LatencyMs: latencyMs, APICalls: 0}

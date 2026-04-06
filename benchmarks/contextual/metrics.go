@@ -5,20 +5,33 @@ import (
 	"strings"
 )
 
-// isStrictMatch checks if a result path exactly matches a ground truth file.
+// isStrictMatch checks if a result path matches a ground truth file.
+// Handles both directions:
+//   - result "dualmem/hdc.go" matches gt file "dualmem/hdc.go" (exact)
+//   - result "dualmem" matches gt file "dualmem/hdc.go" (module contains file)
 func isStrictMatch(path string, gt GroundTruth) bool {
 	for _, f := range gt.Files {
 		if path == f {
+			return true
+		}
+		// Module-level result contains a ground truth file
+		if strings.HasPrefix(f, path+"/") {
 			return true
 		}
 	}
 	return false
 }
 
-// isModuleMatch checks if a result path falls within a ground truth module.
+// isModuleMatch checks if a result path falls within a ground truth module,
+// or if a result module contains ground truth module files.
 func isModuleMatch(path string, gt GroundTruth) bool {
 	for _, m := range gt.Modules {
-		if strings.HasPrefix(path, m) {
+		// Result is inside a ground truth module
+		if strings.HasPrefix(path, m) || strings.HasPrefix(path+"/", m) {
+			return true
+		}
+		// Result module contains ground truth module
+		if strings.HasPrefix(m, path+"/") {
 			return true
 		}
 	}
@@ -43,7 +56,8 @@ func precisionAtK(results []SearchResult, gt GroundTruth, k int) float64 {
 	return float64(hits) / float64(n)
 }
 
-// recallAtK computes strict recall at K.
+// recallAtK computes recall at K — counts how many ground truth files are
+// covered by the top-K results (including module-level matches).
 func recallAtK(results []SearchResult, gt GroundTruth, k int) float64 {
 	if len(gt.Files) == 0 {
 		return 0
@@ -52,13 +66,19 @@ func recallAtK(results []SearchResult, gt GroundTruth, k int) float64 {
 	if n > len(results) {
 		n = len(results)
 	}
-	found := make(map[string]bool)
-	for i := 0; i < n; i++ {
-		if isStrictMatch(results[i].Path, gt) {
-			found[results[i].Path] = true
+	// For each ground truth file, check if any result covers it
+	covered := 0
+	for _, f := range gt.Files {
+		for i := 0; i < n; i++ {
+			rp := results[i].Path
+			// Exact match or module contains file
+			if rp == f || strings.HasPrefix(f, rp+"/") {
+				covered++
+				break
+			}
 		}
 	}
-	return float64(len(found)) / float64(len(gt.Files))
+	return float64(covered) / float64(len(gt.Files))
 }
 
 // ndcgAtK computes NDCG@K with module-aware partial relevance.
