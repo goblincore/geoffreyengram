@@ -27,6 +27,7 @@ type Plan struct {
 	Created       string
 	DependsOn     []string
 	AllowedTools  string
+	Harness       string // "claude" (default) or "opencode"
 	StartedAt     string
 	FinishedAt    string
 	ExitCode      int
@@ -108,6 +109,8 @@ func parsePlanFile(path string) (*Plan, error) {
 			plan.DependsOn = parseDependsList(v)
 		case "allowed_tools":
 			plan.AllowedTools = v
+		case "harness":
+			plan.Harness = v
 		case "started_at":
 			plan.StartedAt = v
 		case "finished_at":
@@ -273,6 +276,7 @@ func writePlanFile(p *Plan) error {
 	}
 
 	writeLine("allowed_tools", p.AllowedTools)
+	writeLine("harness", p.Harness)
 	writeLine("started_at", p.StartedAt)
 	writeLine("finished_at", p.FinishedAt)
 	if p.ExitCode != 0 {

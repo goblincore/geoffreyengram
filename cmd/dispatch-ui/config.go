@@ -16,6 +16,8 @@ type DispatchConfig struct {
 	DefaultBaseURL      string
 	DefaultMaxRuntime   string
 	ClaudeBin           string
+	OpenCodeBin         string
+	Preamble            string // Prepended to every plan body before dispatching
 	ListenAddr          string
 	PlanningModel       string
 	PlanningAPIKeyEnv   string
@@ -52,6 +54,10 @@ func loadDispatchConfig(confPath, envPath string) (*DispatchConfig, error) {
 			cfg.DefaultMaxRuntime = v
 		case "CLAUDE_BIN":
 			cfg.ClaudeBin = v
+		case "OPENCODE_BIN":
+			cfg.OpenCodeBin = v
+		case "PREAMBLE":
+			cfg.Preamble = v
 		case "LISTEN_ADDR":
 			cfg.ListenAddr = v
 		case "PLANNING_MODEL":

@@ -197,25 +197,51 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 
 	// 8. Build command
 	prompt := plan.Body
+	if e.Config.Preamble != "" {
+		prompt = e.Config.Preamble + "\n\n" + prompt
+	}
 	tools := plan.AllowedTools
 	if tools == "" {
 		tools = "Bash"
 	}
 
-	claudeBin := e.Config.ClaudeBin
-	if claudeBin == "" {
-		claudeBin = "claude"
+	harness := plan.Harness
+	if harness == "" {
+		harness = "claude"
 	}
 
-	args := []string{
-		"--bare",
-		"-p", prompt,
-		"--allowed-tools", tools,
-		"--output-format", "stream-json",
-		"--verbose",
-		"--no-session-persistence",
+	var cmd *exec.Cmd
+	switch harness {
+	case "opencode":
+		opencodeBin := e.Config.OpenCodeBin
+		if opencodeBin == "" {
+			opencodeBin = "opencode"
+		}
+		// opencode run "<prompt>" --model provider/model --format json --dir <workdir>
+		args := []string{"run"}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+		args = append(args, "--format", "json")
+		args = append(args, "--dir", workDir)
+		args = append(args, prompt)
+		cmd = exec.CommandContext(execCtx, opencodeBin, args...)
+
+	default: // "claude"
+		claudeBin := e.Config.ClaudeBin
+		if claudeBin == "" {
+			claudeBin = "claude"
+		}
+		args := []string{
+			"--bare",
+			"-p", prompt,
+			"--allowed-tools", tools,
+			"--output-format", "stream-json",
+			"--verbose",
+			"--no-session-persistence",
+		}
+		cmd = exec.CommandContext(execCtx, claudeBin, args...)
 	}
-	cmd := exec.CommandContext(execCtx, claudeBin, args...)
 	cmd.WaitDelay = 1 * time.Second
 
 	// 9. Set working directory and environment
