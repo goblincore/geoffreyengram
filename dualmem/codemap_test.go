@@ -1326,6 +1326,179 @@ func BenchStuff() {}
 	}
 }
 
+func TestParseMarkdownFile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	content := `# Getting Started
+
+This guide explains how to set up the **consent flow** for new users.
+
+## Authentication
+
+Use the ` + "`" + `AuthProvider` + "`" + ` component to handle OAuth.
+
+## Configuration
+
+Set **API_KEY** in your ` + "`" + `.env` + "`" + ` file.
+
+### Advanced Options
+
+Enable ` + "`" + `DEBUG_MODE` + "`" + ` for verbose logging.
+`
+
+	writeFile(t, tmpDir, "setup.md", content)
+
+	mod := parseMarkdownFile("docs/setup.md", filepath.Join(tmpDir, "setup.md"))
+	if mod == nil {
+		t.Fatal("expected non-nil ModuleMap")
+	}
+
+	if mod.Language != "markdown" {
+		t.Errorf("language = %q, want markdown", mod.Language)
+	}
+	if mod.Path != "docs/setup.md" {
+		t.Errorf("path = %q, want docs/setup.md", mod.Path)
+	}
+	if mod.FileCount != 1 {
+		t.Errorf("file_count = %d, want 1", mod.FileCount)
+	}
+
+	// Should have identifiers from headings, bold, and backticks
+	identSet := make(map[string]bool)
+	for _, id := range mod.Identifiers {
+		identSet[id] = true
+	}
+
+	// Headings
+	if !identSet["Getting Started"] {
+		t.Error("expected heading 'Getting Started' in identifiers")
+	}
+	if !identSet["Authentication"] {
+		t.Error("expected heading 'Authentication' in identifiers")
+	}
+
+	// Bold terms
+	if !identSet["consent flow"] {
+		t.Error("expected bold term 'consent flow' in identifiers")
+	}
+	if !identSet["API_KEY"] {
+		t.Error("expected bold term 'API_KEY' in identifiers")
+	}
+
+	// Backtick code refs
+	if !identSet["AuthProvider"] {
+		t.Error("expected code ref 'AuthProvider' in identifiers")
+	}
+	if !identSet["DEBUG_MODE"] {
+		t.Error("expected code ref 'DEBUG_MODE' in identifiers")
+	}
+
+	// Summary should be first non-empty paragraph
+	if !strings.Contains(mod.Summary, "consent flow") {
+		t.Errorf("summary should contain first paragraph content, got: %s", mod.Summary)
+	}
+
+	// Files should be populated
+	if len(mod.Files) != 1 {
+		t.Errorf("expected 1 FileInfo, got %d", len(mod.Files))
+	} else {
+		if mod.Files[0].RelPath != "docs/setup.md" {
+			t.Errorf("Files[0].RelPath = %q, want docs/setup.md", mod.Files[0].RelPath)
+		}
+	}
+}
+
+func TestParseMarkdownFile_SmallFile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// File < 100 bytes should return nil
+	writeFile(t, tmpDir, "tiny.md", "# Hi\n\nShort.")
+
+	mod := parseMarkdownFile("tiny.md", filepath.Join(tmpDir, "tiny.md"))
+	if mod != nil {
+		t.Error("expected nil for files < 100 bytes")
+	}
+}
+
+func TestScanCodebase_MarkdownIndexed(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	writeFile(t, tmpDir, "main.go", `package main
+func main() {}
+`)
+
+	docsDir := filepath.Join(tmpDir, "docs")
+	os.MkdirAll(docsDir, 0755)
+	writeFile(t, docsDir, "guide.md", `# Setup Guide
+
+This guide explains how to configure the **authentication** system.
+
+## Installation
+
+Use `+"`"+`npm install`+"`"+` to get started.
+
+## Configuration
+
+Set the **API_KEY** environment variable before running the server.
+This is required for the OAuth flow to work correctly with the identity provider.
+`)
+
+	writeFile(t, tmpDir, "README.md", `# My Project
+
+A tool for managing **user accounts** and `+"`"+`sessions`+"`"+`.
+
+This project provides authentication and authorization services for web applications.
+It supports OAuth 2.0, SAML, and custom identity providers.
+`)
+
+	cm, err := ScanCodebase(tmpDir)
+	if err != nil {
+		t.Fatalf("ScanCodebase: %v", err)
+	}
+
+	// Should find markdown modules
+	var foundGuide, foundReadme bool
+	for _, m := range cm.Zoom2 {
+		t.Logf("  module: %s lang=%s summary=%q", m.Path, m.Language, m.Summary)
+		if strings.Contains(m.Path, "guide.md") {
+			foundGuide = true
+			if m.Language != "markdown" {
+				t.Errorf("guide.md language = %q, want markdown", m.Language)
+			}
+		}
+		if strings.Contains(m.Path, "README.md") {
+			foundReadme = true
+			if m.Language != "markdown" {
+				t.Errorf("README.md language = %q, want markdown", m.Language)
+			}
+		}
+	}
+	if !foundGuide {
+		t.Error("expected docs/guide.md in modules")
+	}
+	if !foundReadme {
+		t.Error("expected README.md in modules")
+	}
+
+	// Search should find docs
+	idx := BuildCodeIndex(cm)
+	results := SearchCodeMap(cm, idx, "authentication API_KEY configuration", 10)
+
+	foundDocInResults := false
+	for _, r := range results {
+		if strings.HasSuffix(r.Path, ".md") {
+			foundDocInResults = true
+			break
+		}
+	}
+	if !foundDocInResults {
+		t.Error("expected at least one .md file in search results for auth query")
+		for _, r := range results {
+			t.Logf("  result: %s score=%.4f", r.Path, r.HybridScore)
+		}
+	}
+}
+
 func TestSeedTypeMultiplier(t *testing.T) {
 	explore := IntentProfiles[IntentExplore]
 	if m := explore.TypeMultiplier("seed"); m != 1.2 {

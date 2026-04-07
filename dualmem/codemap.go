@@ -10,6 +10,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -28,7 +29,7 @@ type CodeMap struct {
 // ModuleMap is a zoom-2 entry: one package or meaningful directory.
 type ModuleMap struct {
 	Path        string     `json:"path"`                    // Relative path from root
-	Language    string     `json:"language"`                 // "go", "typescript", "other"
+	Language    string     `json:"language"`                 // "go", "typescript", "other", "markdown"
 	Summary     string     `json:"summary"`                  // Human-readable description
 	KeyTypes    []string   `json:"key_types"`                // Important exported types/interfaces
 	EntryPoints []string   `json:"entry_points"`             // main funcs, handler registrations
@@ -82,6 +83,7 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 		tsFiles  []string
 		pyFiles  []string
 		rsFiles  []string
+		mdFiles  []string
 		allFiles []string
 	}
 	dirs := make(map[string]*dirInfo)
@@ -130,6 +132,8 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 			d.pyFiles = append(d.pyFiles, filepath.Join(dir, info.Name()))
 		case ".rs":
 			d.rsFiles = append(d.rsFiles, filepath.Join(dir, info.Name()))
+		case ".md":
+			d.mdFiles = append(d.mdFiles, filepath.Join(dir, info.Name()))
 		}
 		return nil
 	})
@@ -162,6 +166,23 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 		}
 		if mod != nil {
 			modules = append(modules, *mod)
+		}
+	}
+
+	// Process markdown files in all directories
+	for _, d := range dirs {
+		for _, mdFile := range d.mdFiles {
+			relFile := filepath.Base(mdFile)
+			relPath := d.relPath
+			if relPath == "." {
+				relPath = relFile
+			} else {
+				relPath = relPath + "/" + relFile
+			}
+			mod := parseMarkdownFile(relPath, mdFile)
+			if mod != nil {
+				modules = append(modules, *mod)
+			}
 		}
 	}
 
@@ -300,6 +321,82 @@ func parseGoPackage(relPath string, goFiles []string) *ModuleMap {
 		FileCount:   len(goFiles),
 		Imports:     imports,
 		Identifiers: identifiers,
+	}
+}
+
+// --- Markdown parser ---
+
+// Regex patterns for markdown extraction.
+var (
+	mdHeadingRe  = regexp.MustCompile(`(?m)^#{1,4}\s+(.+)$`)
+	mdBoldRe     = regexp.MustCompile(`\*\*([^*]+)\*\*`)
+	mdBacktickRe = regexp.MustCompile("`([^`]+)`")
+)
+
+// parseMarkdownFile extracts identifiers from a markdown file for search indexing.
+func parseMarkdownFile(relPath string, absPath string) *ModuleMap {
+	data, err := os.ReadFile(absPath)
+	if err != nil || len(data) < 100 {
+		return nil
+	}
+	content := string(data)
+
+	var identifiers []string
+	seen := make(map[string]bool)
+
+	addIdent := func(s string) {
+		s = strings.TrimSpace(s)
+		if s != "" && !seen[s] {
+			seen[s] = true
+			identifiers = append(identifiers, s)
+		}
+	}
+
+	// Extract headings
+	for _, match := range mdHeadingRe.FindAllStringSubmatch(content, -1) {
+		addIdent(match[1])
+	}
+
+	// Extract bold terms
+	for _, match := range mdBoldRe.FindAllStringSubmatch(content, -1) {
+		addIdent(match[1])
+	}
+
+	// Extract backtick code references
+	for _, match := range mdBacktickRe.FindAllStringSubmatch(content, -1) {
+		addIdent(match[1])
+	}
+
+	if len(identifiers) > 30 {
+		identifiers = identifiers[:30]
+	}
+
+	// Summary: first non-empty, non-heading line
+	var summary string
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		summary = line
+		break
+	}
+	if len(summary) > 100 {
+		summary = summary[:100]
+	}
+
+	return &ModuleMap{
+		Path:        relPath,
+		Language:    "markdown",
+		Summary:     summary,
+		FileCount:   1,
+		Identifiers: identifiers,
+		Files: []FileInfo{
+			{
+				RelPath:     relPath,
+				Identifiers: identifiers,
+			},
+		},
 	}
 }
 
