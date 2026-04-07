@@ -1315,3 +1315,91 @@ func TestSeedTypeMultiplier(t *testing.T) {
 		t.Errorf("continue.seed = %.1f, want 0.5", m)
 	}
 }
+
+func TestSearchCodeMapFiles_RanksCorrectFile(t *testing.T) {
+	// Build a CodeMap with one module containing multiple files
+	cm := &CodeMap{
+		Zoom2: []ModuleMap{
+			{
+				Path:        "engine/",
+				Language:    "go",
+				Summary:     "Go package engine",
+				KeyTypes:    []string{"struct Index", "struct Query"},
+				EntryPoints: []string{"Search()", "BuildIndex()"},
+				Identifiers: []string{"tokenize", "normalize", "rank"},
+				FileCount:   3,
+				Files: []FileInfo{
+					{
+						RelPath:     "engine/search.go",
+						Identifiers: []string{"Search", "tokenize", "rank"},
+					},
+					{
+						RelPath:     "engine/index.go",
+						Identifiers: []string{"Index", "BuildIndex", "normalize"},
+					},
+					{
+						RelPath:     "engine/utils.go",
+						Identifiers: []string{"formatOutput", "logDebug"},
+					},
+				},
+			},
+			{
+				Path:        "cmd/",
+				Language:    "go",
+				Summary:     "Go binary (package main)",
+				KeyTypes:    []string{},
+				EntryPoints: []string{"main()"},
+				Identifiers: []string{"run", "parseFlags"},
+				FileCount:   1,
+				Files: []FileInfo{
+					{
+						RelPath:     "cmd/main.go",
+						Identifiers: []string{"main", "run", "parseFlags"},
+					},
+				},
+			},
+		},
+	}
+
+	idx := BuildCodeIndex(cm)
+	results := SearchCodeMapFiles(cm, idx, "search tokenize rank", 5)
+
+	if len(results) == 0 {
+		t.Fatal("expected file results")
+	}
+
+	// engine/search.go should rank first — it has all three query terms
+	if results[0].FilePath != "engine/search.go" {
+		t.Errorf("expected engine/search.go as top result, got %s", results[0].FilePath)
+	}
+
+	// All results should have non-zero combined scores
+	for _, r := range results {
+		if r.CombinedScore <= 0 {
+			t.Errorf("result %s has zero combined score", r.FilePath)
+		}
+	}
+}
+
+func TestSearchCodeMapFiles_ModulesWithoutFiles(t *testing.T) {
+	cm := &CodeMap{
+		Zoom2: []ModuleMap{
+			{
+				Path:      "docs/",
+				Language:  "other",
+				Summary:   "4 files",
+				FileCount: 4,
+				// No Files field — should still appear in results
+			},
+		},
+	}
+	idx := BuildCodeIndex(cm)
+	results := SearchCodeMapFiles(cm, idx, "documentation", 5)
+
+	if len(results) == 0 {
+		t.Fatal("expected at least one result even without FileInfo")
+	}
+	if results[0].FilePath != "docs/" {
+		t.Errorf("expected docs/ as fallback, got %s", results[0].FilePath)
+	}
+}
