@@ -35,6 +35,23 @@ type Engine struct {
 	cfg        *Config
 }
 
+// NewForCodeSearch creates a minimal Engine for code search only.
+// No embedder, projector, or pipeline is initialized.
+// Use this for CLI commands that only need GetCodeMap / ScanCodebase.
+func NewForCodeSearch(cfg Config) (*Engine, error) {
+	cfg.ApplyDefaults()
+
+	store, err := NewSQLiteStore(cfg.SQLitePath)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Engine{
+		store: store,
+		cfg:   &cfg,
+	}, nil
+}
+
 // New creates and initializes a DualMem engine.
 func New(cfg Config) (*Engine, error) {
 	cfg.ApplyDefaults()
@@ -889,6 +906,19 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 		parts = append(parts, "[No cross-session memories found. Run /codebase-onboard for initial context.]")
 	}
 
+	// Knowledge gap hint: if codemap exists but no knowledge docs cover this namespace,
+	// suggest consult for deeper understanding.
+	hasCodemap := false
+	if e.cfg.RootDir != "" {
+		cm, _ := e.getOrGenerateCodeMap(ctx, userID)
+		if cm != nil {
+			hasCodemap = true
+		}
+	}
+	if hasCodemap && !hasKnowledge {
+		parts = append(parts, "[Tip: Run `dualmem consult \"topic\"` for deeper understanding of this codebase's subsystems]")
+	}
+
 	text := strings.Join(parts, "\n\n")
 
 	// Record session marker for next time
@@ -1111,6 +1141,358 @@ func (e *Engine) AssembleContextIndex(ctx context.Context, userID string, query 
 	}
 
 	return idx, nil
+}
+
+// Consult returns a structured intelligence report about a codebase subsystem or concept.
+// It checks for a cached knowledge doc matching the query. If found (cosine ≥ 0.75),
+// serves it. If not, gathers structural evidence and synthesizes a new knowledge doc
+// via LLM, caching it for future queries.
+func (e *Engine) Consult(ctx context.Context, namespace, query string, budget int) (*ConsultReport, error) {
+	if budget <= 0 {
+		budget = 2000
+	}
+
+	intent := DetectIntent(query)
+
+	// 1. Embed query
+	queryEmb, err := e.embedder.Embed(ctx, query, "RETRIEVAL_QUERY")
+	if err != nil {
+		return nil, fmt.Errorf("consult: embed query: %w", err)
+	}
+
+	// 2. Knowledge doc lookup
+	kdocs, err := e.GetKnowledgeDocs(ctx, namespace, query, queryEmb, 3)
+	if err != nil {
+		return nil, fmt.Errorf("consult: get knowledge docs: %w", err)
+	}
+
+	var explanation string
+	var docTopic string
+	var docMatchScore float64
+	var synthesized bool
+
+	if len(kdocs) > 0 {
+		// Check cosine similarity of top doc against query
+		if len(kdocs[0].Embedding) > 0 && len(queryEmb) > 0 {
+			docMatchScore = CosineSimilarity(kdocs[0].Embedding, queryEmb)
+		}
+	}
+
+	// 3. Gather structural evidence (always, for sections 2 & 3)
+	var seedPaths []string
+	var rankedFiles []RankedFile
+
+	// HDC codemap search for relevant modules
+	codeMap, codeIdx := e.getOrGenerateCodeMap(ctx, namespace)
+	if codeMap != nil {
+		hdcQuery := HDCEncodeQuery(query)
+		var moduleEmbs map[string][]float32
+		if codeIdx != nil {
+			moduleEmbs = codeIdx.HDCVectors
+		}
+		// Score all modules
+		for _, mod := range codeMap.Zoom2 {
+			if emb, ok := moduleEmbs[mod.Path]; ok {
+				score := CosineSimilarity(hdcQuery, emb)
+				if score > 0.3 {
+					rankedFiles = append(rankedFiles, RankedFile{
+						Path:   mod.Path,
+						Score:  float64(score),
+						Source: "hdc",
+						Desc:   mod.Summary,
+					})
+					seedPaths = append(seedPaths, mod.Path)
+				}
+			}
+		}
+		// Sort by score descending
+		sort.Slice(rankedFiles, func(i, j int) bool {
+			return rankedFiles[i].Score > rankedFiles[j].Score
+		})
+		// Keep top 10
+		if len(rankedFiles) > 10 {
+			rankedFiles = rankedFiles[:10]
+		}
+		if len(seedPaths) > 10 {
+			seedPaths = seedPaths[:10]
+		}
+	}
+
+	// Structural neighbors via call/import edges
+	structuralNeighbors := e.GetStructuralNeighborPaths(namespace, seedPaths, 2)
+
+	// Co-change neighbors
+	cochangeNeighbors := e.GetCoChangeForPaths(namespace, seedPaths, 0.5)
+
+	// Get structural edges for call graph rendering
+	var callEdges []StructuralEdge
+	for _, path := range seedPaths {
+		edges, err := e.store.GetStructuralEdgesForPath(namespace, path, 50)
+		if err == nil {
+			callEdges = append(callEdges, edges...)
+		}
+	}
+
+	// Build evidence text
+	evidenceText := formatCallGraph(callEdges, cochangeNeighbors)
+
+	// Merge structural + co-change files into ranked list
+	seen := make(map[string]bool)
+	for _, f := range rankedFiles {
+		seen[f.Path] = true
+	}
+	for path, score := range structuralNeighbors {
+		if !seen[path] {
+			rankedFiles = append(rankedFiles, RankedFile{Path: path, Score: score, Source: "structural"})
+			seen[path] = true
+		}
+	}
+	for path, score := range cochangeNeighbors {
+		if !seen[path] {
+			rankedFiles = append(rankedFiles, RankedFile{Path: path, Score: score, Source: "co-change"})
+			seen[path] = true
+		}
+	}
+
+	// 4. Search memories for context
+	searchOpts := SearchOpts{
+		Limit:          5,
+		IncludeSketch:  false,
+		QueryEmbedding: queryEmb,
+		QueryText:      query,
+	}
+	searchResults, _ := e.DualSearch(ctx, namespace, query, searchOpts)
+
+	memoryCount := 0
+	if searchResults != nil {
+		memoryCount = len(searchResults.DetailMemories)
+	}
+
+	// 5. Serve cached doc or synthesize
+	if docMatchScore >= 0.75 && len(kdocs) > 0 {
+		// Cache hit
+		explanation = kdocs[0].Content
+		docTopic = kdocs[0].Topic
+	} else {
+		// Cache miss — synthesize
+		gen, ok := e.cfg.Summarizer.(TextGenerator)
+		if !ok {
+			return nil, fmt.Errorf("consult: summarizer does not implement TextGenerator")
+		}
+
+		// Build synthesis prompt
+		var promptParts []string
+		promptParts = append(promptParts, fmt.Sprintf(
+			"Given the following structural evidence about %q in this codebase, "+
+				"write a concise explanation (200-400 words) of how this subsystem works.\n\n"+
+				"Include: key files and their roles, data/control flow between components, "+
+				"important design decisions or constraints.\n\n"+
+				"Do NOT include code snippets. Focus on conceptual understanding that would "+
+				"help a developer work on this subsystem correctly.", query))
+
+		if evidenceText != "" {
+			promptParts = append(promptParts, "[Structural Evidence]\n"+evidenceText)
+		}
+
+		// Add relevant files
+		if len(rankedFiles) > 0 {
+			var fileList []string
+			for _, f := range rankedFiles {
+				entry := f.Path
+				if f.Desc != "" {
+					entry += " — " + f.Desc
+				}
+				fileList = append(fileList, entry)
+			}
+			promptParts = append(promptParts, "[Relevant Files]\n"+strings.Join(fileList, "\n"))
+		}
+
+		// Add matching memories
+		if searchResults != nil {
+			var memTexts []string
+			for _, dm := range searchResults.DetailMemories {
+				memTexts = append(memTexts, dm.Text)
+			}
+			if len(memTexts) > 0 {
+				promptParts = append(promptParts, "[Existing Memories]\n"+strings.Join(memTexts, "\n"))
+			}
+		}
+
+		prompt := strings.Join(promptParts, "\n\n")
+		content, err := gen.GenerateText(ctx, prompt, 500)
+		if err != nil {
+			return nil, fmt.Errorf("consult: synthesize: %w", err)
+		}
+
+		explanation = strings.TrimSpace(content)
+		synthesized = true
+
+		// Normalize topic
+		docTopic = strings.ToLower(strings.TrimSpace(query))
+		if len(docTopic) > 80 {
+			docTopic = docTopic[:80]
+		}
+
+		// Dedup: check if existing doc covers ≥50% of the same files
+		var docFiles []string
+		for _, f := range rankedFiles {
+			docFiles = append(docFiles, f.Path)
+		}
+
+		var existingDoc *KnowledgeDoc
+		for i, kd := range kdocs {
+			overlap := fileOverlap(kd.Files, docFiles)
+			if overlap >= 0.5 {
+				existingDoc = &kdocs[i]
+				docTopic = existingDoc.Topic
+				break
+			}
+		}
+
+		// Embed the synthesized content
+		docEmb, err := e.embedder.Embed(ctx, explanation, "RETRIEVAL_DOCUMENT")
+		if err != nil {
+			// Non-fatal — save without embedding
+			docEmb = nil
+		}
+
+		// Collect source IDs from memories
+		var sourceIDs []string
+		if searchResults != nil {
+			for _, dm := range searchResults.DetailMemories {
+				sourceIDs = append(sourceIDs, dm.ID)
+			}
+		}
+
+		now := time.Now()
+		doc := &KnowledgeDoc{
+			ID:         generateID(),
+			Namespace:  namespace,
+			Topic:      docTopic,
+			Content:    explanation,
+			Files:      docFiles,
+			SourceIDs:  sourceIDs,
+			Embedding:  docEmb,
+			TokenCount: estimateTokens(explanation),
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+
+		if existingDoc != nil {
+			doc.ID = existingDoc.ID
+			doc.CreatedAt = existingDoc.CreatedAt
+		}
+
+		// Best-effort save
+		_ = e.store.UpsertKnowledgeDoc(doc, docEmb)
+	}
+
+	// 6. Compute confidence
+	confidence, confLabel := computeConsultConfidence(docMatchScore, len(callEdges), memoryCount)
+
+	report := &ConsultReport{
+		Query:         query,
+		Intent:        intent,
+		Confidence:    confidence,
+		ConfLabel:     confLabel,
+		Explanation:   explanation,
+		Evidence:      evidenceText,
+		RelevantFiles: rankedFiles,
+		Synthesized:   synthesized,
+		DocTopic:      docTopic,
+		TokenCount:    estimateTokens(explanation) + estimateTokens(evidenceText),
+	}
+
+	return report, nil
+}
+
+// computeConsultConfidence calculates a confidence score for a consult report.
+func computeConsultConfidence(docMatchScore float64, edgeCount, memoryCount int) (float64, string) {
+	edgeNorm := float64(edgeCount) / 10.0
+	if edgeNorm > 1.0 {
+		edgeNorm = 1.0
+	}
+	memNorm := float64(memoryCount) / 5.0
+	if memNorm > 1.0 {
+		memNorm = 1.0
+	}
+
+	score := docMatchScore*0.4 + edgeNorm*0.3 + memNorm*0.3
+
+	var label string
+	switch {
+	case score >= 0.7:
+		label = "high"
+	case score >= 0.4:
+		label = "medium"
+	default:
+		label = "low"
+	}
+	return score, label
+}
+
+// formatCallGraph renders structural edges and co-change neighbors as readable text.
+func formatCallGraph(edges []StructuralEdge, cochange map[string]float64) string {
+	var sb strings.Builder
+
+	if len(edges) > 0 {
+		sb.WriteString("[Call Graph]\n")
+		// Deduplicate by source+target+type
+		type edgeKey struct{ src, tgt, typ string }
+		seen := make(map[edgeKey]bool)
+		for _, e := range edges {
+			k := edgeKey{e.SourcePath, e.TargetPath, e.EdgeType}
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			callee := e.CalleeName
+			if callee == "" {
+				callee = e.EdgeType
+			}
+			sb.WriteString(fmt.Sprintf("%s → %s (%s: %s)\n", e.SourcePath, e.TargetPath, e.EdgeType, callee))
+		}
+	}
+
+	if len(cochange) > 0 {
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("[Co-Change Neighbors]\n")
+		// Sort by score descending
+		type pair struct {
+			path  string
+			score float64
+		}
+		var pairs []pair
+		for p, s := range cochange {
+			pairs = append(pairs, pair{p, s})
+		}
+		sort.Slice(pairs, func(i, j int) bool { return pairs[i].score > pairs[j].score })
+		for _, p := range pairs {
+			sb.WriteString(fmt.Sprintf("%s (%.2f)\n", p.path, p.score))
+		}
+	}
+
+	return sb.String()
+}
+
+// fileOverlap returns the fraction of files in a that also appear in b.
+func fileOverlap(a, b []string) float64 {
+	if len(a) == 0 {
+		return 0
+	}
+	bSet := make(map[string]bool, len(b))
+	for _, f := range b {
+		bSet[f] = true
+	}
+	overlap := 0
+	for _, f := range a {
+		if bSet[f] {
+			overlap++
+		}
+	}
+	return float64(overlap) / float64(len(a))
 }
 
 // buildIndexSnapshot creates a ContextSnapshot from index items, enriching

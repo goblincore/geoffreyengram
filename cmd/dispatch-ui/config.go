@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -19,22 +20,26 @@ type DispatchConfig struct {
 	OpenCodeBin         string
 	PiBin               string
 	ExtraPath           string // Additional PATH entries for subprocess tools (e.g., node for Pi)
-	Preamble            string // Prepended to every plan body before dispatching
-	ListenAddr          string
-	PlanningModel       string
-	PlanningAPIKeyEnv   string
-	PlanningBaseURL     string
-	EnvVars             map[string]string // from .env
+	Preamble             string // Prepended to every plan body before dispatching
+	ListenAddr           string
+	PlanningModel        string
+	PlanningAPIKeyEnv    string
+	PlanningBaseURL      string
+	MaxConcurrent        int    // max parallel tasks (default 2)
+	AutoCleanupWorktrees bool   // remove worktrees on success (default true)
+	EnvVars              map[string]string // from .env
 }
 
 // loadDispatchConfig parses dispatch.conf and .env, returns a populated DispatchConfig.
 func loadDispatchConfig(confPath, envPath string) (*DispatchConfig, error) {
 	cfg := &DispatchConfig{
 		// Defaults
-		ListenAddr:        "127.0.0.1:8090",
-		PlanningModel:     "claude-opus-4-6",
-		PlanningAPIKeyEnv: "ANTHROPIC_API_KEY",
-		EnvVars:           make(map[string]string),
+		ListenAddr:           "127.0.0.1:8090",
+		PlanningModel:        "claude-opus-4-6",
+		PlanningAPIKeyEnv:    "ANTHROPIC_API_KEY",
+		MaxConcurrent:        2,
+		AutoCleanupWorktrees: true,
+		EnvVars:              make(map[string]string),
 	}
 
 	// Parse dispatch.conf (KEY="value" format)
@@ -72,6 +77,12 @@ func loadDispatchConfig(confPath, envPath string) (*DispatchConfig, error) {
 			cfg.PlanningAPIKeyEnv = v
 		case "PLANNING_BASE_URL":
 			cfg.PlanningBaseURL = v
+		case "MAX_CONCURRENT":
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.MaxConcurrent = n
+			}
+		case "AUTO_CLEANUP_WORKTREES":
+			cfg.AutoCleanupWorktrees = v == "true" || v == "1" || v == "yes"
 		}
 	})
 	if err != nil && !os.IsNotExist(err) {

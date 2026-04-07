@@ -1,0 +1,198 @@
+[
+  {
+    "id": "ge-feat-01",
+    "corpus": "geoffreyengram",
+    "type": "feature_location",
+    "query": "Where is the HDC encoding logic?",
+    "difficulty": "easy",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["dualmem/hdc.go"],
+      "modules": ["dualmem/"],
+      "concepts": ["HDCEncoder", "EncodeModule", "EncodeQuery", "BasisVector", "bindVector", "bundleVectors"],
+      "explanation": "HDC encoding lives entirely in dualmem/hdc.go. The HDCEncoder struct uses 2048-dim binary vectors with 4-layer encoding (path/symbols/lang/content). Key functions are EncodeModule and EncodeQuery, using FNV-64+PCG basis vectors."
+    }
+  },
+  {
+    "id": "ge-feat-02",
+    "corpus": "geoffreyengram",
+    "type": "feature_location",
+    "query": "Where is the tree-sitter multi-language parsing?",
+    "difficulty": "easy",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["dualmem/parse_treesitter.go"],
+      "modules": ["dualmem/"],
+      "concepts": ["ParseTreeSitter", "extractTypeScript", "extractPython", "extractRust", "tree-sitter"],
+      "explanation": "Tree-sitter parsing for TS, Python, and Rust is in dualmem/parse_treesitter.go. It extracts types, entry points, imports, and identifiers. Go files use go/ast instead (in dualmem/codemap.go)."
+    }
+  },
+  {
+    "id": "ge-feat-03",
+    "corpus": "geoffreyengram",
+    "type": "feature_location",
+    "query": "Where is the CLI command handler for dualmem?",
+    "difficulty": "easy",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["cmd/dualmem/main.go"],
+      "modules": ["cmd/dualmem/"],
+      "concepts": ["CLIConfig", "cmdAdd", "cmdSearch", "cmdContext", "cmdConsult", "cmdDistill", "loadConfig"],
+      "explanation": "The CLI is in cmd/dualmem/main.go. It uses flag.NewFlagSet per subcommand (add, search, context, consult, distill, checkpoint, etc.). Configuration loads from ~/.config/dualmem/config.yaml."
+    }
+  },
+  {
+    "id": "ge-dep-01",
+    "corpus": "geoffreyengram",
+    "type": "dependency_tracing",
+    "query": "What files would break if I changed the SQLite schema or migration logic?",
+    "difficulty": "hard",
+    "confidence": "medium",
+    "ground_truth": {
+      "files": ["dualmem/store_sqlite.go", "dualmem/dualmem.go", "dualmem/rating.go", "dualmem/cochange.go", "dualmem/knowledge.go", "dualmem/detail.go"],
+      "modules": ["dualmem/"],
+      "concepts": ["SQLiteStore", "migrate", "InsertDetail", "GetDetailMemories", "UpsertEntity", "UpsertEdge", "InsertCoChangeEdge"],
+      "explanation": "The SQLite store is in dualmem/store_sqlite.go with migrations v1-v10+. Direct consumers are dualmem.go (Engine), rating.go (context snapshots/ratings), cochange.go (co-change graph), knowledge.go (knowledge docs), and detail.go (detail path). All tests that use testStore() would also be affected."
+    }
+  },
+  {
+    "id": "ge-dep-02",
+    "corpus": "geoffreyengram",
+    "type": "dependency_tracing",
+    "query": "What would need to change if I replaced the Gemini embedding provider?",
+    "difficulty": "medium",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["dualmem/embed_gemini.go", "dualmem/types.go", "dualmem/dualmem.go", "cmd/dualmem/main.go"],
+      "modules": ["dualmem/", "cmd/dualmem/"],
+      "concepts": ["GeminiEmbedder", "EmbeddingProvider", "Embed", "NewGeminiEmbedder", "embedding_model"],
+      "explanation": "The Gemini embedder is in dualmem/embed_gemini.go implementing the EmbeddingProvider interface from dualmem/types.go. The Engine in dualmem.go takes it via Config.EmbeddingProvider. The CLI in cmd/dualmem/main.go instantiates it based on config.yaml. Alternative embedders (OpenAI, Ollama) exist in the root package."
+    }
+  },
+  {
+    "id": "ge-concept-01",
+    "corpus": "geoffreyengram",
+    "type": "concept_search",
+    "query": "How does the dual-path memory routing work?",
+    "difficulty": "medium",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["dualmem/dualmem.go", "dualmem/detail.go", "dualmem/sketch.go", "dualmem/scorer.go", "dualmem/types.go"],
+      "modules": ["dualmem/"],
+      "concepts": ["ImportanceScorer", "ImportanceTheta", "DetailPath", "SketchPath", "AddWithOptions", "importance"],
+      "explanation": "Memory routing uses importance scoring (dualmem/scorer.go) with formula (sectorBonus*0.3 + salience*0.3 + specificity*0.2 + novelty*0.2). Memories above theta=0.65 go to the Detail Path (dualmem/detail.go, vector-indexed), below to the Sketch Path (dualmem/sketch.go, hierarchical compression). Routing happens in Engine.AddWithOptions in dualmem.go."
+    }
+  },
+  {
+    "id": "ge-concept-02",
+    "corpus": "geoffreyengram",
+    "type": "concept_search",
+    "query": "How does the co-change graph work?",
+    "difficulty": "medium",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["dualmem/cochange.go", "dualmem/store_sqlite.go", "dualmem/codemap.go"],
+      "modules": ["dualmem/"],
+      "concepts": ["CoChangeBuilder", "BuildCoChangeGraph", "InsertCoChangeEdge", "QueryCoChangeNeighbors", "RenderAtBudgetWithCoChange"],
+      "explanation": "The co-change graph tracks files that change together across sessions. dualmem/cochange.go builds the graph from memory file associations. Edges are stored in SQLite (store_sqlite.go). The codemap (codemap.go) uses co-change neighbors via RenderAtBudgetWithCoChange to boost structurally related but semantically dissimilar modules."
+    }
+  },
+  {
+    "id": "ge-concept-03",
+    "corpus": "geoffreyengram",
+    "type": "concept_search",
+    "query": "How does knowledge doc synthesis work?",
+    "difficulty": "medium",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["dualmem/knowledge.go", "dualmem/dualmem.go", "dualmem/store_sqlite.go"],
+      "modules": ["dualmem/"],
+      "concepts": ["Synthesize", "ClusterMemories", "KnowledgeDoc", "GeminiSummarizer", "SynthesizeKnowledgeDocs"],
+      "explanation": "Knowledge docs are synthesized from clusters of related memories. dualmem/knowledge.go clusters memories by embedding similarity, then uses a GeminiSummarizer to produce coherent topic-based docs. The Engine.Synthesize method in dualmem.go orchestrates this. Docs are stored in SQLite and surfaced during context assembly instead of raw memories."
+    }
+  },
+  {
+    "id": "ge-bug-01",
+    "corpus": "geoffreyengram",
+    "type": "bug_localization",
+    "query": "Context assembly returns empty results even though memories exist",
+    "difficulty": "hard",
+    "confidence": "medium",
+    "ground_truth": {
+      "files": ["dualmem/dualmem.go", "dualmem/detail.go", "dualmem/scorer.go", "dualmem/types.go"],
+      "modules": ["dualmem/"],
+      "concepts": ["AssembleContext", "AssembleContextWith", "DualSearch", "MinSimilarity", "ImportanceTheta", "tokenBudget"],
+      "explanation": "Empty context assembly could stem from: (1) MinSimilarity threshold too high filtering all results in DualSearch, (2) importance scoring routing everything to Sketch instead of Detail path, (3) token budget too small in AssembleContextWith, (4) namespace mismatch. The pipeline flows: AssembleContext -> DualSearch -> detail.Search -> cosine similarity filtering."
+    }
+  },
+  {
+    "id": "ge-bug-02",
+    "corpus": "geoffreyengram",
+    "type": "bug_localization",
+    "query": "search-code returns irrelevant modules ranked higher than the correct one",
+    "difficulty": "medium",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["dualmem/codemap.go", "dualmem/hdc.go"],
+      "modules": ["dualmem/"],
+      "concepts": ["SearchCodeMap", "BuildCodeIndex", "BM25Score", "AdaptiveAlpha", "HDCEncodeQuery", "HybridScore"],
+      "explanation": "Search ranking issues trace to dualmem/codemap.go (SearchCodeMap, BuildCodeIndex, BM25Score) and dualmem/hdc.go (encoding). The hybrid score blends HDC cosine similarity and BM25 keyword scoring via AdaptiveAlpha. Common causes: query lacks discriminative terms for HDC, BM25 keyword matches on common terms inflate irrelevant modules."
+    }
+  },
+  {
+    "id": "ge-struct-01",
+    "corpus": "geoffreyengram",
+    "type": "structural_understanding",
+    "query": "What is the data flow from adding a memory to it appearing in context assembly?",
+    "difficulty": "medium",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["dualmem/dualmem.go", "dualmem/scorer.go", "dualmem/detail.go", "dualmem/sketch.go", "dualmem/store_sqlite.go", "dualmem/types.go"],
+      "modules": ["dualmem/"],
+      "concepts": ["AddWithOptions", "ImportanceScorer", "InsertDetail", "AssembleContext", "DualSearch", "ContextBlock"],
+      "explanation": "Flow: Engine.AddWithOptions embeds the text, scores importance via ImportanceScorer, routes to DetailPath (InsertDetail in store) or SketchPath based on theta threshold. During assembly, AssembleContextWith calls DualSearch for cosine similarity retrieval from detail store, applies graph boost, re-ranks, and packs results into a ContextBlock within token budget."
+    }
+  },
+  {
+    "id": "ge-struct-02",
+    "corpus": "geoffreyengram",
+    "type": "structural_understanding",
+    "query": "How does the consult command produce a structured intelligence report?",
+    "difficulty": "medium",
+    "confidence": "high",
+    "ground_truth": {
+      "files": ["dualmem/dualmem.go", "dualmem/codemap.go", "dualmem/knowledge.go", "dualmem/cochange.go", "cmd/dualmem/main.go"],
+      "modules": ["dualmem/", "cmd/dualmem/"],
+      "concepts": ["Consult", "ConsultReport", "cmdConsult", "computeConsultConfidence", "ScanCodebase", "SearchCodeMap"],
+      "explanation": "The consult command (cmd/dualmem/main.go cmdConsult) calls Engine.Consult (dualmem.go) which orchestrates: (1) codebase scan + HDC search for relevant modules, (2) knowledge doc lookup, (3) memory search with intent detection, (4) co-change neighbor expansion, (5) confidence scoring. Results are formatted as a structured multi-section report with intelligence brief, structural evidence, memory, and project context."
+    }
+  },
+  {
+    "id": "ge-feas-01",
+    "corpus": "geoffreyengram",
+    "type": "feasibility",
+    "query": "Can I add a new language parser (e.g., Java) without modifying the search layer?",
+    "difficulty": "hard",
+    "confidence": "medium",
+    "ground_truth": {
+      "files": ["dualmem/parse_treesitter.go", "dualmem/codemap.go", "dualmem/hdc.go"],
+      "modules": ["dualmem/"],
+      "concepts": ["ParseTreeSitter", "ScanCodebase", "HDCEncodeModule", "ModuleMap", "Language"],
+      "explanation": "Yes, largely feasible. A new parser would be added to dualmem/parse_treesitter.go following the pattern of extractTypeScript/extractPython/extractRust. The codemap scanner (codemap.go ScanCodebase) already dispatches by file extension. HDC encoding (hdc.go) is language-agnostic — it encodes module metadata regardless of source language. The search layer doesn't need changes."
+    }
+  },
+  {
+    "id": "ge-feas-02",
+    "corpus": "geoffreyengram",
+    "type": "feasibility",
+    "query": "Can I replace SQLite with PostgreSQL without rewriting the memory system?",
+    "difficulty": "hard",
+    "confidence": "medium",
+    "ground_truth": {
+      "files": ["dualmem/store_sqlite.go", "dualmem/types.go", "dualmem/dualmem.go"],
+      "modules": ["dualmem/"],
+      "concepts": ["SQLiteStore", "Store", "Engine", "Config"],
+      "explanation": "Partially feasible. The storage layer is behind the SQLiteStore struct in store_sqlite.go, but there is no explicit Store interface — the Engine directly holds a *SQLiteStore. You would need to: (1) extract an interface from SQLiteStore's methods, (2) implement a PostgresStore with the same interface, (3) update Engine and Config to accept either backend. The SQL queries use SQLite-specific syntax (e.g., INSERT OR REPLACE, datetime functions) that would need PostgreSQL equivalents."
+    }
+  }
+]

@@ -10,6 +10,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -27,14 +28,23 @@ type CodeMap struct {
 
 // ModuleMap is a zoom-2 entry: one package or meaningful directory.
 type ModuleMap struct {
-	Path        string   `json:"path"`                    // Relative path from root
-	Language    string   `json:"language"`                 // "go", "typescript", "other"
-	Summary     string   `json:"summary"`                  // Human-readable description
-	KeyTypes    []string `json:"key_types"`                // Important exported types/interfaces
-	EntryPoints []string `json:"entry_points"`             // main funcs, handler registrations
-	FileCount   int      `json:"file_count"`
-	Imports     []string `json:"imports,omitempty"`        // External package imports
-	Identifiers []string `json:"identifiers,omitempty"`   // Unexported/private identifiers (content vocabulary)
+	Path        string     `json:"path"`                    // Relative path from root
+	Language    string     `json:"language"`                 // "go", "typescript", "other", "markdown"
+	Summary     string     `json:"summary"`                  // Human-readable description
+	KeyTypes    []string   `json:"key_types"`                // Important exported types/interfaces
+	EntryPoints []string   `json:"entry_points"`             // main funcs, handler registrations
+	FileCount   int        `json:"file_count"`
+	Imports     []string   `json:"imports,omitempty"`        // External package imports
+	Identifiers []string   `json:"identifiers,omitempty"`   // Unexported/private identifiers (content vocabulary)
+	Files       []FileInfo `json:"files,omitempty"`          // Per-file metadata for stage-2 ranking
+}
+
+// FileInfo holds per-file metadata collected during scanning.
+// Used by stage-2 file search to rank individual files within a module.
+type FileInfo struct {
+	RelPath     string   `json:"rel_path"`     // relative to repo root, e.g. "dualmem/hdc.go"
+	Identifiers []string `json:"identifiers"`  // all symbols (exported + unexported) in this file
+	Imports     []string `json:"imports"`      // imports in this file
 }
 
 // Skip patterns for directory scanning.
@@ -45,7 +55,7 @@ var skipDirs = map[string]bool{
 	".nx-cache": true, ".github": true, ".changeset": true, ".superpowers": true,
 	".turbo": true, ".cache": true, ".parcel-cache": true, ".output": true,
 	".nuxt": true, ".svelte-kit": true, "tmp": true, "temp": true, "logs": true,
-	".vexp": true,
+	".vexp": true, "benchmarks": true,
 	// Python virtual environments & tool caches
 	".venv": true, "venv": true, ".virtualenv": true, "env": true, ".env": true,
 	".tox": true, ".mypy_cache": true, ".pytest_cache": true, ".ruff_cache": true,
@@ -73,6 +83,7 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 		tsFiles  []string
 		pyFiles  []string
 		rsFiles  []string
+		mdFiles  []string
 		allFiles []string
 	}
 	dirs := make(map[string]*dirInfo)
@@ -121,6 +132,8 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 			d.pyFiles = append(d.pyFiles, filepath.Join(dir, info.Name()))
 		case ".rs":
 			d.rsFiles = append(d.rsFiles, filepath.Join(dir, info.Name()))
+		case ".md":
+			d.mdFiles = append(d.mdFiles, filepath.Join(dir, info.Name()))
 		}
 		return nil
 	})
@@ -153,6 +166,23 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 		}
 		if mod != nil {
 			modules = append(modules, *mod)
+		}
+	}
+
+	// Process markdown files in all directories
+	for _, d := range dirs {
+		for _, mdFile := range d.mdFiles {
+			relFile := filepath.Base(mdFile)
+			relPath := d.relPath
+			if relPath == "." {
+				relPath = relFile
+			} else {
+				relPath = relPath + "/" + relFile
+			}
+			mod := parseMarkdownFile(relPath, mdFile)
+			if mod != nil {
+				modules = append(modules, *mod)
+			}
 		}
 	}
 
@@ -291,6 +321,82 @@ func parseGoPackage(relPath string, goFiles []string) *ModuleMap {
 		FileCount:   len(goFiles),
 		Imports:     imports,
 		Identifiers: identifiers,
+	}
+}
+
+// --- Markdown parser ---
+
+// Regex patterns for markdown extraction.
+var (
+	mdHeadingRe  = regexp.MustCompile(`(?m)^#{1,4}\s+(.+)$`)
+	mdBoldRe     = regexp.MustCompile(`\*\*([^*]+)\*\*`)
+	mdBacktickRe = regexp.MustCompile("`([^`]+)`")
+)
+
+// parseMarkdownFile extracts identifiers from a markdown file for search indexing.
+func parseMarkdownFile(relPath string, absPath string) *ModuleMap {
+	data, err := os.ReadFile(absPath)
+	if err != nil || len(data) < 100 {
+		return nil
+	}
+	content := string(data)
+
+	var identifiers []string
+	seen := make(map[string]bool)
+
+	addIdent := func(s string) {
+		s = strings.TrimSpace(s)
+		if s != "" && !seen[s] {
+			seen[s] = true
+			identifiers = append(identifiers, s)
+		}
+	}
+
+	// Extract headings
+	for _, match := range mdHeadingRe.FindAllStringSubmatch(content, -1) {
+		addIdent(match[1])
+	}
+
+	// Extract bold terms
+	for _, match := range mdBoldRe.FindAllStringSubmatch(content, -1) {
+		addIdent(match[1])
+	}
+
+	// Extract backtick code references
+	for _, match := range mdBacktickRe.FindAllStringSubmatch(content, -1) {
+		addIdent(match[1])
+	}
+
+	if len(identifiers) > 30 {
+		identifiers = identifiers[:30]
+	}
+
+	// Summary: first non-empty, non-heading line
+	var summary string
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		summary = line
+		break
+	}
+	if len(summary) > 100 {
+		summary = summary[:100]
+	}
+
+	return &ModuleMap{
+		Path:        relPath,
+		Language:    "markdown",
+		Summary:     summary,
+		FileCount:   1,
+		Identifiers: identifiers,
+		Files: []FileInfo{
+			{
+				RelPath:     relPath,
+				Identifiers: identifiers,
+			},
+		},
 	}
 }
 
@@ -812,6 +918,119 @@ func SearchCodeMapCompat(cm *CodeMap, moduleEmbs map[string][]float32, query str
 		results = results[:limit]
 	}
 	return results
+}
+
+// FileResult is a file-level search result from two-stage search.
+type FileResult struct {
+	ModulePath    string  `json:"module_path"`
+	FilePath      string  `json:"file_path"`
+	FileScore     float64 `json:"file_score"`     // stage-2 BM25 score
+	ModuleScore   float64 `json:"module_score"`   // stage-1 hybrid score
+	CombinedScore float64 `json:"combined_score"` // weighted blend
+	Summary       string  `json:"summary"`
+}
+
+// SearchCodeMapFiles performs two-stage search: module-level (stage 1) then
+// file-level BM25 ranking within top modules (stage 2).
+func SearchCodeMapFiles(cm *CodeMap, idx *CodeIndex, query string, limit int) []FileResult {
+	if cm == nil || idx == nil {
+		return nil
+	}
+
+	// Stage 1: module-level search
+	topK := 5
+	if topK > len(cm.Zoom2) {
+		topK = len(cm.Zoom2)
+	}
+	moduleResults := SearchCodeMap(cm, idx, query, topK)
+
+	queryTokens := hdcTokenize(query)
+
+	// Stage 2: rank files within each top module
+	var fileResults []FileResult
+
+	for _, mr := range moduleResults {
+		if len(mr.Files) == 0 {
+			// Module has no per-file info — emit as single file result
+			fileResults = append(fileResults, FileResult{
+				ModulePath:    mr.Path,
+				FilePath:      mr.Path,
+				FileScore:     0,
+				ModuleScore:   mr.HybridScore,
+				CombinedScore: mr.HybridScore,
+				Summary:       mr.Summary,
+			})
+			continue
+		}
+
+		for _, fi := range mr.Files {
+			fileScore := fileBM25Score(fi, queryTokens)
+			combined := 0.6*mr.HybridScore + 0.4*fileScore
+			fileResults = append(fileResults, FileResult{
+				ModulePath:    mr.Path,
+				FilePath:      fi.RelPath,
+				FileScore:     fileScore,
+				ModuleScore:   mr.HybridScore,
+				CombinedScore: combined,
+				Summary:       mr.Summary,
+			})
+		}
+	}
+
+	// Sort by combined score descending
+	sort.Slice(fileResults, func(i, j int) bool {
+		return fileResults[i].CombinedScore > fileResults[j].CombinedScore
+	})
+
+	if limit > 0 && len(fileResults) > limit {
+		fileResults = fileResults[:limit]
+	}
+	return fileResults
+}
+
+// fileBM25Score computes a simple BM25-like score for a file against query tokens.
+// Uses the file's identifiers + filename tokens as the document.
+func fileBM25Score(fi FileInfo, queryTokens []string) float64 {
+	// Build term frequency from identifiers + filename
+	tf := make(map[string]int)
+	for _, ident := range fi.Identifiers {
+		for _, tok := range hdcTokenize(ident) {
+			tf[tok]++
+		}
+	}
+	for _, tok := range hdcTokenize(fi.RelPath) {
+		tf[tok]++
+	}
+
+	docLen := 0
+	for _, count := range tf {
+		docLen += count
+	}
+	if docLen == 0 {
+		return 0
+	}
+
+	const avgDocLen = 10.0 // reasonable default for file-level docs
+
+	var score float64
+	for _, qt := range queryTokens {
+		termFreq := float64(tf[qt])
+		if termFreq == 0 {
+			continue
+		}
+		// Simplified BM25 — no IDF (we don't have corpus-level file stats)
+		// Use term frequency saturation only
+		num := termFreq * (bm25K1 + 1)
+		denom := termFreq + bm25K1*(1-bm25B+bm25B*float64(docLen)/avgDocLen)
+		score += num / denom
+	}
+
+	// Normalize to [0, 1] range — cap at a reasonable max
+	maxPossible := float64(len(queryTokens)) * (bm25K1 + 1) / (1 + bm25K1*(1-bm25B))
+	if maxPossible > 0 {
+		score = score / maxPossible
+	}
+	return score
 }
 
 // EmbedCodeMap embeds all module summaries in a code map.

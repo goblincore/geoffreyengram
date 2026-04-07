@@ -1,0 +1,128 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"time"
+)
+
+// unravelAdapterPath is the path to the Node.js adapter script.
+var unravelAdapterPath = filepath.Join("benchmarks", "contextual", "adapters", "unravel.mjs")
+
+// nodeBinary returns the path to the node binary, checking common locations
+// including fnm (Fast Node Manager) installations.
+func nodeBinary() string {
+	// Check PATH first
+	if p, err := exec.LookPath("node"); err == nil {
+		return p
+	}
+	// Common direct install locations
+	for _, p := range []string{"/usr/local/bin/node", "/opt/homebrew/bin/node"} {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	// fnm (Fast Node Manager) — stable path under ~/.local/share/fnm/
+	// Pick the latest version (reverse-sorted directory names like v18.x, v22.x)
+	home, _ := os.UserHomeDir()
+	if home != "" {
+		fnmDir := filepath.Join(home, ".local", "share", "fnm", "node-versions")
+		if entries, err := os.ReadDir(fnmDir); err == nil {
+			// Iterate in reverse to pick the latest version
+			for i := len(entries) - 1; i >= 0; i-- {
+				e := entries[i]
+				if e.IsDir() {
+					p := filepath.Join(fnmDir, e.Name(), "installation", "bin", "node")
+					if _, err := os.Stat(p); err == nil {
+						return p
+					}
+				}
+			}
+		}
+	}
+	return "node" // fallback, will fail with clear error
+}
+
+// runUnravel executes UnravelAI search for IR metrics.
+func runUnravel(q Query) AdapterOutput {
+	corpusPath, ok := corpusPaths[q.Corpus]
+	if !ok {
+		fmt.Printf("  WARNING: unknown corpus %q, skipping unravel\n", q.Corpus)
+		return AdapterOutput{}
+	}
+
+	node := nodeBinary()
+	if _, err := exec.LookPath(node); err != nil {
+		fmt.Printf("  WARNING: node not found — install Node.js to run UnravelAI adapter\n")
+		return AdapterOutput{}
+	}
+
+	start := time.Now()
+	cmd := exec.Command(node, unravelAdapterPath,
+		"--mode", "search",
+		"--corpus", corpusPath,
+		"--query", q.Query)
+	out, err := cmd.Output()
+	latency := time.Since(start).Milliseconds()
+
+	if err != nil {
+		stderr := ""
+		if ee, ok := err.(*exec.ExitError); ok {
+			stderr = string(ee.Stderr)
+		}
+		fmt.Printf("  WARNING: unravel search failed for %q: %v %s\n", q.Query, err, stderr)
+		return AdapterOutput{LatencyMs: latency}
+	}
+
+	var result struct {
+		Results  []SearchResult `json:"results"`
+		Latency  int64          `json:"latency_ms"`
+		APICalls int            `json:"api_calls"`
+		Error    string         `json:"error"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		fmt.Printf("  WARNING: unravel parse error: %v\n", err)
+		return AdapterOutput{LatencyMs: latency}
+	}
+
+	if result.Error != "" {
+		fmt.Printf("  WARNING: unravel error: %s\n", result.Error)
+	}
+
+	return AdapterOutput{
+		Results:   result.Results,
+		LatencyMs: result.Latency,
+		APICalls:  result.APICalls,
+	}
+}
+
+// getUnravelReport runs UnravelAI consult for report quality evaluation.
+func getUnravelReport(q Query) string {
+	corpusPath, ok := corpusPaths[q.Corpus]
+	if !ok {
+		return ""
+	}
+
+	cmd := exec.Command(nodeBinary(), unravelAdapterPath,
+		"--mode", "consult",
+		"--corpus", corpusPath,
+		"--query", q.Query)
+	out, err := cmd.Output()
+	if err != nil {
+		fmt.Printf("  WARNING: unravel consult failed for %q: %v\n", q.Query, err)
+		return ""
+	}
+
+	var result struct {
+		Report  string `json:"report"`
+		Latency int64  `json:"latency_ms"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		return string(out)
+	}
+	return result.Report
+}

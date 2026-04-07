@@ -22,6 +22,7 @@ type APITask struct {
 	Status       string   `json:"status"`
 	Project      string   `json:"project"`
 	Model        string   `json:"model"`
+	Harness      string   `json:"harness,omitempty"`
 	Priority     int      `json:"priority"`
 	MaxRuntime   string   `json:"max_runtime"`
 	Branch       string   `json:"branch"`
@@ -85,6 +86,7 @@ func planToAPI(p *Plan) APITask {
 		Status:       p.Status,
 		Project:      p.Project,
 		Model:        p.Model,
+		Harness:      p.Harness,
 		Priority:     p.Priority,
 		MaxRuntime:   p.MaxRuntime,
 		Branch:       p.Branch,
@@ -299,20 +301,15 @@ func (s *Server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleCancelTask cancels the running task (only if it's the named task).
+// handleCancelTask cancels a specific running task by name.
 func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 
-	s.eng.mu.Lock()
-	running := s.eng.running
-	s.eng.mu.Unlock()
-
-	if running == nil || running.Plan.Name != name {
+	if !s.eng.CancelTask(name) {
 		writeError(w, http.StatusConflict, "task is not currently running")
 		return
 	}
 
-	s.eng.CancelRunning()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 }
 

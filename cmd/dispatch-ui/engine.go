@@ -13,7 +13,7 @@ import (
 type Engine struct {
 	Config  *DispatchConfig
 	mu      sync.Mutex
-	running *RunningTask
+	running map[string]*RunningTask // keyed by plan name
 	logs    map[string]*LogBuffer
 }
 
@@ -33,9 +33,45 @@ type LogBuffer struct {
 // NewEngine creates a new Engine with the given config.
 func NewEngine(cfg *DispatchConfig) *Engine {
 	return &Engine{
-		Config: cfg,
-		logs:   make(map[string]*LogBuffer),
+		Config:  cfg,
+		running: make(map[string]*RunningTask),
+		logs:    make(map[string]*LogBuffer),
 	}
+}
+
+// IsAtCapacity returns true if the engine is running the maximum number of concurrent tasks.
+func (e *Engine) IsAtCapacity() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.running) >= e.Config.MaxConcurrent
+}
+
+// IsRunning returns true if the named plan is currently executing.
+func (e *Engine) IsRunning(name string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	_, ok := e.running[name]
+	return ok
+}
+
+// RunningCount returns the number of currently executing tasks.
+func (e *Engine) RunningCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.running)
+}
+
+// CancelTask cancels a specific running task by name.
+// Returns true if the task was found and cancelled.
+func (e *Engine) CancelTask(name string) bool {
+	e.mu.Lock()
+	task, ok := e.running[name]
+	e.mu.Unlock()
+	if !ok {
+		return false
+	}
+	task.Cancel()
+	return true
 }
 
 // ListPlans reads all .md files from PlansDir and returns them sorted:
