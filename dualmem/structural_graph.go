@@ -142,33 +142,42 @@ func extractTSCallEdges(relPath string, files []string) []StructuralEdge {
 
 	var edges []StructuralEdge
 	for _, f := range files {
-		data, err := os.ReadFile(f)
-		if err != nil {
-			continue
-		}
-		tree, err := p.Parse(data)
-		if err != nil {
-			continue
-		}
-		root := tree.RootNode()
+		fileEdges := func() (result []StructuralEdge) {
+			defer func() {
+				if r := recover(); r != nil {
+					// tree-sitter can panic on certain inputs; skip the file
+					result = nil
+				}
+			}()
+			data, err := os.ReadFile(f)
+			if err != nil {
+				return nil
+			}
+			tree, err := p.Parse(data)
+			if err != nil {
+				return nil
+			}
+			defer tree.Release()
+			root := tree.RootNode()
 
-		for _, queryStr := range []string{simpleQuery, memberQuery} {
-			extractCaptures(root, lang, data, queryStr, func(text string, node *ts.Node) {
-				line := 1 + countNewlines(data, node.StartByte())
-				enclosing := findEnclosingFunction(node, lang, data)
-				edges = append(edges, StructuralEdge{
-					SourcePath:        relPath,
-					TargetPath:        relPath,
-					EdgeType:          "calls",
-					Weight:            1.0,
-					LineNumber:        line,
-					EnclosingFunction: enclosing,
-					CalleeName:        text,
+			for _, queryStr := range []string{simpleQuery, memberQuery} {
+				extractCaptures(root, lang, data, queryStr, func(text string, node *ts.Node) {
+					line := 1 + countNewlines(data, node.StartByte())
+					enclosing := findEnclosingFunction(node, lang, data)
+					result = append(result, StructuralEdge{
+						SourcePath:        relPath,
+						TargetPath:        relPath,
+						EdgeType:          "calls",
+						Weight:            1.0,
+						LineNumber:        line,
+						EnclosingFunction: enclosing,
+						CalleeName:        text,
+					})
 				})
-			})
-		}
-
-		tree.Release()
+			}
+			return result
+		}()
+		edges = append(edges, fileEdges...)
 	}
 	return edges
 }
@@ -188,33 +197,41 @@ func extractPyCallEdges(relPath string, files []string) []StructuralEdge {
 
 	var edges []StructuralEdge
 	for _, f := range files {
-		data, err := os.ReadFile(f)
-		if err != nil {
-			continue
-		}
-		tree, err := p.Parse(data)
-		if err != nil {
-			continue
-		}
-		root := tree.RootNode()
+		fileEdges := func() (result []StructuralEdge) {
+			defer func() {
+				if r := recover(); r != nil {
+					result = nil
+				}
+			}()
+			data, err := os.ReadFile(f)
+			if err != nil {
+				return nil
+			}
+			tree, err := p.Parse(data)
+			if err != nil {
+				return nil
+			}
+			defer tree.Release()
+			root := tree.RootNode()
 
-		for _, queryStr := range []string{simpleQuery, attrQuery} {
-			extractCaptures(root, lang, data, queryStr, func(text string, node *ts.Node) {
-				line := 1 + countNewlines(data, node.StartByte())
-				enclosing := findEnclosingFunction(node, lang, data)
-				edges = append(edges, StructuralEdge{
-					SourcePath:        relPath,
-					TargetPath:        relPath,
-					EdgeType:          "calls",
-					Weight:            1.0,
-					LineNumber:        line,
-					EnclosingFunction: enclosing,
-					CalleeName:        text,
+			for _, queryStr := range []string{simpleQuery, attrQuery} {
+				extractCaptures(root, lang, data, queryStr, func(text string, node *ts.Node) {
+					line := 1 + countNewlines(data, node.StartByte())
+					enclosing := findEnclosingFunction(node, lang, data)
+					result = append(result, StructuralEdge{
+						SourcePath:        relPath,
+						TargetPath:        relPath,
+						EdgeType:          "calls",
+						Weight:            1.0,
+						LineNumber:        line,
+						EnclosingFunction: enclosing,
+						CalleeName:        text,
+					})
 				})
-			})
-		}
-
-		tree.Release()
+			}
+			return result
+		}()
+		edges = append(edges, fileEdges...)
 	}
 	return edges
 }
@@ -234,33 +251,41 @@ func extractRsCallEdges(relPath string, files []string) []StructuralEdge {
 
 	var edges []StructuralEdge
 	for _, f := range files {
-		data, err := os.ReadFile(f)
-		if err != nil {
-			continue
-		}
-		tree, err := p.Parse(data)
-		if err != nil {
-			continue
-		}
-		root := tree.RootNode()
+		fileEdges := func() (result []StructuralEdge) {
+			defer func() {
+				if r := recover(); r != nil {
+					result = nil
+				}
+			}()
+			data, err := os.ReadFile(f)
+			if err != nil {
+				return nil
+			}
+			tree, err := p.Parse(data)
+			if err != nil {
+				return nil
+			}
+			defer tree.Release()
+			root := tree.RootNode()
 
-		for _, queryStr := range []string{simpleQuery, methodQuery} {
-			extractCaptures(root, lang, data, queryStr, func(text string, node *ts.Node) {
-				line := 1 + countNewlines(data, node.StartByte())
-				enclosing := findEnclosingFunction(node, lang, data)
-				edges = append(edges, StructuralEdge{
-					SourcePath:        relPath,
-					TargetPath:        relPath,
-					EdgeType:          "calls",
-					Weight:            1.0,
-					LineNumber:        line,
-					EnclosingFunction: enclosing,
-					CalleeName:        text,
+			for _, queryStr := range []string{simpleQuery, methodQuery} {
+				extractCaptures(root, lang, data, queryStr, func(text string, node *ts.Node) {
+					line := 1 + countNewlines(data, node.StartByte())
+					enclosing := findEnclosingFunction(node, lang, data)
+					result = append(result, StructuralEdge{
+						SourcePath:        relPath,
+						TargetPath:        relPath,
+						EdgeType:          "calls",
+						Weight:            1.0,
+						LineNumber:        line,
+						EnclosingFunction: enclosing,
+						CalleeName:        text,
+					})
 				})
-			})
-		}
-
-		tree.Release()
+			}
+			return result
+		}()
+		edges = append(edges, fileEdges...)
 	}
 	return edges
 }
@@ -284,31 +309,39 @@ func extractImportEdges(relPath string, files []string, cfg *langConfig) []Struc
 		var edges []StructuralEdge
 
 		for _, f := range files {
-			data, err := os.ReadFile(f)
-			if err != nil {
-				continue
-			}
-			tree, err := p.Parse(data)
-			if err != nil {
-				continue
-			}
-			root := tree.RootNode()
+			fileEdges := func() (result []StructuralEdge) {
+				defer func() {
+					if r := recover(); r != nil {
+						result = nil
+					}
+				}()
+				data, err := os.ReadFile(f)
+				if err != nil {
+					return nil
+				}
+				tree, err := p.Parse(data)
+				if err != nil {
+					return nil
+				}
+				defer tree.Release()
+				root := tree.RootNode()
 
-			if cfg.importQuery != "" {
-				extractCaptures(root, cfg.lang, data, cfg.importQuery, func(text string, node *ts.Node) {
-					line := 1 + countNewlines(data, node.StartByte())
-					edges = append(edges, StructuralEdge{
-						SourcePath: relPath,
-						TargetPath: text,
-						EdgeType:   "imports",
-						Weight:     0.7,
-						LineNumber: line,
-						CalleeName: text,
+				if cfg.importQuery != "" {
+					extractCaptures(root, cfg.lang, data, cfg.importQuery, func(text string, node *ts.Node) {
+						line := 1 + countNewlines(data, node.StartByte())
+						result = append(result, StructuralEdge{
+							SourcePath: relPath,
+							TargetPath: text,
+							EdgeType:   "imports",
+							Weight:     0.7,
+							LineNumber: line,
+							CalleeName: text,
+						})
 					})
-				})
-			}
-
-			tree.Release()
+				}
+				return result
+			}()
+			edges = append(edges, fileEdges...)
 		}
 		return edges
 	}
