@@ -15,15 +15,6 @@ import (
 //go:embed tags_scm/*.scm
 var tagsScmFS embed.FS
 
-// Tag represents a definition or reference symbol extracted from source code.
-type Tag struct {
-	File    string // absolute or relative file path
-	Name    string // captured symbol name (e.g. "MyFunc")
-	Kind    string // "def" or "ref"
-	SubKind string // suffix after "definition." or "reference." (e.g. "function", "call")
-	Line    int    // 1-based line number of the @name capture
-}
-
 // langEntry holds a tree-sitter language pointer and the compiled query.
 type langEntry struct {
 	lang  *ts.Language
