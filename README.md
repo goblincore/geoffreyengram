@@ -62,6 +62,8 @@ dualmem search "authentication" --limit 5
 dualmem search-code "authentication middleware"       # HDC-powered, no API calls
 dualmem context "fix the auth bug" --budget 3000      # token-budgeted context
 dualmem consult "how does auth work?"                 # synthesized intelligence report
+dualmem explore "credential issuance" --budget 3000   # grounded code briefing
+dualmem index                                         # pre-warm codebase index
 ```
 
 For Claude Code integration, copy [`docs/example-claude-md.md`](docs/example-claude-md.md) into your `~/.claude/CLAUDE.md`.
@@ -143,6 +145,27 @@ dualmem consult "how does the HDC encoder work?" --budget 2000
 ```
 
 Output is a 3-section report: **Explanation** (synthesized narrative), **Structural Evidence** (call graph edges + co-change neighbors), **Relevant Files** (HDC-ranked with relevance source). Includes a confidence score based on knowledge doc match, structural edge coverage, and memory count.
+
+### Explore — grounded code briefings
+
+Read ranked source files and produce a snippets-first briefing. Unlike `consult` (which caches knowledge docs), `explore` is ephemeral — it reads actual code and summarizes what it finds:
+
+```bash
+dualmem explore "how does credential issuance work?" --budget 3000
+dualmem explore "auth middleware" --ns learncard
+```
+
+### Index — pre-warm codebase index
+
+On first run, `explore`, `consult`, and `search-code` scan the codebase to build a codemap + structural edge graph. For large repos (4000+ files), use `index` to pre-warm the cache with progress output:
+
+```bash
+dualmem index                    # scan cwd, verbose progress
+dualmem index --ns myproject     # explicit namespace
+dualmem index --force            # re-index even if cache is fresh
+```
+
+The index is cached by git commit — subsequent commands on the same commit skip the scan entirely.
 
 ### HDC-powered code search
 
