@@ -1299,6 +1299,33 @@ func TestScanCodebase_ManyDirs(t *testing.T) {
 	}
 }
 
+func TestScanCodebase_SkipsBenchmarks(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Real source file
+	writeFile(t, tmpDir, "main.go", `package main
+func main() {}
+`)
+
+	// Benchmarks dir should be skipped
+	benchDir := filepath.Join(tmpDir, "benchmarks")
+	os.MkdirAll(benchDir, 0755)
+	writeFile(t, benchDir, "bench.go", `package benchmarks
+func BenchStuff() {}
+`)
+
+	cm, err := ScanCodebase(tmpDir)
+	if err != nil {
+		t.Fatalf("ScanCodebase: %v", err)
+	}
+
+	for _, m := range cm.Zoom2 {
+		if strings.Contains(m.Path, "benchmarks") {
+			t.Errorf("benchmarks/ should be excluded from scan, found module: %s", m.Path)
+		}
+	}
+}
+
 func TestSeedTypeMultiplier(t *testing.T) {
 	explore := IntentProfiles[IntentExplore]
 	if m := explore.TypeMultiplier("seed"); m != 1.2 {

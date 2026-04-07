@@ -54,7 +54,7 @@ var skipDirs = map[string]bool{
 	".nx-cache": true, ".github": true, ".changeset": true, ".superpowers": true,
 	".turbo": true, ".cache": true, ".parcel-cache": true, ".output": true,
 	".nuxt": true, ".svelte-kit": true, "tmp": true, "temp": true, "logs": true,
-	".vexp": true,
+	".vexp": true, "benchmarks": true,
 	// Python virtual environments & tool caches
 	".venv": true, "venv": true, ".virtualenv": true, "env": true, ".env": true,
 	".tox": true, ".mypy_cache": true, ".pytest_cache": true, ".ruff_cache": true,
