@@ -379,10 +379,16 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 	}
 	defer cancel()
 
-	// 6. Store cancel func for UI cancellation
+	// 6. Register in running map; deregister on completion
 	e.mu.Lock()
-	e.running = &RunningTask{Plan: plan, Cancel: cancel}
+	e.running[plan.Name] = &RunningTask{Plan: plan, Cancel: cancel}
 	e.mu.Unlock()
+
+	defer func() {
+		e.mu.Lock()
+		delete(e.running, plan.Name)
+		e.mu.Unlock()
+	}()
 
 	// 7. Create a git worktree for isolation
 	workDir := plan.Project // fallback: run in project dir
@@ -609,15 +615,19 @@ Save memories when you:
 	_ = setFrontmatterField(plan.Path, "exit_code", strconv.Itoa(exitCode))
 	_ = setFrontmatterField(plan.Path, "report", reportPath)
 
-	// Log worktree location for inspection
+	// Worktree cleanup: remove directory on success, preserve on failure
 	if workDir != plan.Project {
-		lb.Append(fmt.Sprintf("[dispatch] worktree preserved at %s for inspection", workDir))
+		if status == "done" && e.Config.AutoCleanupWorktrees {
+			rmOut, rmErr := exec.Command("git", "-C", plan.Project, "worktree", "remove", workDir).CombinedOutput()
+			if rmErr != nil {
+				lb.Append(fmt.Sprintf("[dispatch] worktree cleanup failed: %s", strings.TrimSpace(string(rmOut))))
+			} else {
+				lb.Append(fmt.Sprintf("[dispatch] worktree cleaned up (branch %s preserved for merge)", branch))
+			}
+		} else {
+			lb.Append(fmt.Sprintf("[dispatch] worktree preserved at %s for inspection", workDir))
+		}
 	}
-
-	// 13. Clear running
-	e.mu.Lock()
-	e.running = nil
-	e.mu.Unlock()
 
 	return nil
 }
