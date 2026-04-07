@@ -133,11 +133,13 @@ func ExtractTags(filePath, lang string) ([]Tag, error) {
 		return nil, fmt.Errorf("ExtractTags: read %s: %w", filePath, err)
 	}
 
-	// gotreesitter's GLR parser can stack-overflow on large/complex files (known bug).
-	// Skip files over 100KB to avoid crashing the process.
-	parser := ts.NewParser(entry.lang)
-	tree, err := parser.Parse(data)
-	if err != nil {
+	// gotreesitter's GLR parser can panic on certain files (known bug).
+	// Use safe wrapper with recover() and skip files over 100KB.
+	if len(data) > 100*1024 {
+		return nil, nil
+	}
+	tree, err := safeTreeSitterParse(entry.lang, data)
+	if err != nil || tree == nil {
 		return nil, nil // skip unparseable files
 	}
 	defer tree.Release()

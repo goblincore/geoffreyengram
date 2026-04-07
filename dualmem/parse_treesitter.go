@@ -5,12 +5,27 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 
 	ts "github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammars"
 )
+
+// safeTreeSitterParse wraps tree-sitter parsing with panic recovery.
+// gotreesitter v0.13.3 can panic on certain valid files due to GLR parser bugs.
+func safeTreeSitterParse(lang *ts.Language, data []byte) (tree *ts.Tree, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			tree = nil
+			err = fmt.Errorf("tree-sitter panic: %v", r)
+		}
+	}()
+	parser := ts.NewParser(lang)
+	tree, err = parser.Parse(data)
+	return
+}
 
 // Thresholds for promoting a file to its own module entry.
 const (
@@ -127,8 +142,16 @@ func parseTSModule(relPath string, files []string) *ModuleMap {
 
 // classifyFileSignificance checks whether a single file is significant enough
 // to warrant its own module entry (rather than being grouped with the directory).
-func classifyFileSignificance(filePath string, cfg *langConfig) fileSignificance {
-	sig := fileSignificance{
+// Wrapped with recover() because gotreesitter can panic on certain files.
+func classifyFileSignificance(filePath string, cfg *langConfig) (sig fileSignificance) {
+	defer func() {
+		if r := recover(); r != nil {
+			// gotreesitter panicked — return what we have
+			sig.isSignificant = sig.lineCount >= significantLineThreshold
+		}
+	}()
+
+	sig = fileSignificance{
 		path:     filePath,
 		baseName: filepath.Base(filePath),
 	}
@@ -139,38 +162,16 @@ func classifyFileSignificance(filePath string, cfg *langConfig) fileSignificance
 	}
 	sig.lineCount = bytes.Count(data, []byte("\n")) + 1
 
+	// Use line-count + regex heuristics instead of tree-sitter parsing.
+	// gotreesitter v0.13.3 has native SIGSEGV bugs that crash the process
+	// on certain valid TS files — Go recover() can't catch native crashes.
 	if cfg.lang == nil {
 		sig.isSignificant = sig.lineCount >= significantLineThreshold
 		return sig
 	}
 
-	parser := ts.NewParser(cfg.lang)
-	tree, err := parser.Parse(data)
-	if err != nil {
-		sig.isSignificant = sig.lineCount >= significantLineThreshold
-		return sig
-	}
-	defer tree.Release()
-	root := tree.RootNode()
-
-	// Count exported types
-	if cfg.typeQuery != "" {
-		extractCaptures(root, cfg.lang, data, cfg.typeQuery, func(text string, node *ts.Node) {
-			sig.exportCount++
-		})
-	}
-	// Count exported entry points
-	if cfg.entryQuery != "" {
-		extractCaptures(root, cfg.lang, data, cfg.entryQuery, func(text string, node *ts.Node) {
-			// For TS, entryQuery only matches exports, so no isExported check needed.
-			// For other langs, apply the filter.
-			if cfg.isExported != nil && !cfg.isExported(text, data, node) {
-				return
-			}
-			sig.exportCount++
-		})
-	}
-
+	// Count exports via regex instead of tree-sitter AST
+	sig.exportCount = bytes.Count(data, []byte("export "))
 	sig.isSignificant = sig.exportCount >= significantExportThreshold || sig.lineCount >= significantLineThreshold
 	return sig
 }
@@ -261,13 +262,14 @@ func parseRustModule(relPath string, files []string) *ModuleMap {
 	return mod
 }
 
-// parseWithTreeSitter is the generic tree-sitter extraction pipeline.
+// parseWithTreeSitter extracts module info from source files.
+// NOTE: tree-sitter parsing is DISABLED for the codemap path because
+// gotreesitter v0.13.3 has native SIGSEGV bugs on certain files that
+// cannot be caught by Go's recover(). Uses regex extraction instead.
 func parseWithTreeSitter(relPath string, files []string, cfg *langConfig) *ModuleMap {
-	if len(files) == 0 || cfg.lang == nil {
+	if len(files) == 0 {
 		return nil
 	}
-
-	parser := ts.NewParser(cfg.lang)
 
 	typeSeen := make(map[string]bool)
 	entrySeen := make(map[string]bool)
@@ -282,78 +284,9 @@ func parseWithTreeSitter(relPath string, files []string, cfg *langConfig) *Modul
 			continue
 		}
 
-		tree, err := parser.Parse(data)
-		if err != nil {
-			continue
-		}
-		root := tree.RootNode()
-
-		// Extract types
-		if cfg.typeQuery != "" {
-			extractCaptures(root, cfg.lang, data, cfg.typeQuery, func(text string, node *ts.Node) {
-				label := fmt.Sprintf("class %s", text)
-				if cfg.langName == "rust" {
-					parent := node.Parent()
-					if parent != nil {
-						switch parent.Type(cfg.lang) {
-						case "struct_item":
-							label = "struct " + text
-						case "enum_item":
-							label = "enum " + text
-						case "trait_item":
-							label = "trait " + text
-						}
-					}
-				}
-				if !typeSeen[label] {
-					typeSeen[label] = true
-					types = append(types, label)
-				}
-			})
-		}
-
-		// Extract entry points (exported/public functions only)
-		if cfg.entryQuery != "" {
-			extractCaptures(root, cfg.lang, data, cfg.entryQuery, func(text string, node *ts.Node) {
-				// For languages with export conventions, filter to public only
-				if cfg.isExported != nil && !cfg.isExported(text, data, node) {
-					return
-				}
-				entry := text + "()"
-				if !entrySeen[entry] {
-					entrySeen[entry] = true
-					entries = append(entries, entry)
-				}
-			})
-		}
-
-		// Extract imports
-		if cfg.importQuery != "" {
-			extractCaptures(root, cfg.lang, data, cfg.importQuery, func(text string, node *ts.Node) {
-				if !importSeen[text] {
-					importSeen[text] = true
-					imports = append(imports, text)
-				}
-			})
-		}
-
-		// Extract private identifiers
-		if cfg.identQuery != "" {
-			extractCaptures(root, cfg.lang, data, cfg.identQuery, func(text string, node *ts.Node) {
-				if entrySeen[text+"()"] {
-					return
-				}
-				if cfg.isExported != nil && cfg.isExported(text, data, node) {
-					return
-				}
-				if !identSeen[text] {
-					identSeen[text] = true
-					idents = append(idents, text)
-				}
-			})
-		}
-
-		tree.Release()
+		// Regex-based extraction — safe, no native code panics
+		extractModuleInfoRegex(data, typeSeen, entrySeen, importSeen, identSeen,
+			&types, &entries, &imports, &idents)
 	}
 
 	// Apply caps
@@ -383,6 +316,86 @@ func parseWithTreeSitter(relPath string, files []string, cfg *langConfig) *Modul
 		FileCount:   len(files),
 		Imports:     imports,
 		Identifiers: idents,
+	}
+}
+
+// extractModuleInfoRegex extracts types, exports, imports, and identifiers
+// from source code using regex patterns. Safe fallback when tree-sitter
+// parsing is unavailable or unsafe.
+var (
+	reExportFunc   = regexp.MustCompile(`(?m)^export\s+(?:async\s+)?function\s+(\w+)`)
+	reExportConst  = regexp.MustCompile(`(?m)^export\s+(?:const|let|var)\s+(\w+)`)
+	reExportClass  = regexp.MustCompile(`(?m)^export\s+(?:default\s+)?class\s+(\w+)`)
+	reExportType   = regexp.MustCompile(`(?m)^export\s+(?:type|interface|enum)\s+(\w+)`)
+	reImportFrom   = regexp.MustCompile(`(?m)from\s+['"]([^'"]+)['"]`)
+	rePyDef        = regexp.MustCompile(`(?m)^(?:def|class)\s+(\w+)`)
+	reRsItem       = regexp.MustCompile(`(?m)^pub\s+(?:fn|struct|enum|trait|type)\s+(\w+)`)
+)
+
+func extractModuleInfoRegex(data []byte, typeSeen, entrySeen, importSeen, identSeen map[string]bool,
+	types, entries, imports, idents *[]string) {
+
+	// TypeScript/JavaScript exports
+	for _, m := range reExportClass.FindAllSubmatch(data, -1) {
+		label := "class " + string(m[1])
+		if !typeSeen[label] {
+			typeSeen[label] = true
+			*types = append(*types, label)
+		}
+	}
+	for _, m := range reExportType.FindAllSubmatch(data, -1) {
+		label := "type " + string(m[1])
+		if !typeSeen[label] {
+			typeSeen[label] = true
+			*types = append(*types, label)
+		}
+	}
+	for _, m := range reExportFunc.FindAllSubmatch(data, -1) {
+		entry := string(m[1]) + "()"
+		if !entrySeen[entry] {
+			entrySeen[entry] = true
+			*entries = append(*entries, entry)
+		}
+	}
+	for _, m := range reExportConst.FindAllSubmatch(data, -1) {
+		name := string(m[1])
+		if !identSeen[name] {
+			identSeen[name] = true
+			*idents = append(*idents, name)
+		}
+	}
+	for _, m := range reImportFrom.FindAllSubmatch(data, -1) {
+		imp := string(m[1])
+		if !importSeen[imp] {
+			importSeen[imp] = true
+			*imports = append(*imports, imp)
+		}
+	}
+	// Python
+	for _, m := range rePyDef.FindAllSubmatch(data, -1) {
+		name := string(m[1])
+		if name[0] >= 'A' && name[0] <= 'Z' {
+			label := "class " + name
+			if !typeSeen[label] {
+				typeSeen[label] = true
+				*types = append(*types, label)
+			}
+		} else {
+			entry := name + "()"
+			if !entrySeen[entry] {
+				entrySeen[entry] = true
+				*entries = append(*entries, entry)
+			}
+		}
+	}
+	// Rust
+	for _, m := range reRsItem.FindAllSubmatch(data, -1) {
+		name := string(m[1])
+		label := "struct " + name
+		if !typeSeen[label] {
+			typeSeen[label] = true
+			*types = append(*types, label)
+		}
 	}
 }
 
