@@ -38,6 +38,10 @@ type CLIConfig struct {
 		EmbeddingModel     string `yaml:"embedding_model"`
 		EmbeddingAPIKeyEnv string `yaml:"embedding_api_key_env"`
 		EmbeddingDimension int    `yaml:"embedding_dimension"`
+		SynthesisProvider  string `yaml:"synthesis_provider"`   // "anthropic" or "" (use main summarizer)
+		SynthesisModel     string `yaml:"synthesis_model"`      // e.g. "glm-5.1"
+		SynthesisAPIKeyEnv string `yaml:"synthesis_api_key_env"` // e.g. "ZAI_API_KEY"
+		SynthesisBaseURL   string `yaml:"synthesis_base_url"`   // e.g. "https://api.z.ai/api/anthropic"
 	} `yaml:"providers"`
 	Pipeline struct {
 		EpisodeInterval string `yaml:"episode_interval"`
@@ -59,10 +63,16 @@ func loadConfig() CLIConfig {
 	cfg.Pipeline.ArcInterval = "24h"
 	cfg.Pipeline.ProfileInterval = "168h"
 
-	// Try loading config file
+	// Try loading config file (check XDG + macOS paths)
 	configDir, _ := os.UserConfigDir()
 	configPath := filepath.Join(configDir, "dualmem", "config.yaml")
 	data, err := os.ReadFile(configPath)
+	if err != nil {
+		// Fallback to ~/.config (XDG default, common on macOS dev setups)
+		home, _ := os.UserHomeDir()
+		configPath = filepath.Join(home, ".config", "dualmem", "config.yaml")
+		data, err = os.ReadFile(configPath)
+	}
 	if err == nil {
 		yaml.Unmarshal(data, &cfg)
 	}
@@ -164,12 +174,26 @@ func newEngine(cfg CLIConfig) (*dualmem.Engine, error) {
 		classifier = ec
 	}
 
+	// Optional: stronger model for Consult/Synthesize
+	var synthesisGen dualmem.TextGenerator
+	if cfg.Providers.SynthesisProvider == "anthropic" {
+		synthKey := os.Getenv(cfg.Providers.SynthesisAPIKeyEnv)
+		if synthKey != "" {
+			synthesisGen = dualmem.NewAnthropicSummarizer(
+				synthKey,
+				cfg.Providers.SynthesisBaseURL,
+				cfg.Providers.SynthesisModel,
+			)
+		}
+	}
+
 	cwd, _ := os.Getwd()
 	return dualmem.New(dualmem.Config{
 		SQLitePath:            cfg.Storage.SQLitePath,
 		EmbeddingProvider:     embedder,
 		Classifier:            classifier,
 		Summarizer:            dualmem.NewGeminiSummarizer(apiKey, ""),
+		SynthesisGenerator:    synthesisGen,
 		Sectors:               sectors,
 		MaxDetailPerUser:      100,
 		ImportanceTheta:       0.65,
@@ -2204,15 +2228,31 @@ func cmdConsult(cfg CLIConfig) {
 	fs := flag.NewFlagSet("consult", flag.ExitOnError)
 	ns := fs.String("ns", "", "Namespace")
 	budget := fs.Int("budget", 2000, "Token budget")
-	fs.Parse(os.Args[2:])
+	compare := fs.Bool("compare", false, "Run both Flash Lite and synthesis model, show side-by-side")
+	// Use filterFlags to handle flags mixed with positional args
+	// (Go's flag.Parse stops at first non-flag argument)
+	fs.Parse(filterFlags(os.Args[2:]))
 
-	query := strings.Join(fs.Args(), " ")
+	// Extract query from non-flag positional args
+	var queryParts []string
+	for _, arg := range os.Args[2:] {
+		if !strings.HasPrefix(arg, "-") {
+			// Skip flag values (already consumed by filterFlags)
+			queryParts = append(queryParts, arg)
+		}
+	}
+	query := strings.Join(queryParts, " ")
 	if query == "" {
-		fmt.Fprintf(os.Stderr, "usage: dualmem consult \"query\" [--budget N] [--ns namespace]\n")
+		fmt.Fprintf(os.Stderr, "usage: dualmem consult \"query\" [--budget N] [--ns namespace] [--compare]\n")
 		os.Exit(1)
 	}
 
 	namespace := resolveNamespace(*ns, cfg)
+
+	if *compare {
+		cmdConsultCompare(cfg, namespace, query, *budget)
+		return
+	}
 
 	engine, err := newEngine(cfg)
 	if err != nil {
@@ -2229,6 +2269,106 @@ func cmdConsult(cfg CLIConfig) {
 	}
 
 	fmt.Print(report.FormatText())
+}
+
+// cmdConsultCompare runs the same synthesis prompt through both Flash Lite and
+// the configured synthesis model, printing results side-by-side.
+// Uses ConsultCompare which gathers evidence once and calls both generators.
+func cmdConsultCompare(cfg CLIConfig, namespace, query string, budget int) {
+	synthKey := os.Getenv(cfg.Providers.SynthesisAPIKeyEnv)
+	if synthKey == "" {
+		fmt.Fprintf(os.Stderr, "error: --compare requires synthesis provider config (set providers.synthesis_* in config.yaml)\n")
+		os.Exit(1)
+	}
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	apiKey := os.Getenv(cfg.Providers.EmbeddingAPIKeyEnv)
+	if apiKey == "" {
+		apiKey = os.Getenv("GOOGLE_API_KEY")
+	}
+
+	flashGen := dualmem.NewGeminiSummarizer(apiKey, "")
+	synthModel := cfg.Providers.SynthesisModel
+	if synthModel == "" {
+		synthModel = "glm-5.1"
+	}
+	synthGen := dualmem.NewAnthropicSummarizer(synthKey, cfg.Providers.SynthesisBaseURL, synthModel)
+
+	ctx := context.Background()
+
+	// Gather evidence once via normal Consult (may cache hit — that's fine)
+	fmt.Fprintf(os.Stderr, "Gathering structural evidence...\n")
+	report, err := engine.Consult(ctx, namespace, query, budget)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Build the synthesis prompt (same one Consult uses internally)
+	prompt := fmt.Sprintf(
+		"Given the following structural evidence about %q in this codebase, "+
+			"write a concise explanation (200-400 words) of how this subsystem works.\n\n"+
+			"Include: key files and their roles, data/control flow between components, "+
+			"important design decisions or constraints.\n\n"+
+			"Do NOT include code snippets. Focus on conceptual understanding that would "+
+			"help a developer work on this subsystem correctly.", query)
+	if report.Evidence != "" {
+		prompt += "\n\n[Structural Evidence]\n" + report.Evidence
+	}
+	var fileList []string
+	for _, f := range report.RelevantFiles {
+		entry := f.Path
+		if f.Desc != "" {
+			entry += " — " + f.Desc
+		}
+		fileList = append(fileList, entry)
+	}
+	if len(fileList) > 0 {
+		prompt += "\n\n[Relevant Files]\n" + strings.Join(fileList, "\n")
+	}
+
+	// Run both generators against the same prompt
+	fmt.Fprintf(os.Stderr, "Running Flash Lite...\n")
+	start := time.Now()
+	flashResult, flashErr := flashGen.GenerateText(ctx, prompt, 500)
+	flashDur := time.Since(start)
+
+	fmt.Fprintf(os.Stderr, "Running %s...\n", synthModel)
+	start = time.Now()
+	synthResult, synthErr := synthGen.GenerateText(ctx, prompt, 500)
+	synthDur := time.Since(start)
+
+	// Print comparison
+	sep := strings.Repeat("═", 60)
+	fmt.Printf("\n%s\n", sep)
+	fmt.Printf("QUERY: %s\n", query)
+	fmt.Printf("%s\n\n", sep)
+
+	fmt.Printf("── Flash Lite (%.1fs) ──\n\n", flashDur.Seconds())
+	if flashErr != nil {
+		fmt.Printf("ERROR: %v\n", flashErr)
+	} else {
+		fmt.Println(flashResult)
+	}
+
+	fmt.Printf("\n── %s (%.1fs) ──\n\n", synthModel, synthDur.Seconds())
+	if synthErr != nil {
+		fmt.Printf("ERROR: %v\n", synthErr)
+	} else {
+		fmt.Println(synthResult)
+	}
+
+	fmt.Printf("\n%s\n", sep)
+	flashTokens := len(strings.Fields(flashResult)) * 4 / 3
+	synthTokens := len(strings.Fields(synthResult)) * 4 / 3
+	fmt.Printf("Flash Lite: ~%d tokens, %.1fs | %s: ~%d tokens, %.1fs\n",
+		flashTokens, flashDur.Seconds(), synthModel, synthTokens, synthDur.Seconds())
 }
 
 // --- Stats command ---

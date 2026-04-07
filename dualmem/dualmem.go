@@ -1455,9 +1455,9 @@ func (e *Engine) Consult(ctx context.Context, namespace, query string, budget in
 		docTopic = kdocs[0].Topic
 	} else {
 		// Cache miss — synthesize
-		gen, ok := e.cfg.Summarizer.(TextGenerator)
-		if !ok {
-			return nil, fmt.Errorf("consult: summarizer does not implement TextGenerator")
+		gen, err := e.getSynthesisGenerator()
+		if err != nil {
+			return nil, fmt.Errorf("consult: %w", err)
 		}
 
 		// Build synthesis prompt
@@ -2763,9 +2763,23 @@ func accessRecencyFactor(lastAccessed time.Time, memType string, now time.Time) 
 // --- Seed memories ---
 
 // TextGenerator is an optional interface for LLM text generation.
-// Implemented by GeminiSummarizer.
+// Implemented by GeminiSummarizer and AnthropicSummarizer.
 type TextGenerator interface {
 	GenerateText(ctx context.Context, prompt string, maxTokens int) (string, error)
+}
+
+// getSynthesisGenerator returns the best available TextGenerator for
+// high-stakes synthesis (Consult, Synthesize, Seed). Prefers the dedicated
+// SynthesisGenerator if configured, falls back to the main Summarizer.
+func (e *Engine) getSynthesisGenerator() (TextGenerator, error) {
+	if e.cfg.SynthesisGenerator != nil {
+		return e.cfg.SynthesisGenerator, nil
+	}
+	gen, ok := e.cfg.Summarizer.(TextGenerator)
+	if !ok {
+		return nil, fmt.Errorf("dualmem: summarizer does not implement TextGenerator")
+	}
+	return gen, nil
 }
 
 // SeedResult describes what SeedMemories produced.
@@ -2821,9 +2835,9 @@ func (e *Engine) SeedMemories(ctx context.Context, userID string, force bool, dr
 	}
 
 	// Check for text generator (only needed for non-dry-run)
-	gen, ok := e.cfg.Summarizer.(TextGenerator)
-	if !ok {
-		return nil, fmt.Errorf("dualmem: summarizer does not support GenerateText (need GeminiSummarizer)")
+	gen, err := e.getSynthesisGenerator()
+	if err != nil {
+		return nil, err
 	}
 
 	// Delete existing seeds if force
@@ -2898,9 +2912,13 @@ func (e *Engine) Synthesize(ctx context.Context, namespace string, opts *Synthes
 	result := &SynthesizeResult{DryRun: opts.DryRun}
 
 	// Get text generator
-	gen, ok := e.cfg.Summarizer.(TextGenerator)
-	if !ok && !opts.DryRun {
-		return nil, fmt.Errorf("dualmem: summarizer does not support GenerateText (need GeminiSummarizer)")
+	var gen TextGenerator
+	if !opts.DryRun {
+		var err error
+		gen, err = e.getSynthesisGenerator()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Load existing docs

@@ -579,7 +579,8 @@ type Config struct {
 	EmbeddingProvider EmbeddingProvider
 	Classifier        SectorClassifier
 	EntityExtractor   EntityExtractor
-	Summarizer        SummarizerProvider // LLM for episode/arc/profile summarization
+	Summarizer         SummarizerProvider // LLM for episode/arc/profile summarization
+	SynthesisGenerator TextGenerator      // Optional stronger model for Consult/Synthesize (falls back to Summarizer)
 
 	// Sector classification
 	Sectors *SectorConfig // nil = CodingSectors (default)
