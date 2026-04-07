@@ -13,7 +13,12 @@
       "modules": [
         "packages/learn-card-core/"
       ],
-      "concepts": ["addPluginToLearnCard", "generateLearnCard", "Plugin", "LearnCard"],
+      "concepts": [
+        "addPluginToLearnCard",
+        "generateLearnCard",
+        "Plugin",
+        "LearnCard"
+      ],
       "explanation": "The addPluginToLearnCard function in wallet.ts takes an existing LearnCard and a new Plugin, then calls generateLearnCard with the combined plugins array. generateLearnCard assembles control planes (read, store, index, cache, id, context) by iterating plugins that implement each plane."
     }
   },
@@ -32,7 +37,13 @@
       "modules": [
         "packages/plugins/expiration/"
       ],
-      "concepts": ["expirationPlugin", "expirationDate", "validFrom", "validUntil", "verifyCredential"],
+      "concepts": [
+        "expirationPlugin",
+        "expirationDate",
+        "validFrom",
+        "validUntil",
+        "verifyCredential"
+      ],
       "explanation": "The expirationPlugin in packages/plugins/expiration/src/index.ts wraps the underlying verifyCredential method and adds checks for expirationDate, validFrom, and validUntil fields on the credential, pushing errors like 'Credential is expired' or 'Credential is not valid yet' into the verification result."
     }
   },
@@ -51,7 +62,16 @@
       "modules": [
         "apps/learn-card-app/src/pages/appStoreDeveloper/partner-onboarding/components/CredentialBuilder/"
       ],
-      "concepts": ["CredentialInfoSection", "IssuerSection", "AchievementSection", "RecipientSection", "EvidenceSection", "DatesSection", "CustomFieldsSection", "OBv3CredentialTemplate"],
+      "concepts": [
+        "CredentialInfoSection",
+        "IssuerSection",
+        "AchievementSection",
+        "RecipientSection",
+        "EvidenceSection",
+        "DatesSection",
+        "CustomFieldsSection",
+        "OBv3CredentialTemplate"
+      ],
       "explanation": "CredentialBuilder.tsx is the main interactive OBv3 credential template builder in the partner onboarding flow. It renders seven configurable sections (CredentialInfo, Issuer, Achievement, Recipient, Evidence, Dates, CustomFields), a JSON preview tab, and supports template presets and client-side JSON-LD validation."
     }
   },
@@ -82,7 +102,21 @@
         "packages/plugins/chapi/",
         "packages/plugins/learn-card/"
       ],
-      "concepts": ["DynamicLoaderPlugin", "CryptoPlugin", "getDidKitPlugin", "getDidKeyPlugin", "getEncryptionPlugin", "getVCPlugin", "getVCTemplatesPlugin", "getLearnCloudPlugin", "expirationPlugin", "getEthereumPlugin", "getVpqrPlugin", "getCHAPIPlugin", "getLearnCardPlugin"],
+      "concepts": [
+        "DynamicLoaderPlugin",
+        "CryptoPlugin",
+        "getDidKitPlugin",
+        "getDidKeyPlugin",
+        "getEncryptionPlugin",
+        "getVCPlugin",
+        "getVCTemplatesPlugin",
+        "getLearnCloudPlugin",
+        "expirationPlugin",
+        "getEthereumPlugin",
+        "getVpqrPlugin",
+        "getCHAPIPlugin",
+        "getLearnCardPlugin"
+      ],
       "explanation": "learnCardFromSeed.ts chains plugins in order: DynamicLoader -> Crypto -> DidKit -> DidKey -> Encryption -> VC -> VC Templates -> LearnCloud -> Expiration -> Ethereum -> VPQR -> CHAPI -> LearnCard. Each plugin extends the wallet with new control planes or methods, and later plugins depend on planes provided by earlier ones."
     }
   },
@@ -103,7 +137,15 @@
         "packages/plugins/learn-card-network/",
         "packages/learn-card-network/brain-client/"
       ],
-      "concepts": ["getClient", "getApiTokenClient", "getDidAuthVp", "getChallenges", "callbackLink", "Authorization", "Bearer"],
+      "concepts": [
+        "getClient",
+        "getApiTokenClient",
+        "getDidAuthVp",
+        "getChallenges",
+        "callbackLink",
+        "Authorization",
+        "Bearer"
+      ],
       "explanation": "The network plugin (plugin.ts) calls getClient from brain-client, passing a didAuthFunction that invokes learnCard.invoke.getDidAuthVp with a challenge. The brain-client (index.ts) pre-fetches ~95 challenges from the server, then on each request pops a challenge, calls didAuthFunction to get a signed JWT, and sets the Authorization: Bearer header. A callbackLink replenishes the challenge pool. API-key mode uses getApiTokenClient which simply sets the static token as the Bearer header."
     }
   },
@@ -122,7 +164,21 @@
       "modules": [
         "packages/learn-card-core/"
       ],
-      "concepts": ["ControlPlane", "read", "store", "index", "cache", "id", "context", "ReadPlane", "StorePlane", "IndexPlane", "CachePlane", "IdPlane", "ContextPlane"],
+      "concepts": [
+        "ControlPlane",
+        "read",
+        "store",
+        "index",
+        "cache",
+        "id",
+        "context",
+        "ReadPlane",
+        "StorePlane",
+        "IndexPlane",
+        "CachePlane",
+        "IdPlane",
+        "ContextPlane"
+      ],
       "explanation": "Control planes are the six standardized interfaces that plugins can implement: read (resolve URIs to VCs/VPs), store (upload credentials), index (query credential records), cache (caching layer), id (DID and keypair management), and context (JSON-LD context resolution). The ControlPlane type is defined in planes.ts. wallet.ts generates the aggregate planes by iterating over all plugins."
     }
   },
@@ -136,14 +192,30 @@
     "ground_truth": {
       "files": [
         "apps/learn-card-app/src/pages/consentFlow/useConsentFlow.tsx",
+        "apps/learn-card-app/src/pages/consentFlow/useConsentFlowCredentials.ts",
         "apps/learn-card-app/src/pages/consentFlow/FullScreenConsentFlow.tsx",
-        "apps/learn-card-app/src/pages/consentFlow/ExternalConsentFlowDoor.tsx"
+        "apps/learn-card-app/src/pages/consentFlow/ExternalConsentFlowDoor.tsx",
+        "apps/learn-card-app/src/pages/consentFlow/ConsentFlowCredentialAccessToggles.tsx",
+        "apps/learn-card-app/src/pages/consentFlow/ConsentFlowPersonalAccessToggles.tsx",
+        "apps/learn-card-app/src/pages/consentFlow/ConsentFlowReadSharing.tsx",
+        "apps/learn-card-app/src/pages/consentFlow/ConsentFlowWriteSharing.tsx",
+        "apps/learn-card-app/src/pages/consentFlow/ConsentFlowPrivacyAndData.tsx",
+        "apps/learn-card-app/src/pages/consentFlow/GameFlow/FullScreenGameFlow.tsx"
       ],
       "modules": [
         "apps/learn-card-app/src/pages/consentFlow/"
       ],
-      "concepts": ["useConsentFlow", "ConsentFlowContractDetails", "ConsentFlowTerms", "useConsentedContracts", "useContract", "useUpdateTerms", "guardianConsent", "FullScreenConsentFlow"],
-      "explanation": "The consent flow is driven by useConsentFlow hook which loads contract details, checks if the user has already consented, and opens a modal (FullScreenConsentFlow or GameFlow for children requiring guardian consent). It uses ConsentFlowContractDetails and ConsentFlowTerms types from @learncard/types. Users can grant/update data sharing permissions including read/write access to credentials and personal data."
+      "concepts": [
+        "useConsentFlow",
+        "ConsentFlowContractDetails",
+        "ConsentFlowTerms",
+        "useConsentedContracts",
+        "useContract",
+        "useUpdateTerms",
+        "guardianConsent",
+        "FullScreenConsentFlow"
+      ],
+      "explanation": "The consent flow is a large subsystem with 40+ components in apps/learn-card-app/src/pages/consentFlow/. Key orchestration files are useConsentFlow.tsx (main hook), useConsentFlowCredentials.ts (credential data), FullScreenConsentFlow.tsx (main modal), and ExternalConsentFlowDoor.tsx (entry point). Sub-flows include GameFlow/ for children requiring guardian consent, AiInsights/ for AI session access, and numerous UI components for read/write sharing toggles, credential access, privacy controls, and sync operations."
     }
   },
   {
@@ -162,7 +234,16 @@
       "modules": [
         "packages/learn-card-types/"
       ],
-      "concepts": ["VCValidator", "VPValidator", "UnsignedVCValidator", "UnsignedVPValidator", "ContextValidator", "AchievementCriteriaValidator", "ImageValidator", "CredentialRecord"],
+      "concepts": [
+        "VCValidator",
+        "VPValidator",
+        "UnsignedVCValidator",
+        "UnsignedVPValidator",
+        "ContextValidator",
+        "AchievementCriteriaValidator",
+        "ImageValidator",
+        "CredentialRecord"
+      ],
       "explanation": "The learn-card-types package defines Zod validators and TypeScript types for W3C Verifiable Credentials. vc.ts defines core types like ContextValidator, AchievementCriteriaValidator, ImageValidator, AddressValidator, and the full VC/VP validators. obv3.ts covers Open Badges v3 specific types. These validators are used throughout the SDK for runtime type checking."
     }
   },
@@ -180,7 +261,13 @@
       "modules": [
         "packages/plugins/vc/"
       ],
-      "concepts": ["issueCredential", "hasV2Context", "Ed25519Signature2018", "Ed25519Signature2020", "proofType"],
+      "concepts": [
+        "issueCredential",
+        "hasV2Context",
+        "Ed25519Signature2018",
+        "Ed25519Signature2020",
+        "proofType"
+      ],
       "explanation": "In issueCredential.ts, the issueCredential function checks if the credential's @context includes a v2 credentials URL. If so, and the signing options specify Ed25519Signature2018, it automatically upgrades to Ed25519Signature2020 because Ed25519Signature2018 is incompatible with credentials v2. This prevents silent signing failures."
     }
   },
@@ -198,7 +285,15 @@
       "modules": [
         "packages/learn-card-core/"
       ],
-      "concepts": ["generateReadPlane", "CacheStrategy", "cache-first", "skip-cache", "cache-only", "getVc", "setVc"],
+      "concepts": [
+        "generateReadPlane",
+        "CacheStrategy",
+        "cache-first",
+        "skip-cache",
+        "cache-only",
+        "getVc",
+        "setVc"
+      ],
       "explanation": "In wallet.ts's generateReadPlane function, when cache is 'cache-first': the read plane first checks cache via learnCard.cache.getVc(uri). If a cached response exists, it immediately returns it but also fires an async background revalidation (learnCard.read.get with skip-cache) that updates the cache with the fresh value via setVc. This is a stale-while-revalidate pattern that could serve stale data while refreshing in the background."
     }
   },
@@ -224,7 +319,14 @@
         "apps/learn-card-app/",
         "services/"
       ],
-      "concepts": ["learn-card-core", "learn-card-init", "learn-card-types", "plugins", "learn-card-network", "lca-api-client"],
+      "concepts": [
+        "learn-card-core",
+        "learn-card-init",
+        "learn-card-types",
+        "plugins",
+        "learn-card-network",
+        "lca-api-client"
+      ],
       "explanation": "The monorepo has four main layers: (1) learn-card-core provides the plugin-based wallet engine and type system, (2) packages/plugins/ contains 25+ individual plugins (VC, DID key, encryption, network, etc.), (3) learn-card-init provides high-level initializers that compose core + plugins into ready-to-use wallets, (4) apps/ contains the React app and services/ contains backend services. learn-card-types defines shared Zod validators, and learn-card-network provides tRPC clients."
     }
   },
@@ -243,7 +345,14 @@
       "modules": [
         "packages/learn-card-core/"
       ],
-      "concepts": ["Plugin", "AddImplicitLearnCardArgument", "GetPluginMethods", "GetPlanesForPlugins", "ControlPlane", "FilterForPlane"],
+      "concepts": [
+        "Plugin",
+        "AddImplicitLearnCardArgument",
+        "GetPluginMethods",
+        "GetPlanesForPlugins",
+        "ControlPlane",
+        "FilterForPlane"
+      ],
       "explanation": "The Plugin generic type accepts Name, ControlPlanes, Methods, DependentControlPlanes, and DependentMethods. Plugins declare control planes by including read/store/index/cache/id/context properties. Methods get an implicit LearnCard argument prepended via AddImplicitLearnCardArgument. GetPlanesForPlugins extracts all control planes from a plugin array, and GetPluginMethods merges all plugin methods into a union intersection. The LearnCard type conditionally includes plane accessors based on which planes are provided."
     }
   },
@@ -263,7 +372,14 @@
       "modules": [
         "packages/learn-card-core/"
       ],
-      "concepts": ["ControlPlane", "Plugin", "LearnCard", "generateLearnCard", "PluginReadPlane", "getPlaneProviders"],
+      "concepts": [
+        "ControlPlane",
+        "Plugin",
+        "LearnCard",
+        "generateLearnCard",
+        "PluginReadPlane",
+        "getPlaneProviders"
+      ],
       "explanation": "Adding a revocation plane is structurally feasible but would require changes across several core files. The ControlPlane union in planes.ts would need a 'revocation' member. New types (PluginRevocationPlane, LearnCardRevocationPlane) would need to be defined. wallet.ts would need a generateRevocationPlane function. The Plugin type and LearnCard type in wallet.ts would need conditional revocation plane support. This mirrors the existing pattern used by all six planes but touches core type infrastructure that all plugins depend on."
     }
   },
@@ -284,7 +400,14 @@
         "packages/plugins/learn-card-network/",
         "packages/learn-card-network/brain-client/"
       ],
-      "concepts": ["getLearnCardNetworkPlugin", "getClient", "LCNClient", "ensureUser", "userData", "LearnCardNetworkPlugin"],
+      "concepts": [
+        "getLearnCardNetworkPlugin",
+        "getClient",
+        "LCNClient",
+        "ensureUser",
+        "userData",
+        "LearnCardNetworkPlugin"
+      ],
       "explanation": "This would be challenging because the network plugin maintains a single client, a single userData/profile state, and a single DID tied to that connection. The ensureUser closure captures a single userData variable. The brain-client's challenge pool is per-client. To support multiple connections, the plugin would need to be restructured to maintain a map of named connections, each with its own client instance, challenge pool, and profile state. Alternatively, multiple instances of the plugin could be added to the wallet, but the plugin system's name-based deduplication would need to handle this."
     }
   }
