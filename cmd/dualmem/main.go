@@ -1143,20 +1143,34 @@ func cmdSearchCode(cfg CLIConfig) {
 func printSearchResults(cm *dualmem.CodeMap, idx *dualmem.CodeIndex, query string, limit int, jsonOut bool, moduleOnly bool) {
 	if !moduleOnly {
 		fileResults := dualmem.SearchCodeMapFiles(cm, idx, query, limit)
+		docResults := dualmem.SearchCodeMapDocs(cm, idx, query, 3)
 		if jsonOut {
-			json.NewEncoder(os.Stdout).Encode(fileResults)
+			json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+				"files": fileResults,
+				"docs":  docResults,
+			})
 			return
 		}
 		for i, r := range fileResults {
 			fmt.Printf("  %d. %-35s score=%.4f (module: %s %.2f, file: %.2f)\n",
 				i+1, r.FilePath, r.CombinedScore, r.ModulePath, r.ModuleScore, r.FileScore)
 		}
+		if len(docResults) > 0 {
+			fmt.Println("\n  Related docs:")
+			for _, r := range docResults {
+				fmt.Printf("    - %-35s score=%.4f  %s\n", r.Path, r.HybridScore, r.Summary)
+			}
+		}
 		return
 	}
 
 	results := dualmem.SearchCodeMap(cm, idx, query, limit)
+	docResults := dualmem.SearchCodeMapDocs(cm, idx, query, 3)
 	if jsonOut {
-		json.NewEncoder(os.Stdout).Encode(results)
+		json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+			"modules": results,
+			"docs":    docResults,
+		})
 		return
 	}
 	for i, r := range results {
@@ -1170,6 +1184,12 @@ func printSearchResults(cm *dualmem.CodeMap, idx *dualmem.CodeIndex, query strin
 		}
 		if len(r.Imports) > 0 && len(r.Imports) <= 8 {
 			fmt.Printf("     Imports: %s\n", strings.Join(r.Imports, ", "))
+		}
+	}
+	if len(docResults) > 0 {
+		fmt.Println("\n  Related docs:")
+		for _, r := range docResults {
+			fmt.Printf("    - %-35s score=%.4f  %s\n", r.Path, r.HybridScore, r.Summary)
 		}
 	}
 }

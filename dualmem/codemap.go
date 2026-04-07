@@ -144,7 +144,9 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 		var mod *ModuleMap
 		switch {
 		case len(d.goFiles) > 0:
-			mod = parseGoPackage(d.relPath, d.goFiles)
+			mods := parseGoPackageSplit(d.relPath, d.goFiles)
+			modules = append(modules, mods...)
+			continue
 		case len(d.tsFiles) > 0:
 			// TypeScript: split significant files into own modules
 			mods := parseTSModuleSplit(d.relPath, d.tsFiles)
@@ -203,103 +205,230 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 
 // --- Go AST parser ---
 
-func parseGoPackage(relPath string, goFiles []string) *ModuleMap {
+// goFileSymbols holds the symbols extracted from a single Go source file.
+type goFileSymbols struct {
+	path        string   // absolute path
+	relPath     string   // relative to repo root
+	types       []string // exported types
+	entryPoints []string // exported funcs
+	imports     []string // package imports
+	identifiers []string // unexported symbols
+	lineCount   int
+}
+
+// parseGoFile extracts symbols from a single Go file using the Go AST.
+func parseGoFile(filePath string, fset *token.FileSet) *goFileSymbols {
+	src, err := parser.ParseFile(fset, filePath, nil, parser.ParseComments)
+	if err != nil {
+		return nil
+	}
+
+	data, _ := os.ReadFile(filePath)
+	lineCount := 1
+	for _, b := range data {
+		if b == '\n' {
+			lineCount++
+		}
+	}
+
+	gf := &goFileSymbols{
+		path:      filePath,
+		lineCount: lineCount,
+	}
+	importSeen := make(map[string]bool)
+	identSeen := make(map[string]bool)
+
+	for _, decl := range src.Decls {
+		switch d := decl.(type) {
+		case *ast.GenDecl:
+			if d.Tok == token.IMPORT {
+				for _, spec := range d.Specs {
+					if imp, ok := spec.(*ast.ImportSpec); ok {
+						path := strings.Trim(imp.Path.Value, `"`)
+						if !importSeen[path] {
+							importSeen[path] = true
+							gf.imports = append(gf.imports, path)
+						}
+					}
+				}
+			}
+			for _, spec := range d.Specs {
+				if ts, ok := spec.(*ast.TypeSpec); ok {
+					if ts.Name.IsExported() {
+						kind := "type"
+						switch ts.Type.(type) {
+						case *ast.InterfaceType:
+							kind = "interface"
+						case *ast.StructType:
+							kind = "struct"
+						}
+						gf.types = append(gf.types, fmt.Sprintf("%s %s", kind, ts.Name.Name))
+					} else if !identSeen[ts.Name.Name] {
+						identSeen[ts.Name.Name] = true
+						gf.identifiers = append(gf.identifiers, ts.Name.Name)
+					}
+				}
+			}
+		case *ast.FuncDecl:
+			if d.Name.Name == "main" {
+				gf.entryPoints = append(gf.entryPoints, "main()")
+			} else if d.Name.IsExported() && d.Recv == nil {
+				gf.entryPoints = append(gf.entryPoints, d.Name.Name+"()")
+			} else if !d.Name.IsExported() && d.Recv == nil && !identSeen[d.Name.Name] {
+				identSeen[d.Name.Name] = true
+				gf.identifiers = append(gf.identifiers, d.Name.Name)
+			}
+		}
+	}
+	return gf
+}
+
+// isGoFileSignificant returns true if a file has enough symbols or lines to
+// warrant its own codemap entry (same thresholds as TS splitting).
+func isGoFileSignificant(gf *goFileSymbols) bool {
+	exportCount := len(gf.types) + len(gf.entryPoints)
+	return exportCount >= significantExportThreshold || gf.lineCount >= significantLineThreshold
+}
+
+// parseGoPackageSplit parses a Go package and splits significant files into
+// their own codemap entries, similar to TS file splitting.
+func parseGoPackageSplit(relPath string, goFiles []string) []ModuleMap {
 	if len(goFiles) == 0 {
 		return nil
 	}
 
 	fset := token.NewFileSet()
-	dir := filepath.Dir(goFiles[0])
 
-	pkgs, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool {
-		// Skip test files for the map
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, parser.ParseComments)
-	if err != nil {
-		return &ModuleMap{
-			Path:      relPath + "/",
-			Language:  "go",
-			FileCount: len(goFiles),
-			Summary:   fmt.Sprintf("Go package (%d files, parse error)", len(goFiles)),
+	// Filter out test files
+	var srcFiles []string
+	for _, f := range goFiles {
+		if !strings.HasSuffix(f, "_test.go") {
+			srcFiles = append(srcFiles, f)
 		}
 	}
+	if len(srcFiles) == 0 {
+		return nil
+	}
 
-	var types []string
-	var entryPoints []string
-	var imports []string
-	var identifiers []string
+	// Parse each file individually
+	var allFiles []*goFileSymbols
 	var pkgName string
 	isMain := false
-	importSeen := make(map[string]bool)
-	identSeen := make(map[string]bool)
-
-	for name, pkg := range pkgs {
-		pkgName = name
-		if name == "main" {
-			isMain = true
+	for _, f := range srcFiles {
+		gf := parseGoFile(f, fset)
+		if gf == nil {
+			continue
 		}
+		// Compute relative path
+		dir := filepath.Dir(f)
+		base := filepath.Base(f)
+		if relPath == "." {
+			gf.relPath = base
+		} else {
+			_ = dir
+			gf.relPath = relPath + "/" + base
+		}
+		allFiles = append(allFiles, gf)
 
-		for _, file := range pkg.Files {
-			for _, decl := range file.Decls {
-				switch d := decl.(type) {
-				case *ast.GenDecl:
-					if d.Tok == token.IMPORT {
-						for _, spec := range d.Specs {
-							if imp, ok := spec.(*ast.ImportSpec); ok {
-								path := strings.Trim(imp.Path.Value, `"`)
-								if !importSeen[path] {
-									importSeen[path] = true
-									imports = append(imports, path)
-								}
-							}
-						}
-					}
-					for _, spec := range d.Specs {
-						if ts, ok := spec.(*ast.TypeSpec); ok {
-							if ts.Name.IsExported() {
-								kind := "type"
-								switch ts.Type.(type) {
-								case *ast.InterfaceType:
-									kind = "interface"
-								case *ast.StructType:
-									kind = "struct"
-								}
-								types = append(types, fmt.Sprintf("%s %s", kind, ts.Name.Name))
-							} else if !identSeen[ts.Name.Name] {
-								// Unexported type — content vocabulary
-								identSeen[ts.Name.Name] = true
-								identifiers = append(identifiers, ts.Name.Name)
-							}
-						}
-					}
-				case *ast.FuncDecl:
-					if d.Name.Name == "main" {
-						entryPoints = append(entryPoints, "main()")
-					} else if d.Name.IsExported() && d.Recv == nil {
-						// Top-level exported functions (not methods)
-						entryPoints = append(entryPoints, d.Name.Name+"()")
-					} else if !d.Name.IsExported() && d.Recv == nil && !identSeen[d.Name.Name] {
-						// Unexported top-level function — content vocabulary
-						identSeen[d.Name.Name] = true
-						identifiers = append(identifiers, d.Name.Name)
-					}
-				}
+		// Detect package name from any file
+		src, err := parser.ParseFile(token.NewFileSet(), f, nil, parser.PackageClauseOnly)
+		if err == nil {
+			pkgName = src.Name.Name
+			if pkgName == "main" {
+				isMain = true
 			}
 		}
 	}
 
-	// Limit to most important items
-	if len(types) > 8 {
-		types = types[:8]
+	if len(allFiles) == 0 {
+		return nil
 	}
-	if len(entryPoints) > 6 {
-		entryPoints = entryPoints[:6]
+
+	// For packages with ≤3 files, don't split — not enough to dilute
+	if len(allFiles) <= 3 {
+		return []ModuleMap{*mergeGoFiles(relPath, pkgName, isMain, allFiles)}
 	}
-	if len(imports) > 15 {
-		imports = imports[:15]
+
+	// Classify files
+	var significant []*goFileSymbols
+	var rest []*goFileSymbols
+	for _, gf := range allFiles {
+		if isGoFileSignificant(gf) {
+			significant = append(significant, gf)
+		} else {
+			rest = append(rest, gf)
+		}
 	}
-	if len(identifiers) > 15 {
-		identifiers = identifiers[:15]
+
+	// If none are significant, keep as single module
+	if len(significant) == 0 {
+		return []ModuleMap{*mergeGoFiles(relPath, pkgName, isMain, allFiles)}
+	}
+
+	var modules []ModuleMap
+
+	// Each significant file gets its own module
+	for _, gf := range significant {
+		baseName := strings.TrimSuffix(filepath.Base(gf.path), ".go")
+		displayPath := relPath + "/" + baseName + ".go"
+		if relPath == "." {
+			displayPath = baseName + ".go"
+		}
+
+		mod := ModuleMap{
+			Path:        displayPath,
+			Language:    "go",
+			Summary:     fmt.Sprintf("Go file (%d lines, %d exports)", gf.lineCount, len(gf.types)+len(gf.entryPoints)),
+			KeyTypes:    gf.types,
+			EntryPoints: gf.entryPoints,
+			FileCount:   1,
+			Imports:     gf.imports,
+			Identifiers: gf.identifiers,
+			Files: []FileInfo{{
+				RelPath:     gf.relPath,
+				Identifiers: append(append([]string{}, gf.identifiers...), symbolNames(gf.types)...),
+				Imports:     gf.imports,
+			}},
+		}
+		truncateModuleMap(&mod)
+		modules = append(modules, mod)
+	}
+
+	// Remaining files get grouped into the package-level module
+	if len(rest) > 0 {
+		modules = append(modules, *mergeGoFiles(relPath, pkgName, isMain, rest))
+	}
+
+	return modules
+}
+
+// mergeGoFiles combines multiple Go file symbols into a single ModuleMap.
+func mergeGoFiles(relPath string, pkgName string, isMain bool, files []*goFileSymbols) *ModuleMap {
+	var types, entryPoints, imports, identifiers []string
+	importSeen := make(map[string]bool)
+	identSeen := make(map[string]bool)
+	var fileInfos []FileInfo
+
+	for _, gf := range files {
+		types = append(types, gf.types...)
+		entryPoints = append(entryPoints, gf.entryPoints...)
+		for _, imp := range gf.imports {
+			if !importSeen[imp] {
+				importSeen[imp] = true
+				imports = append(imports, imp)
+			}
+		}
+		for _, id := range gf.identifiers {
+			if !identSeen[id] {
+				identSeen[id] = true
+				identifiers = append(identifiers, id)
+			}
+		}
+		fileInfos = append(fileInfos, FileInfo{
+			RelPath:     gf.relPath,
+			Identifiers: append(append([]string{}, gf.identifiers...), symbolNames(gf.types)...),
+			Imports:     gf.imports,
+		})
 	}
 
 	displayPath := relPath + "/"
@@ -309,19 +438,50 @@ func parseGoPackage(relPath string, goFiles []string) *ModuleMap {
 
 	summary := fmt.Sprintf("Go package %s", pkgName)
 	if isMain {
-		summary = fmt.Sprintf("Go binary (package main)")
+		summary = "Go binary (package main)"
 	}
 
-	return &ModuleMap{
+	mod := &ModuleMap{
 		Path:        displayPath,
 		Language:    "go",
 		Summary:     summary,
 		KeyTypes:    types,
 		EntryPoints: entryPoints,
-		FileCount:   len(goFiles),
+		FileCount:   len(files),
 		Imports:     imports,
 		Identifiers: identifiers,
+		Files:       fileInfos,
 	}
+	truncateModuleMap(mod)
+	return mod
+}
+
+// truncateModuleMap limits fields to reasonable sizes for codemap entries.
+func truncateModuleMap(mod *ModuleMap) {
+	if len(mod.KeyTypes) > 8 {
+		mod.KeyTypes = mod.KeyTypes[:8]
+	}
+	if len(mod.EntryPoints) > 6 {
+		mod.EntryPoints = mod.EntryPoints[:6]
+	}
+	if len(mod.Imports) > 15 {
+		mod.Imports = mod.Imports[:15]
+	}
+	if len(mod.Identifiers) > 15 {
+		mod.Identifiers = mod.Identifiers[:15]
+	}
+}
+
+// symbolNames extracts just the name portion from "struct Foo" / "interface Bar" strings.
+func symbolNames(typeStrs []string) []string {
+	names := make([]string, 0, len(typeStrs))
+	for _, ts := range typeStrs {
+		parts := strings.Fields(ts)
+		if len(parts) >= 2 {
+			names = append(names, parts[1])
+		}
+	}
+	return names
 }
 
 // --- Markdown parser ---
@@ -836,7 +996,7 @@ func SearchCodeMap(cm *CodeMap, idx *CodeIndex, query string, limit int) []Modul
 	queryVec := HDCEncodeQuery(query)
 	queryTokens := hdcTokenize(query)
 
-	// Score all modules
+	// Score all modules (exclude markdown — docs have their own search tier)
 	type scored struct {
 		module ModuleMap
 		hdc    float64
@@ -847,6 +1007,9 @@ func SearchCodeMap(cm *CodeMap, idx *CodeIndex, query string, limit int) []Modul
 	maxBM25 := 0.0
 
 	for _, m := range cm.Zoom2 {
+		if m.Language == "markdown" {
+			continue
+		}
 		hdc := CosineSimilarity(queryVec, idx.HDCVectors[m.Path])
 		bm25 := BM25Score(idx, m.Path, queryTokens)
 		items = append(items, scored{module: m, hdc: hdc, bm25: bm25})
@@ -911,6 +1074,64 @@ func SearchCodeMapCompat(cm *CodeMap, moduleEmbs map[string][]float32, query str
 		sim := CosineSimilarity(queryVec, moduleEmbs[m.Path])
 		results = append(results, ModuleResult{ModuleMap: m, Similarity: sim, HybridScore: sim})
 	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].HybridScore > results[j].HybridScore
+	})
+	if limit > 0 && len(results) > limit {
+		results = results[:limit]
+	}
+	return results
+}
+
+// SearchCodeMapDocs ranks only markdown/doc modules by hybrid HDC+BM25 similarity.
+// Returns results in a separate tier from source code modules.
+func SearchCodeMapDocs(cm *CodeMap, idx *CodeIndex, query string, limit int) []ModuleResult {
+	if cm == nil || len(cm.Zoom2) == 0 || idx == nil {
+		return nil
+	}
+
+	queryVec := HDCEncodeQuery(query)
+	queryTokens := hdcTokenize(query)
+
+	var results []ModuleResult
+	maxBM25 := 0.0
+
+	type scored struct {
+		module ModuleMap
+		hdc    float64
+		bm25   float64
+	}
+	var items []scored
+
+	for _, m := range cm.Zoom2 {
+		if m.Language != "markdown" {
+			continue
+		}
+		hdc := CosineSimilarity(queryVec, idx.HDCVectors[m.Path])
+		bm25 := BM25Score(idx, m.Path, queryTokens)
+		items = append(items, scored{module: m, hdc: hdc, bm25: bm25})
+		if bm25 > maxBM25 {
+			maxBM25 = bm25
+		}
+	}
+
+	for _, s := range items {
+		hdcNorm := (s.hdc + 1) / 2
+		bm25Norm := 0.0
+		if maxBM25 > 0 {
+			bm25Norm = s.bm25 / maxBM25
+		}
+		// Docs use 50/50 blend (no adaptive alpha — too few docs for meaningful HDC spread)
+		hybrid := 0.5*hdcNorm + 0.5*bm25Norm
+
+		results = append(results, ModuleResult{
+			ModuleMap:    s.module,
+			Similarity:   s.hdc,
+			KeywordScore: s.bm25,
+			HybridScore:  hybrid,
+		})
+	}
+
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].HybridScore > results[j].HybridScore
 	})

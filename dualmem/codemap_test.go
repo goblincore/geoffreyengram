@@ -1480,21 +1480,32 @@ It supports OAuth 2.0, SAML, and custom identity providers.
 		t.Error("expected README.md in modules")
 	}
 
-	// Search should find docs
+	// Docs should NOT appear in source search (separate tier)
 	idx := BuildCodeIndex(cm)
 	results := SearchCodeMap(cm, idx, "authentication API_KEY configuration", 10)
 
-	foundDocInResults := false
 	for _, r := range results {
+		if r.Language == "markdown" {
+			t.Errorf("markdown module %s should not appear in SearchCodeMap (separate tier)", r.Path)
+		}
+	}
+
+	// Docs should appear in SearchCodeMapDocs
+	docResults := SearchCodeMapDocs(cm, idx, "authentication API_KEY configuration", 10)
+	if len(docResults) == 0 {
+		t.Error("expected at least one doc in SearchCodeMapDocs for auth query")
+	}
+	foundDocInResults := false
+	for _, r := range docResults {
 		if strings.HasSuffix(r.Path, ".md") {
 			foundDocInResults = true
 			break
 		}
 	}
 	if !foundDocInResults {
-		t.Error("expected at least one .md file in search results for auth query")
-		for _, r := range results {
-			t.Logf("  result: %s score=%.4f", r.Path, r.HybridScore)
+		t.Error("expected at least one .md file in doc search results")
+		for _, r := range docResults {
+			t.Logf("  doc result: %s score=%.4f", r.Path, r.HybridScore)
 		}
 	}
 }
