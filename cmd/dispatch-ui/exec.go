@@ -666,35 +666,69 @@ Save memories when you:
 	// can branch from this plan's work. Without this, changes are lost when
 	// the worktree is cleaned up, and dependent plans get a clean branch.
 	if workDir != plan.Project {
-		// Check for unstaged changes
+		// Check for unstaged/untracked changes
 		statusCmd := exec.Command("git", "-C", workDir, "status", "--porcelain")
-		statusOut, _ := statusCmd.CombinedOutput()
-		if len(strings.TrimSpace(string(statusOut))) > 0 {
+		statusOut, statusErr := statusCmd.CombinedOutput()
+		statusStr := strings.TrimSpace(string(statusOut))
+		if statusErr != nil {
+			msg := fmt.Sprintf("[dispatch] git status failed: %s", statusStr)
+			lb.Append(msg)
+			fmt.Fprintf(reportFile, "%s\n", msg)
+		} else if len(statusStr) > 0 {
 			// Stage all changes
-			exec.Command("git", "-C", workDir, "add", "-A").Run()
-			// Commit with plan metadata
-			commitMsg := fmt.Sprintf("dispatch(%s): %s\n\nStatus: %s\nModel: %s\nHarness: %s",
-				plan.Name, plan.Title, status, plan.Model, plan.Harness)
-			commitCmd := exec.Command("git", "-C", workDir, "commit", "-m", commitMsg)
-			if commitOut, commitErr := commitCmd.CombinedOutput(); commitErr != nil {
-				lb.Append(fmt.Sprintf("[dispatch] auto-commit failed: %s", strings.TrimSpace(string(commitOut))))
+			addCmd := exec.Command("git", "-C", workDir, "add", "-A")
+			if addOut, addErr := addCmd.CombinedOutput(); addErr != nil {
+				msg := fmt.Sprintf("[dispatch] git add failed: %s", strings.TrimSpace(string(addOut)))
+				lb.Append(msg)
+				fmt.Fprintf(reportFile, "%s\n", msg)
 			} else {
-				lb.Append(fmt.Sprintf("[dispatch] auto-committed changes on branch %s", branch))
+				// Commit with plan metadata
+				commitMsg := fmt.Sprintf("dispatch(%s): %s\n\nStatus: %s\nModel: %s\nHarness: %s",
+					plan.Name, plan.Title, status, plan.Model, plan.Harness)
+				commitCmd := exec.Command("git", "-C", workDir, "commit", "-m", commitMsg)
+				commitOut, commitErr := commitCmd.CombinedOutput()
+				if commitErr != nil {
+					msg := fmt.Sprintf("[dispatch] auto-commit failed: %s", strings.TrimSpace(string(commitOut)))
+					lb.Append(msg)
+					fmt.Fprintf(reportFile, "%s\n", msg)
+				} else {
+					msg := fmt.Sprintf("[dispatch] auto-committed changes on branch %s", branch)
+					lb.Append(msg)
+					fmt.Fprintf(reportFile, "%s\n", msg)
+				}
 			}
+		} else {
+			msg := "[dispatch] no changes to commit in worktree"
+			lb.Append(msg)
+			fmt.Fprintf(reportFile, "%s\n", msg)
 		}
 	}
 
 	// Worktree cleanup: remove directory on success, preserve on failure
 	if workDir != plan.Project {
 		if status == "done" && e.Config.AutoCleanupWorktrees {
-			rmOut, rmErr := exec.Command("git", "-C", plan.Project, "worktree", "remove", workDir).CombinedOutput()
+			_, rmErr := exec.Command("git", "-C", plan.Project, "worktree", "remove", workDir).CombinedOutput()
 			if rmErr != nil {
-				lb.Append(fmt.Sprintf("[dispatch] worktree cleanup failed: %s", strings.TrimSpace(string(rmOut))))
+				// Retry with --force (handles case where commit failed and changes remain)
+				rmOut2, rmErr2 := exec.Command("git", "-C", plan.Project, "worktree", "remove", "--force", workDir).CombinedOutput()
+				if rmErr2 != nil {
+					msg := fmt.Sprintf("[dispatch] worktree cleanup failed (even with --force): %s", strings.TrimSpace(string(rmOut2)))
+					lb.Append(msg)
+					fmt.Fprintf(reportFile, "%s\n", msg)
+				} else {
+					msg := fmt.Sprintf("[dispatch] worktree force-cleaned (branch %s preserved, but uncommitted changes were lost)", branch)
+					lb.Append(msg)
+					fmt.Fprintf(reportFile, "%s\n", msg)
+				}
 			} else {
-				lb.Append(fmt.Sprintf("[dispatch] worktree cleaned up (branch %s preserved for merge)", branch))
+				msg := fmt.Sprintf("[dispatch] worktree cleaned up (branch %s preserved for merge)", branch)
+				lb.Append(msg)
+				fmt.Fprintf(reportFile, "%s\n", msg)
 			}
 		} else {
-			lb.Append(fmt.Sprintf("[dispatch] worktree preserved at %s for inspection", workDir))
+			msg := fmt.Sprintf("[dispatch] worktree preserved at %s for inspection", workDir)
+			lb.Append(msg)
+			fmt.Fprintf(reportFile, "%s\n", msg)
 		}
 	}
 
