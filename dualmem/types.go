@@ -766,6 +766,17 @@ type Store interface {
 	Close() error
 }
 
+// Tag represents a tree-sitter symbol occurrence (definition or reference)
+// extracted from a source file. Tags are cached in SQLite to avoid re-parsing
+// unchanged files.
+type Tag struct {
+	File    string `json:"file"`
+	Name    string `json:"name"`
+	Kind    string `json:"kind"`    // "def" or "ref"
+	SubKind string `json:"sub_kind"` // "function", "class", etc.
+	Line    int    `json:"line"`
+}
+
 // ModuleEmbedding pairs a module's summary text with its embedding vector.
 type ModuleEmbedding struct {
 	Summary   string
