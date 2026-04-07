@@ -662,6 +662,28 @@ Save memories when you:
 	_ = setFrontmatterField(plan.Path, "exit_code", strconv.Itoa(exitCode))
 	_ = setFrontmatterField(plan.Path, "report", reportPath)
 
+	// Auto-commit unstaged changes in the worktree so that depends_on plans
+	// can branch from this plan's work. Without this, changes are lost when
+	// the worktree is cleaned up, and dependent plans get a clean branch.
+	if workDir != plan.Project {
+		// Check for unstaged changes
+		statusCmd := exec.Command("git", "-C", workDir, "status", "--porcelain")
+		statusOut, _ := statusCmd.CombinedOutput()
+		if len(strings.TrimSpace(string(statusOut))) > 0 {
+			// Stage all changes
+			exec.Command("git", "-C", workDir, "add", "-A").Run()
+			// Commit with plan metadata
+			commitMsg := fmt.Sprintf("dispatch(%s): %s\n\nStatus: %s\nModel: %s\nHarness: %s",
+				plan.Name, plan.Title, status, plan.Model, plan.Harness)
+			commitCmd := exec.Command("git", "-C", workDir, "commit", "-m", commitMsg)
+			if commitOut, commitErr := commitCmd.CombinedOutput(); commitErr != nil {
+				lb.Append(fmt.Sprintf("[dispatch] auto-commit failed: %s", strings.TrimSpace(string(commitOut))))
+			} else {
+				lb.Append(fmt.Sprintf("[dispatch] auto-committed changes on branch %s", branch))
+			}
+		}
+	}
+
 	// Worktree cleanup: remove directory on success, preserve on failure
 	if workDir != plan.Project {
 		if status == "done" && e.Config.AutoCleanupWorktrees {
