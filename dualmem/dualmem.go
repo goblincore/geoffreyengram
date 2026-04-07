@@ -656,6 +656,143 @@ func (e *Engine) GetStructuralNeighborPaths(namespace string, seedPaths []string
 	return scores
 }
 
+// Annotation represents a piece of context associated with a file path.
+type Annotation struct {
+	FilePath string  `json:"file_path"`
+	Type     string  `json:"type"`      // "decision", "warning", "continuity", "knowledge", "checkpoint", "structure"
+	Text     string  `json:"text"`
+	Source   string  `json:"source"`    // "memory", "knowledge_doc", "checkpoint"
+	Salience float64 `json:"salience"`
+	MemoryID string  `json:"memory_id,omitempty"` // for dedup tracking
+}
+
+// FileAnnotations retrieves annotations from ALL sources for a set of file paths.
+// It queries detail memories, knowledge docs, and checkpoints, returning
+// high-signal context grouped by file. Does not query codemap — that's handled
+// separately by the smart toggle.
+func (e *Engine) FileAnnotations(ctx context.Context, namespace string, filePaths []string, limit int) []Annotation {
+	if len(filePaths) == 0 || limit <= 0 {
+		return nil
+	}
+
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	// Build a set of requested basenames for matching
+	requestedBases := make(map[string]bool, len(filePaths))
+	requestedFull := make(map[string]bool, len(filePaths))
+	for _, p := range filePaths {
+		requestedBases[filepath.Base(p)] = true
+		requestedFull[p] = true
+	}
+
+	// Track seen memory IDs for dedup
+	seenIDs := make(map[string]bool)
+	var annotations []Annotation
+
+	// 1. Detail memories — high-signal types
+	highSignalTypes := []string{"warning", "decision", "map", "trace"}
+	for _, fp := range filePaths {
+		basename := filepath.Base(fp)
+		rows, err := e.store.GetDetailsByFiles(namespace, basename, highSignalTypes, limit*2)
+		if err != nil {
+			continue
+		}
+		for _, dm := range rows {
+			if seenIDs[dm.ID] {
+				continue
+			}
+			seenIDs[dm.ID] = true
+
+			// Find which of the requested files this memory covers
+			matchedFile := ""
+			for _, mf := range dm.Files {
+				if requestedBases[filepath.Base(mf)] || requestedFull[mf] {
+					matchedFile = filepath.Base(mf)
+					break
+				}
+			}
+			if matchedFile == "" {
+				matchedFile = fp
+			}
+
+			annotations = append(annotations, Annotation{
+				FilePath: matchedFile,
+				Type:     dm.Type,
+				Text:     dm.Text,
+				Source:   "memory",
+				Salience: dm.Salience,
+				MemoryID: dm.ID,
+			})
+		}
+	}
+
+	// 2. Knowledge docs — match by files field overlap
+	docs, err := e.store.GetKnowledgeDocs(namespace)
+	if err == nil {
+		for _, doc := range docs {
+			if seenIDs[doc.ID] {
+				continue
+			}
+			for _, df := range doc.Files {
+				if requestedBases[filepath.Base(df)] || requestedFull[df] {
+					seenIDs[doc.ID] = true
+					annotations = append(annotations, Annotation{
+						FilePath: filepath.Base(df),
+						Type:     "knowledge",
+						Text:     doc.Content,
+						Source:   "knowledge_doc",
+						Salience: 0.8, // knowledge docs are synthesized → high salience
+						MemoryID: doc.ID,
+					})
+					break // one annotation per doc
+				}
+			}
+		}
+	}
+
+	// 3. Checkpoints — filter by file path overlap
+	checkpoints, _ := e.GetCheckpoints(ctx, namespace)
+	for _, cp := range checkpoints {
+		cpID := "cp_" + cp.Task
+		if seenIDs[cpID] {
+			continue
+		}
+		for _, cf := range cp.FilesActive {
+			// Strip line ranges (e.g., "auth.go:42-80" → "auth.go")
+			base := cf
+			if idx := strings.Index(cf, ":"); idx > 0 {
+				base = cf[:idx]
+			}
+			base = filepath.Base(base)
+			if requestedBases[base] {
+				seenIDs[cpID] = true
+				annotations = append(annotations, Annotation{
+					FilePath: base,
+					Type:     "checkpoint",
+					Text:     cp.FormatForContext(),
+					Source:   "checkpoint",
+					Salience: 0.8,
+					MemoryID: cpID,
+				})
+				break
+			}
+		}
+	}
+
+	// Sort by salience descending
+	sort.Slice(annotations, func(i, j int) bool {
+		return annotations[i].Salience > annotations[j].Salience
+	})
+
+	// Apply limit
+	if len(annotations) > limit {
+		annotations = annotations[:limit]
+	}
+
+	return annotations
+}
+
 // AssembleContext is the key differentiator: token-budget-aware context assembly.
 // It retrieves from both paths and formats a structured context block that fits
 // within the given token budget. If Config.RootDir is set, includes structural
@@ -721,6 +858,7 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 	var sources []SourceRef
 	tokensUsed := 0
 	staleIDs := make(map[string]bool)
+	coveredIDs := make(map[string]bool) // tracks memory IDs already rendered (dedup across sections)
 
 	// --- Structural diff (≤150 tokens) ---
 	if e.cfg.RootDir != "" && tokenBudget >= 200 {
@@ -744,52 +882,38 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 	// --- Load checkpoints early (for file hints) ---
 	checkpoints, _ := e.GetCheckpoints(ctx, userID)
 
-	// --- Code map (≤400 tokens, graph-ranked PageRank) ---
-	if e.cfg.RootDir != "" && tokenBudget >= 500 {
+	// --- Code map (smart toggle: only show on cold start / explore) ---
+	showCodemap := len(checkpoints) == 0 && (intent == IntentExplore || intent == IntentDefault)
+	if showCodemap && e.cfg.RootDir != "" && tokenBudget >= 500 {
 		mapBudget := 400
 		if tokenBudget-tokensUsed-200 < mapBudget {
 			mapBudget = tokenBudget - tokensUsed - 200
 		}
 		if mapBudget > 50 {
-			// Build personalization overrides from memory-derived boost paths
-			boostPaths := extractFileHints(checkpoints, results.DetailMemories)
-			personalOverrides := make(map[string]float64)
-
-			// Direct boost paths from checkpoints/memories get high weight
-			for _, bp := range boostPaths {
-				personalOverrides[bp] = 10.0
-			}
-
-			// Expand via co-change and structural graph neighbors
-			if ns := e.namespace(); ns != "" && len(boostPaths) > 0 {
-				cochangeNeighbors := e.GetCoChangeForPaths(ns, boostPaths, 1.0)
-				for path, strength := range cochangeNeighbors {
-					if _, exists := personalOverrides[path]; !exists {
-						personalOverrides[path] = 5.0 * strength
+			codeMap, codeIdx := e.getOrGenerateCodeMap(ctx, userID)
+			if codeMap != nil {
+				codemapQuery := HDCEncodeQuery(query)
+				var moduleEmbs map[string][]float32
+				if codeIdx != nil {
+					moduleEmbs = codeIdx.HDCVectors
+				}
+				boostPaths := extractFileHints(checkpoints, results.DetailMemories)
+				var cochangeNeighbors map[string]float64
+				if ns := e.namespace(); ns != "" && len(boostPaths) > 0 {
+					cochangeNeighbors = e.GetCoChangeForPaths(ns, boostPaths, 1.0)
+					structuralNeighbors := e.GetStructuralNeighborPaths(ns, boostPaths, 2)
+					if cochangeNeighbors == nil {
+						cochangeNeighbors = structuralNeighbors
+					} else {
+						for path, score := range structuralNeighbors {
+							if existing, ok := cochangeNeighbors[path]; !ok || score > existing {
+								cochangeNeighbors[path] = score
+							}
+						}
 					}
 				}
-				structuralNeighbors := e.GetStructuralNeighborPaths(ns, boostPaths, 2)
-				for path, score := range structuralNeighbors {
-					if existing, exists := personalOverrides[path]; !exists || 3.0*score > existing {
-						personalOverrides[path] = 3.0 * score
-					}
-				}
-			}
-
-			// Get SQLite store for tag caching (optional)
-			var tagStore *SQLiteStore
-			if s, ok := e.store.(*SQLiteStore); ok {
-				tagStore = s
-			}
-
-			scanner := &RepoScanner{
-				RootDir:   e.cfg.RootDir,
-				Namespace: e.namespace(),
-				Store:     tagStore,
-			}
-			scanResult, scanErr := scanner.ScanAndRank(query, personalOverrides)
-			if scanErr == nil && scanResult != nil && len(scanResult.Files) > 0 {
-				mapText := scanResult.RenderForContext(mapBudget)
+				useBoostOnly := intent == IntentContinue && len(boostPaths) > 0
+				mapText := codeMap.RenderAtBudgetWithCoChange(mapBudget, codemapQuery, moduleEmbs, boostPaths, cochangeNeighbors, useBoostOnly)
 				mapTokens := estimateTokens(mapText)
 				parts = append(parts, "[Codebase Map]\n"+mapText)
 				sources = append(sources, SourceRef{Type: "codemap", ID: userID})
@@ -809,9 +933,57 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 		}
 	}
 
+	// --- File Context — file-centric annotation retrieval ---
+	// Collect relevant file paths from checkpoints and detail memories,
+	// then pull ALL annotations for those files (memories, knowledge docs, checkpoints).
+	fileContextPaths := extractFileHints(checkpoints, results.DetailMemories)
+	if len(fileContextPaths) > 0 {
+		fileAnns := e.FileAnnotations(ctx, userID, fileContextPaths, 20)
+		if len(fileAnns) > 0 {
+			// Group annotations by file path
+			grouped := make(map[string][]Annotation)
+			var fileOrder []string
+			for _, ann := range fileAnns {
+				if _, exists := grouped[ann.FilePath]; !exists {
+					fileOrder = append(fileOrder, ann.FilePath)
+				}
+				grouped[ann.FilePath] = append(grouped[ann.FilePath], ann)
+			}
+
+			var fcParts []string
+			for _, fp := range fileOrder {
+				anns := grouped[fp]
+				var entry strings.Builder
+				entry.WriteString(fp + ":")
+				for _, ann := range anns {
+					// Truncate long text for inline display
+					text := ann.Text
+					if len(text) > 200 {
+						text = text[:197] + "..."
+					}
+					text = strings.ReplaceAll(text, "\n", " ")
+					entry.WriteString(fmt.Sprintf("\n  [%s] %s", ann.Type, text))
+				}
+				fcParts = append(fcParts, entry.String())
+			}
+			fcText := "[File Context]\n" + strings.Join(fcParts, "\n")
+			fcTokens := estimateTokens(fcText)
+			if tokensUsed+fcTokens <= tokenBudget {
+				parts = append(parts, fcText)
+				tokensUsed += fcTokens
+				// Track which memory IDs were rendered to avoid duplication
+				for _, ann := range fileAnns {
+					if ann.MemoryID != "" {
+						coveredIDs[ann.MemoryID] = true
+						sources = append(sources, SourceRef{Type: "detail", ID: ann.MemoryID})
+					}
+				}
+			}
+		}
+	}
+
 	// 1. Knowledge docs — synthesized concept documents, ranked by query relevance.
 	// These replace raw memories for topics that have been synthesized.
-	coveredIDs := make(map[string]bool)
 	kdocs, _ := e.GetKnowledgeDocs(ctx, userID, query, queryEmb, 0)
 	if len(kdocs) > 0 {
 		// Budget: knowledge docs get up to 60% of remaining budget

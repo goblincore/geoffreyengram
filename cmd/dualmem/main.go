@@ -1205,7 +1205,7 @@ func cmdSearchCode(cfg CLIConfig) {
 	limit := fs.Int("limit", 10, "Max results")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	moduleOnly := fs.Bool("module-only", false, "Module-level results (skip file ranking)")
-	legacyMode := fs.Bool("legacy", false, "Use legacy HDC-based search instead of graph PageRank")
+	graphMode := fs.Bool("graph", false, "Use graph-based PageRank search (experimental)")
 	fs.Parse(os.Args[2:])
 
 	query := strings.Join(fs.Args(), " ")
@@ -1221,8 +1221,8 @@ func cmdSearchCode(cfg CLIConfig) {
 
 	ns := "claude:" + filepath.Base(rootDir)
 
-	// Default: graph-based search (PageRank + tag extraction)
-	if !*legacyMode {
+	// Experimental: graph-based search (PageRank + tag extraction)
+	if *graphMode {
 		var store *dualmem.SQLiteStore
 		engine, engErr := newEngine(cfg)
 		if engErr == nil {
@@ -1260,7 +1260,7 @@ func cmdSearchCode(cfg CLIConfig) {
 		return
 	}
 
-	// Legacy: HDC-based search (module-level, cosine similarity)
+	// Default: HDC+BM25 hybrid search (module-level, descriptive summaries)
 	engine, engErr := dualmem.NewForCodeSearch(dualmem.Config{
 		RootDir:   rootDir,
 		SQLitePath: cfg.Storage.SQLitePath,
