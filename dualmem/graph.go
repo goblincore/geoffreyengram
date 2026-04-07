@@ -2,17 +2,6 @@ package dualmem
 
 import "sort"
 
-// Tag represents a symbol definition or reference extracted from source code.
-// Definitions (Kind="def") are where a symbol is declared; references (Kind="ref")
-// are where it is used. Both carry the file path and line number.
-type Tag struct {
-	File    string `json:"file"`     // Relative file path, e.g. "dualmem/graph.go"
-	Name    string `json:"name"`     // Symbol name, e.g. "BuildFileGraph"
-	Kind    string `json:"kind"`     // "def" or "ref"
-	SubKind string `json:"sub_kind"` // Fine-grained kind: "function", "type", "method", "variable", etc.
-	Line    int    `json:"line"`     // 1-based line number
-}
-
 // FileGraph is a directed weighted graph at file granularity.
 // Nodes are file paths; edges represent cross-file symbol references.
 // Edge direction: source file → target file (source references a symbol defined in target).
