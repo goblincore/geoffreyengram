@@ -1434,6 +1434,16 @@ func (e *Engine) Consult(ctx context.Context, namespace, query string, budget in
 		}
 	}
 
+	// 3.5 Read code evidence for grounded synthesis
+	var codeEvidence *CodeEvidence
+	if codeMap != nil {
+		codeEvidence, _ = e.ReadCodeEvidence(ctx, namespace, query, ReadCodeOpts{
+			MaxTokens: budget / 2,
+			MaxFiles:  6,
+			SeedPaths: seedPaths,
+		}, codeMap, codeIdx)
+	}
+
 	// 4. Search memories for context
 	searchOpts := SearchOpts{
 		Limit:          5,
@@ -1463,12 +1473,20 @@ func (e *Engine) Consult(ctx context.Context, namespace, query string, budget in
 		// Build synthesis prompt
 		var promptParts []string
 		promptParts = append(promptParts, fmt.Sprintf(
-			"Given the following structural evidence about %q in this codebase, "+
+			"Given the following code and structural evidence about %q in this codebase, "+
 				"write a concise explanation (200-400 words) of how this subsystem works.\n\n"+
 				"Include: key files and their roles, data/control flow between components, "+
-				"important design decisions or constraints.\n\n"+
-				"Do NOT include code snippets. Focus on conceptual understanding that would "+
-				"help a developer work on this subsystem correctly.", query))
+				"important design decisions or constraints. Reference specific code where helpful.", query))
+
+		if codeEvidence != nil && len(codeEvidence.Snippets) > 0 {
+			var snippetText strings.Builder
+			for _, s := range codeEvidence.Snippets {
+				snippetText.WriteString(fmt.Sprintf("--- %s:%d-%d ---\n", s.FilePath, s.StartLine, s.EndLine))
+				snippetText.WriteString(s.Content)
+				snippetText.WriteString("\n\n")
+			}
+			promptParts = append(promptParts, "[Code Snippets]\n"+snippetText.String())
+		}
 
 		if evidenceText != "" {
 			promptParts = append(promptParts, "[Structural Evidence]\n"+evidenceText)
@@ -1584,6 +1602,205 @@ func (e *Engine) Consult(ctx context.Context, namespace, query string, budget in
 	}
 
 	return report, nil
+}
+
+// findFileIdentifiers looks up identifiers for a file path in the codemap.
+func findFileIdentifiers(cm *CodeMap, filePath string) []string {
+	for _, mod := range cm.Zoom2 {
+		for _, fi := range mod.Files {
+			if fi.RelPath == filePath {
+				return fi.Identifiers
+			}
+		}
+	}
+	return nil
+}
+
+// ReadCodeEvidence ranks files against a query and extracts relevant code snippets
+// within a token budget. This is the core evidence pipeline used by Consult and Explore.
+func (e *Engine) ReadCodeEvidence(ctx context.Context, namespace, query string, opts ReadCodeOpts, cm *CodeMap, idx *CodeIndex) (*CodeEvidence, error) {
+	if opts.MaxTokens <= 0 {
+		opts.MaxTokens = 4000
+	}
+	if opts.MaxFiles <= 0 {
+		opts.MaxFiles = 8
+	}
+
+	fileResults := SearchCodeMapFiles(cm, idx, query, opts.MaxFiles*2)
+
+	if len(opts.SeedPaths) > 0 {
+		seedSet := make(map[string]bool)
+		for _, sp := range opts.SeedPaths {
+			seedSet[sp] = true
+		}
+		var boosted, rest []FileResult
+		for _, fr := range fileResults {
+			if seedSet[fr.FilePath] {
+				boosted = append(boosted, fr)
+			} else {
+				rest = append(rest, fr)
+			}
+		}
+		fileResults = append(boosted, rest...)
+	}
+
+	if len(fileResults) > opts.MaxFiles {
+		fileResults = fileResults[:opts.MaxFiles]
+	}
+
+	evidence := &CodeEvidence{}
+	rootDir := cm.RootDir
+
+	for _, fr := range fileResults {
+		if evidence.TotalTokens >= opts.MaxTokens {
+			break
+		}
+
+		fullPath := filepath.Join(rootDir, fr.FilePath)
+		lines, err := readFileLines(fullPath)
+		if err != nil {
+			continue
+		}
+
+		numLines := len(lines)
+		lang := detectLangFromPath(fr.FilePath)
+		remaining := opts.MaxTokens - evidence.TotalTokens
+
+		if numLines < 150 {
+			content := strings.Join(lines, "\n")
+			tokens := estimateTokens(content)
+			if tokens > remaining {
+				continue
+			}
+			evidence.Snippets = append(evidence.Snippets, CodeSnippet{
+				FilePath:   fr.FilePath,
+				StartLine:  1,
+				EndLine:    numLines,
+				Content:    content,
+				Relevance:  fr.Summary,
+				TokenCount: tokens,
+			})
+			evidence.TotalTokens += tokens
+		} else {
+			fileIdentifiers := findFileIdentifiers(cm, fr.FilePath)
+			matches := matchIdentifiers(fileIdentifiers, query)
+
+			if len(matches) == 0 {
+				end := 80
+				if end > numLines {
+					end = numLines
+				}
+				content := strings.Join(lines[:end], "\n")
+				tokens := estimateTokens(content)
+				if tokens > remaining {
+					continue
+				}
+				evidence.Snippets = append(evidence.Snippets, CodeSnippet{
+					FilePath:   fr.FilePath,
+					StartLine:  1,
+					EndLine:    end,
+					Content:    content,
+					Relevance:  fr.Summary,
+					TokenCount: tokens,
+			})
+				evidence.TotalTokens += tokens
+			} else {
+				for _, ident := range matches {
+					if evidence.TotalTokens >= opts.MaxTokens {
+						break
+					}
+					startIdx, endIdx := extractBlock(lines, ident, lang)
+					if startIdx < 0 {
+						continue
+					}
+					content := strings.Join(lines[startIdx:endIdx+1], "\n")
+					tokens := estimateTokens(content)
+					if tokens > opts.MaxTokens-evidence.TotalTokens {
+						continue
+					}
+					evidence.Snippets = append(evidence.Snippets, CodeSnippet{
+						FilePath:   fr.FilePath,
+						StartLine:  startIdx + 1,
+						EndLine:    endIdx + 1,
+						Content:    content,
+						Relevance:  fr.Summary,
+						TokenCount: tokens,
+					})
+					evidence.TotalTokens += tokens
+				}
+			}
+		}
+	}
+
+	return evidence, nil
+}
+
+// Explore reads ranked code files and produces a grounded briefing with code snippets
+// and a short summary. Unlike Consult (which caches knowledge docs), Explore is ephemeral.
+func (e *Engine) Explore(ctx context.Context, namespace, query string, budget int) (*ExploreResult, error) {
+	if budget <= 0 {
+		budget = 4000
+	}
+
+	codeMap, codeIdx := e.getOrGenerateCodeMap(ctx, namespace)
+
+	var seedPaths []string
+	if codeMap != nil {
+		hdcQuery := HDCEncodeQuery(query)
+		var moduleEmbs map[string][]float32
+		if codeIdx != nil {
+			moduleEmbs = codeIdx.HDCVectors
+		}
+		for _, mod := range codeMap.Zoom2 {
+			if emb, ok := moduleEmbs[mod.Path]; ok {
+				score := CosineSimilarity(hdcQuery, emb)
+				if score > 0.3 {
+					seedPaths = append(seedPaths, mod.Path)
+				}
+			}
+		}
+		if len(seedPaths) > 10 {
+			seedPaths = seedPaths[:10]
+		}
+	}
+
+	var codeEvidence *CodeEvidence
+	if codeMap != nil {
+		codeEvidence, _ = e.ReadCodeEvidence(ctx, namespace, query, ReadCodeOpts{
+			MaxTokens: budget,
+			MaxFiles:  8,
+			SeedPaths: seedPaths,
+		}, codeMap, codeIdx)
+	}
+
+	if codeEvidence == nil {
+		codeEvidence = &CodeEvidence{}
+	}
+
+	var summary string
+	if len(codeEvidence.Snippets) > 0 {
+		gen, err := e.getSynthesisGenerator()
+		if err == nil {
+			var snippetText strings.Builder
+			for _, s := range codeEvidence.Snippets {
+				snippetText.WriteString(fmt.Sprintf("--- %s ---\n%s\n\n", s.FilePath, s.Content))
+			}
+			prompt := fmt.Sprintf(
+				"Given these code snippets about %q, write a 50-100 word summary of how this subsystem works. "+
+					"Focus on: key functions, data flow, and design patterns. Reference specific code.\n\n%s", query, snippetText.String())
+			content, err := gen.GenerateText(ctx, prompt, 200)
+			if err == nil {
+				summary = strings.TrimSpace(content)
+			}
+		}
+	}
+
+	return &ExploreResult{
+		Query:       query,
+		Evidence:    codeEvidence,
+		Summary:     summary,
+		TotalTokens: codeEvidence.TotalTokens,
+	}, nil
 }
 
 // computeConsultConfidence calculates a confidence score for a consult report.

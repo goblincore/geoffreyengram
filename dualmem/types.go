@@ -443,6 +443,61 @@ type RankedFile struct {
 	Desc   string  `json:"desc"`   // one-line module description
 }
 
+// ReadCodeOpts controls code evidence extraction.
+type ReadCodeOpts struct {
+	MaxTokens int      // token budget for snippets (default 4000)
+	MaxFiles  int      // max files to read (default 8)
+	SeedPaths []string // optional pre-ranked paths to prioritize
+}
+
+// CodeEvidence holds extracted code snippets from ranked source files.
+type CodeEvidence struct {
+	Snippets    []CodeSnippet
+	TotalTokens int
+}
+
+// CodeSnippet is a code excerpt from a source file with location metadata.
+type CodeSnippet struct {
+	FilePath   string // relative to repo root
+	StartLine  int    // 1-based
+	EndLine    int    // 1-based
+	Content    string
+	Relevance  string // source description (e.g. module summary)
+	TokenCount int
+}
+
+// ExploreResult holds the output of an Explore query — code snippets + short summary.
+type ExploreResult struct {
+	Query       string
+	Evidence    *CodeEvidence
+	Summary     string // 50-100 word grounded summary
+	TotalTokens int
+}
+
+// FormatSnippetsFirst renders the result in snippets-first format for context injection.
+func (r *ExploreResult) FormatSnippetsFirst() string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("[Explore: %s]\n", r.Query))
+	sb.WriteString(fmt.Sprintf("%d files, %d tokens\n\n", len(r.Evidence.Snippets), r.TotalTokens))
+
+	for _, s := range r.Evidence.Snippets {
+		sb.WriteString(fmt.Sprintf("--- %s:%d-%d (%s) ---\n", s.FilePath, s.StartLine, s.EndLine, s.Relevance))
+		sb.WriteString(s.Content)
+		if !strings.HasSuffix(s.Content, "\n") {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	if r.Summary != "" {
+		sb.WriteString("=== Summary ===\n")
+		sb.WriteString(r.Summary)
+	}
+
+	return sb.String()
+}
+
 // FormatText renders the ConsultReport as structured text with section headers.
 func (r *ConsultReport) FormatText() string {
 	var sb strings.Builder

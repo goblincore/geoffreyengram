@@ -2,6 +2,8 @@ package dualmem
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -170,5 +172,33 @@ func TestFileOverlap(t *testing.T) {
 				t.Errorf("fileOverlap=%v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestConsult_SynthesisPromptIncludesCode(t *testing.T) {
+	dir := t.TempDir()
+	srcDir := filepath.Join(dir, "pkg")
+	os.MkdirAll(srcDir, 0755)
+	os.WriteFile(filepath.Join(srcDir, "auth.go"), []byte("package pkg\n\nfunc ValidateToken(token string) bool {\n\treturn token != \"\"\n}\n"), 0644)
+
+	engine, gen := newTestEngineWithGen(t)
+	engine.cfg.RootDir = dir
+
+	engine.AddWithOptions(ctx(t), MemoryInput{
+		UserMessage: "Auth validates JWT tokens",
+		Salience:    0.9,
+		Files:       []string{"pkg/auth.go"},
+	}, "test-ns")
+
+	_, err := engine.Consult(ctx(t), "test-ns", "how does auth validation work", 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if gen.generateCalls == 0 {
+		t.Fatal("expected synthesis call")
+	}
+	if !strings.Contains(gen.lastPrompt, "[Code Snippets]") {
+		t.Error("synthesis prompt missing [Code Snippets] section")
 	}
 }

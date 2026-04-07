@@ -12,6 +12,7 @@ import (
 // mockTextGenSummarizer implements both SummarizerProvider and TextGenerator.
 type mockTextGenSummarizer struct {
 	generateCalls int
+	lastPrompt    string
 }
 
 func (m *mockTextGenSummarizer) SummarizeEpisode(_ context.Context, messages []string) (string, error) {
@@ -28,7 +29,7 @@ func (m *mockTextGenSummarizer) UpdateProfile(_ context.Context, current *Profil
 
 func (m *mockTextGenSummarizer) GenerateText(_ context.Context, prompt string, _ int) (string, error) {
 	m.generateCalls++
-	// Return a simple synthesis based on the prompt
+	m.lastPrompt = prompt
 	return fmt.Sprintf("Synthesized knowledge document based on %d source memories.", strings.Count(prompt, ". ")+1), nil
 }
 

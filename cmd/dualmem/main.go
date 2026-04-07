@@ -264,6 +264,8 @@ func main() {
 		cmdStats(cfg)
 	case "health":
 		cmdHealth(cfg)
+	case "explore":
+		cmdExplore(cfg)
 	case "consult":
 		cmdConsult(cfg)
 	case "help", "-h", "--help":
@@ -302,6 +304,7 @@ Commands:
   stats       Show context quality statistics and re-ranker status
   gc          Garbage collect stale/expired memories
   health      Inspect database and report health findings
+  explore     Read ranked code files and produce grounded briefing
   consult     Structured intelligence report (lazy-synthesis)
 
 Flags (all commands):
@@ -2229,6 +2232,7 @@ func cmdConsult(cfg CLIConfig) {
 	ns := fs.String("ns", "", "Namespace")
 	budget := fs.Int("budget", 2000, "Token budget")
 	compare := fs.Bool("compare", false, "Run both Flash Lite and synthesis model, show side-by-side")
+	fresh := fs.Bool("fresh", false, "Force re-synthesis with code evidence (bypass cache)")
 	// Use filterFlags to handle flags mixed with positional args
 	// (Go's flag.Parse stops at first non-flag argument)
 	fs.Parse(filterFlags(os.Args[2:]))
@@ -2243,7 +2247,7 @@ func cmdConsult(cfg CLIConfig) {
 	}
 	query := strings.Join(queryParts, " ")
 	if query == "" {
-		fmt.Fprintf(os.Stderr, "usage: dualmem consult \"query\" [--budget N] [--ns namespace] [--compare]\n")
+		fmt.Fprintf(os.Stderr, "usage: dualmem consult \"query\" [--budget N] [--ns namespace] [--compare] [--fresh]\n")
 		os.Exit(1)
 	}
 
@@ -2262,6 +2266,18 @@ func cmdConsult(cfg CLIConfig) {
 	defer engine.Close()
 
 	ctx := context.Background()
+
+	// --fresh: delete cached knowledge docs to force re-synthesis with code evidence
+	if *fresh {
+		queryEmb, embErr := engine.Embedder().Embed(ctx, query, "RETRIEVAL_QUERY")
+		if embErr == nil {
+			kdocs, _ := engine.GetKnowledgeDocs(ctx, namespace, query, queryEmb, 3)
+			for _, kd := range kdocs {
+				engine.DeleteKnowledgeDoc(ctx, namespace, kd.Topic)
+			}
+		}
+	}
+
 	report, err := engine.Consult(ctx, namespace, query, *budget)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -2269,6 +2285,44 @@ func cmdConsult(cfg CLIConfig) {
 	}
 
 	fmt.Print(report.FormatText())
+}
+
+func cmdExplore(cfg CLIConfig) {
+	fs := flag.NewFlagSet("explore", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace")
+	budget := fs.Int("budget", 4000, "Token budget for snippets")
+	fs.Parse(filterFlags(os.Args[2:]))
+
+	// Extract query from non-flag positional args
+	var queryParts []string
+	for _, arg := range os.Args[2:] {
+		if !strings.HasPrefix(arg, "-") {
+			queryParts = append(queryParts, arg)
+		}
+	}
+	query := strings.Join(queryParts, " ")
+	if query == "" {
+		fmt.Fprintf(os.Stderr, "usage: dualmem explore \"query\" [--budget N] [--ns namespace]\n")
+		os.Exit(1)
+	}
+
+	namespace := resolveNamespace(*ns, cfg)
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+	result, err := engine.Explore(ctx, namespace, query, *budget)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Print(result.FormatSnippetsFirst())
 }
 
 // cmdConsultCompare runs the same synthesis prompt through both Flash Lite and
