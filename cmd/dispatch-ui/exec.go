@@ -622,14 +622,3 @@ Save memories when you:
 	return nil
 }
 
-// CancelRunning cancels the currently running task if one exists.
-// Returns true if a task was cancelled, false if nothing was running.
-func (e *Engine) CancelRunning() bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.running == nil {
-		return false
-	}
-	e.running.Cancel()
-	return true
-}
