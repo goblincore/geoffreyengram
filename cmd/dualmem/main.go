@@ -268,6 +268,8 @@ func main() {
 		cmdExplore(cfg)
 	case "consult":
 		cmdConsult(cfg)
+	case "index":
+		cmdIndex(cfg)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -306,6 +308,7 @@ Commands:
   health      Inspect database and report health findings
   explore     Read ranked code files and produce grounded briefing
   consult     Structured intelligence report (lazy-synthesis)
+  index       Pre-warm codebase index with progress output
 
 Flags (all commands):
   --ns     Namespace (default: auto-detect from cwd or config)
@@ -486,6 +489,15 @@ func cmdContext(cfg CLIConfig) {
 		os.Exit(1)
 	}
 	defer engine.Close()
+	engine.OnScanProgress = func(p dualmem.ScanProgress) {
+		switch p.Phase {
+		case "walking":
+			fmt.Fprintf(os.Stderr, "\rIndexing... %d dirs", p.DirsFound)
+		case "parsing":
+			fmt.Fprintf(os.Stderr, "\rIndexing... %d/%d dirs", p.DirsDone, p.DirsFound)
+		}
+	}
+	defer fmt.Fprintln(os.Stderr)
 
 	var opts *dualmem.ContextOpts
 	if *intent != "" || *noGraph {
@@ -1168,17 +1180,18 @@ func cmdMap(cfg CLIConfig) {
 
 	// Legacy mode: use old HDC-based codemap
 	if *legacy {
-		cm, err := dualmem.ScanCodebase(rootDir)
+		result, err := dualmem.ScanCodebase(rootDir, nil)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
+		cm := result.CodeMap
 		cm.Namespace = namespace
 		_, commit := dualmem.GetGitState(rootDir)
 		cm.GitCommit = commit
 		engine, engErr := newEngine(cfg)
 		if engErr == nil {
-			engine.StoreCodeMap(context.Background(), namespace, cm)
+			engine.StoreCodeMap(context.Background(), namespace, cm, result.Edges)
 			engine.Close()
 		}
 		if *jsonOut {
@@ -1310,11 +1323,12 @@ func cmdSearchCode(cfg CLIConfig) {
 	if engErr != nil {
 		// Fallback: no cache, scan directly
 		fmt.Fprintf(os.Stderr, "warning: could not open store for cache: %v\n", engErr)
-		cm, scanErr := dualmem.ScanCodebase(rootDir)
+		result, scanErr := dualmem.ScanCodebase(rootDir, nil)
 		if scanErr != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", scanErr)
 			os.Exit(1)
 		}
+		cm := result.CodeMap
 		idx := dualmem.BuildCodeIndex(cm)
 		printSearchResults(cm, idx, query, *limit, *jsonOut, *moduleOnly)
 		return
@@ -2227,6 +2241,101 @@ func cmdTrain(cfg CLIConfig) {
 
 // --- Consult command ---
 
+func cmdIndex(cfg CLIConfig) {
+	fs := flag.NewFlagSet("index", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace")
+	force := fs.Bool("force", false, "Re-index even if cache is fresh")
+	fs.Parse(filterFlags(os.Args[2:]))
+
+	namespace := resolveNamespace(*ns, cfg)
+	rootDir, _ := os.Getwd()
+
+	// Check cache unless --force
+	if !*force {
+		engine, err := newEngine(cfg)
+		if err == nil {
+			_, currentCommit := dualmem.GetGitState(rootDir)
+			stored, _ := engine.GetStore().GetCodeMap(namespace)
+			engine.Close()
+			if stored != nil && stored.GitCommit == currentCommit && currentCommit != "" {
+				commitStr := currentCommit
+				if len(commitStr) > 7 {
+					commitStr = commitStr[:7]
+				}
+				fmt.Fprintf(os.Stderr, "Index is current (commit %s). Use --force to re-index.\n", commitStr)
+				return
+			}
+		}
+	}
+
+	start := time.Now()
+	var lastPhase string
+
+	result, err := dualmem.ScanCodebase(rootDir, func(p dualmem.ScanProgress) {
+		if p.Phase != lastPhase {
+			if lastPhase != "" {
+				fmt.Fprintln(os.Stderr)
+			}
+			lastPhase = p.Phase
+		}
+		switch p.Phase {
+		case "walking":
+			fmt.Fprintf(os.Stderr, "\rWalking... %d dirs", p.DirsFound)
+		case "parsing":
+			fmt.Fprintf(os.Stderr, "\rParsing... %d/%d dirs (%d files)", p.DirsDone, p.DirsFound, p.FileCount)
+		}
+	})
+	fmt.Fprintln(os.Stderr) // finish the progress line
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Count files by language
+	var goCount, tsCount, pyCount, rsCount int
+	for _, mod := range result.CodeMap.Zoom2 {
+		switch mod.Language {
+		case "go", "Go":
+			goCount += mod.FileCount
+		case "typescript", "TypeScript":
+			tsCount += mod.FileCount
+		case "python", "Python":
+			pyCount += mod.FileCount
+		case "rust", "Rust":
+			rsCount += mod.FileCount
+		}
+	}
+
+	_, currentCommit := dualmem.GetGitState(rootDir)
+	result.CodeMap.Namespace = namespace
+	result.CodeMap.GitCommit = currentCommit
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating engine: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	engine.GetStore().UpsertCodeMap(namespace, rootDir, result.CodeMap.Zoom1, result.CodeMap.MarshalZoom2(), currentCommit)
+	if len(result.Edges) > 0 {
+		for i := range result.Edges {
+			result.Edges[i].Namespace = namespace
+		}
+		engine.GetStore().InsertStructuralEdges(namespace, result.Edges)
+	}
+
+	commitStr := currentCommit
+	if len(commitStr) > 7 {
+		commitStr = commitStr[:7]
+	}
+
+	fmt.Fprintf(os.Stderr, "  Go: %d, TypeScript: %d, Python: %d, Rust: %d\n", goCount, tsCount, pyCount, rsCount)
+	fmt.Fprintf(os.Stderr, "  Structural edges: %d\n", len(result.Edges))
+	fmt.Fprintf(os.Stderr, "  Modules: %d\n", len(result.CodeMap.Zoom2))
+	fmt.Fprintf(os.Stderr, "Cached at commit %s (took %s)\n", commitStr, time.Since(start).Round(time.Millisecond))
+}
+
 func cmdConsult(cfg CLIConfig) {
 	fs := flag.NewFlagSet("consult", flag.ExitOnError)
 	ns := fs.String("ns", "", "Namespace")
@@ -2264,6 +2373,15 @@ func cmdConsult(cfg CLIConfig) {
 		os.Exit(1)
 	}
 	defer engine.Close()
+	engine.OnScanProgress = func(p dualmem.ScanProgress) {
+		switch p.Phase {
+		case "walking":
+			fmt.Fprintf(os.Stderr, "\rIndexing... %d dirs", p.DirsFound)
+		case "parsing":
+			fmt.Fprintf(os.Stderr, "\rIndexing... %d/%d dirs", p.DirsDone, p.DirsFound)
+		}
+	}
+	defer fmt.Fprintln(os.Stderr)
 
 	ctx := context.Background()
 
@@ -2314,6 +2432,15 @@ func cmdExplore(cfg CLIConfig) {
 		os.Exit(1)
 	}
 	defer engine.Close()
+	engine.OnScanProgress = func(p dualmem.ScanProgress) {
+		switch p.Phase {
+		case "walking":
+			fmt.Fprintf(os.Stderr, "\rIndexing... %d dirs", p.DirsFound)
+		case "parsing":
+			fmt.Fprintf(os.Stderr, "\rIndexing... %d/%d dirs", p.DirsDone, p.DirsFound)
+		}
+	}
+	defer fmt.Fprintln(os.Stderr)
 
 	ctx := context.Background()
 	result, err := engine.Explore(ctx, namespace, query, *budget)

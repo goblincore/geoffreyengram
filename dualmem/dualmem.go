@@ -23,16 +23,17 @@ import (
 
 // Engine is the main DualMem implementation.
 type Engine struct {
-	mu         sync.RWMutex
-	store      Store
-	detail     *DetailPath
-	sketch     *SketchPath
-	pipeline   *Pipeline
-	projector  *Projector
-	embedder   EmbeddingProvider
-	classifier SectorClassifier
-	extractor  EntityExtractor
-	cfg        *Config
+	mu            sync.RWMutex
+	store         Store
+	detail        *DetailPath
+	sketch        *SketchPath
+	pipeline      *Pipeline
+	projector     *Projector
+	embedder      EmbeddingProvider
+	classifier    SectorClassifier
+	extractor     EntityExtractor
+	cfg           *Config
+	OnScanProgress func(ScanProgress) // optional callback for scan progress reporting
 }
 
 // NewForCodeSearch creates a minimal Engine for code search only.
@@ -2076,19 +2077,22 @@ func (e *Engine) getOrGenerateCodeMap(ctx context.Context, namespace string) (*C
 		return cm, BuildCodeIndex(cm)
 	}
 
-	// Regenerate
-	cm, err := ScanCodebase(e.cfg.RootDir)
+	// Regenerate (unified scan: code map + structural edges in one pass)
+	result, err := ScanCodebase(e.cfg.RootDir, e.OnScanProgress)
 	if err != nil {
 		return nil, nil
 	}
+	cm := result.CodeMap
 	cm.Namespace = namespace
 	cm.GitCommit = currentCommit
 
 	e.store.UpsertCodeMap(namespace, e.cfg.RootDir, cm.Zoom1, cm.MarshalZoom2(), cm.GitCommit)
 
-	// Build structural graph (call/import edges) alongside the code map
-	if edges, sgErr := BuildStructuralGraph(e.cfg.RootDir, namespace); sgErr == nil && len(edges) > 0 {
-		e.store.InsertStructuralEdges(namespace, edges)
+	if len(result.Edges) > 0 {
+		for i := range result.Edges {
+			result.Edges[i].Namespace = namespace
+		}
+		e.store.InsertStructuralEdges(namespace, result.Edges)
 	}
 
 	return cm, BuildCodeIndex(cm)
@@ -2102,9 +2106,9 @@ func flattenEmbeddings(embs map[string]ModuleEmbedding) map[string][]float32 {
 	return flat
 }
 
-// StoreCodeMap persists a code map to the database, embeds modules, and builds
-// the structural graph (call/import edges). Called by the CLI `map` command.
-func (e *Engine) StoreCodeMap(ctx context.Context, namespace string, cm *CodeMap) error {
+// StoreCodeMap persists a code map to the database, embeds modules, and stores
+// structural edges. Called by the CLI `map` command.
+func (e *Engine) StoreCodeMap(ctx context.Context, namespace string, cm *CodeMap, edges []StructuralEdge) error {
 	err := e.store.UpsertCodeMap(namespace, cm.RootDir, cm.Zoom1, cm.MarshalZoom2(), cm.GitCommit)
 	if err != nil {
 		return err
@@ -2113,8 +2117,11 @@ func (e *Engine) StoreCodeMap(ctx context.Context, namespace string, cm *CodeMap
 	if embErr == nil && embs != nil {
 		e.store.UpsertCodeMapEmbeddings(namespace, embs, e.embedder.ModelName())
 	}
-	// Build structural graph alongside the code map
-	if edges, sgErr := BuildStructuralGraph(cm.RootDir, namespace); sgErr == nil && len(edges) > 0 {
+	// Store structural edges from unified scan
+	if len(edges) > 0 {
+		for i := range edges {
+			edges[i].Namespace = namespace
+		}
 		e.store.InsertStructuralEdges(namespace, edges)
 	}
 	return nil

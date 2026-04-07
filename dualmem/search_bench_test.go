@@ -21,10 +21,11 @@ func TestSearchBenchmark(t *testing.T) {
 		t.Skip("can't resolve project root")
 	}
 
-	cm, err := ScanCodebase(rootDir)
+	result, err := ScanCodebase(rootDir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cm := result.CodeMap
 	embs := HDCEncodeCodeMap(cm)
 	idx := BuildCodeIndex(cm)
 
@@ -212,10 +213,11 @@ func BenchmarkSearchCodeMap_EndToEnd(b *testing.B) {
 		b.Skip("can't resolve cwd")
 	}
 
-	cm, err := ScanCodebase(rootDir)
+	result, err := ScanCodebase(rootDir, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
+	cm := result.CodeMap
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -232,10 +234,11 @@ func BenchmarkSearchCodeMap_QueryOnly(b *testing.B) {
 		b.Skip("can't resolve cwd")
 	}
 
-	cm, err := ScanCodebase(rootDir)
+	result, err := ScanCodebase(rootDir, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
+	cm := result.CodeMap
 	idx := BuildCodeIndex(cm)
 
 	b.ResetTimer()
@@ -252,10 +255,11 @@ func BenchmarkBuildCodeIndex(b *testing.B) {
 		b.Skip("can't resolve cwd")
 	}
 
-	cm, err := ScanCodebase(rootDir)
+	result, err := ScanCodebase(rootDir, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
+	cm := result.CodeMap
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

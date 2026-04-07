@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -81,13 +82,18 @@ var skipExactNames = map[string]bool{
 	"android": true, "ios": true,
 }
 
-// ScanCodebase walks a directory tree and builds a multi-resolution code map.
-// Uses go/ast for Go, regex heuristics for TypeScript, file counts for everything else.
-func ScanCodebase(rootDir string) (*CodeMap, error) {
+// ScanCodebase walks a directory tree and builds a multi-resolution code map
+// alongside structural edges (call/import relationships) in a single pass.
+// Uses go/ast for Go, tree-sitter for TS/Python/Rust.
+// The onProgress callback is called periodically; pass nil to disable.
+func ScanCodebase(rootDir string, onProgress func(ScanProgress)) (*CodemapScanResult, error) {
 	rootDir, err := filepath.Abs(rootDir)
 	if err != nil {
 		return nil, fmt.Errorf("codemap: abs path: %w", err)
 	}
+
+	// Initialize tree-sitter languages once upfront to avoid per-goroutine races.
+	ensureLangs()
 
 	// Collect source directories
 	type dirInfo struct {
@@ -102,6 +108,7 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 	dirs := make(map[string]*dirInfo)
 	maxDepth := 12
 	maxDirs := 5000
+	var totalFiles int
 
 	filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -125,6 +132,11 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 			if len(dirs) >= maxDirs {
 				return filepath.SkipDir
 			}
+
+			// Report walk progress every 100 dirs
+			if onProgress != nil && len(dirs)%100 == 0 && len(dirs) > 0 {
+				onProgress(ScanProgress{Phase: "walking", DirsFound: len(dirs), FileCount: totalFiles})
+			}
 			return nil
 		}
 
@@ -145,6 +157,7 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 		switch ext {
 		case ".go":
 			d.goFiles = append(d.goFiles, filepath.Join(dir, info.Name()))
+			totalFiles++
 		case ".ts", ".tsx", ".js", ".jsx":
 			// Skip test files from deep parsing — they add bulk but low codemap signal
 			name := info.Name()
@@ -153,20 +166,29 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 				!strings.HasSuffix(name, ".test.js") && !strings.HasSuffix(name, ".test.jsx") &&
 				!strings.HasSuffix(name, ".spec.js") && !strings.HasSuffix(name, ".spec.jsx") {
 				d.tsFiles = append(d.tsFiles, filepath.Join(dir, name))
+				totalFiles++
 			}
 		case ".py":
 			d.pyFiles = append(d.pyFiles, filepath.Join(dir, info.Name()))
+			totalFiles++
 		case ".rs":
 			d.rsFiles = append(d.rsFiles, filepath.Join(dir, info.Name()))
+			totalFiles++
 		case ".md":
 			d.mdFiles = append(d.mdFiles, filepath.Join(dir, info.Name()))
 		}
 		return nil
 	})
 
-	// Build module maps for directories with source code (parallel)
+	// Final walk progress
+	if onProgress != nil {
+		onProgress(ScanProgress{Phase: "walking", DirsFound: len(dirs), FileCount: totalFiles})
+	}
+
+	// Build module maps + extract structural edges for directories with source code (parallel)
 	type moduleResult struct {
-		mods []ModuleMap
+		mods  []ModuleMap
+		edges []StructuralEdge
 	}
 	results := make(chan moduleResult, len(dirs))
 	sem := make(chan struct{}, runtime.NumCPU())
@@ -175,6 +197,9 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 	for _, d := range dirs {
 		dirSlice = append(dirSlice, d)
 	}
+
+	totalDirs := len(dirSlice)
+	var dirsDone int64
 
 	var wg sync.WaitGroup
 	for _, d := range dirSlice {
@@ -185,23 +210,25 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			var mods []ModuleMap
+			var r moduleResult
+
+			// Module parsing — pick primary language (existing logic)
 			switch {
 			case len(d.goFiles) > 0:
-				mods = parseGoPackageSplit(d.relPath, d.goFiles)
+				r.mods = parseGoPackageSplit(d.relPath, d.goFiles)
 			case len(d.tsFiles) > 0:
-				mods = parseTSModuleSplit(d.relPath, d.tsFiles)
+				r.mods = parseTSModuleSplit(d.relPath, d.tsFiles)
 			case len(d.pyFiles) > 0:
 				if mod := parsePythonModule(d.relPath, d.pyFiles); mod != nil {
-					mods = []ModuleMap{*mod}
+					r.mods = []ModuleMap{*mod}
 				}
 			case len(d.rsFiles) > 0:
 				if mod := parseRustModule(d.relPath, d.rsFiles); mod != nil {
-					mods = []ModuleMap{*mod}
+					r.mods = []ModuleMap{*mod}
 				}
 			default:
 				if isInterestingDir(d.relPath) {
-					mods = []ModuleMap{{
+					r.mods = []ModuleMap{{
 						Path:      d.relPath + "/",
 						Language:  detectLanguage(d.allFiles),
 						FileCount: len(d.allFiles),
@@ -209,8 +236,33 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 					}}
 				}
 			}
-			if len(mods) > 0 {
-				results <- moduleResult{mods: mods}
+
+			// Edge extraction — for ALL languages present in this dir (separate from module switch)
+			if len(d.goFiles) > 0 {
+				r.edges = append(r.edges, extractGoCallEdges(d.relPath, d.goFiles)...)
+				r.edges = append(r.edges, extractImportEdges(d.relPath, d.goFiles, nil)...)
+			}
+			if len(d.tsFiles) > 0 {
+				r.edges = append(r.edges, extractTSCallEdges(d.relPath, d.tsFiles)...)
+				r.edges = append(r.edges, extractImportEdges(d.relPath, d.tsFiles, &tsLangConfig)...)
+			}
+			if len(d.pyFiles) > 0 {
+				r.edges = append(r.edges, extractPyCallEdges(d.relPath, d.pyFiles)...)
+				r.edges = append(r.edges, extractImportEdges(d.relPath, d.pyFiles, &pyConfig)...)
+			}
+			if len(d.rsFiles) > 0 {
+				r.edges = append(r.edges, extractRsCallEdges(d.relPath, d.rsFiles)...)
+				r.edges = append(r.edges, extractImportEdges(d.relPath, d.rsFiles, &rsConfig)...)
+			}
+
+			if len(r.mods) > 0 || len(r.edges) > 0 {
+				results <- r
+			}
+
+			// Report parse progress
+			done := atomic.AddInt64(&dirsDone, 1)
+			if onProgress != nil && done%10 == 0 {
+				onProgress(ScanProgress{Phase: "parsing", DirsFound: totalDirs, DirsDone: int(done), FileCount: totalFiles})
 			}
 		}()
 	}
@@ -221,8 +273,15 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 	}()
 
 	var modules []ModuleMap
+	var allEdges []StructuralEdge
 	for r := range results {
 		modules = append(modules, r.mods...)
+		allEdges = append(allEdges, r.edges...)
+	}
+
+	// Final parse progress
+	if onProgress != nil {
+		onProgress(ScanProgress{Phase: "parsing", DirsFound: totalDirs, DirsDone: totalDirs, FileCount: totalFiles})
 	}
 
 	// Process markdown files in all directories
@@ -249,11 +308,14 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 
 	zoom1 := synthesizeZoom1(modules, rootDir)
 
-	return &CodeMap{
-		RootDir:     rootDir,
-		Zoom1:       zoom1,
-		Zoom2:       modules,
-		GeneratedAt: time.Now(),
+	return &CodemapScanResult{
+		CodeMap: &CodeMap{
+			RootDir:     rootDir,
+			Zoom1:       zoom1,
+			Zoom2:       modules,
+			GeneratedAt: time.Now(),
+		},
+		Edges: allEdges,
 	}, nil
 }
 

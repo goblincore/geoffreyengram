@@ -48,10 +48,11 @@ func (e *Engine) Search(query string) []string {
 }
 `)
 
-	cm, err := ScanCodebase(tmpDir)
+	result, err := ScanCodebase(tmpDir, nil)
 	if err != nil {
 		t.Fatalf("ScanCodebase: %v", err)
 	}
+	cm := result.CodeMap
 
 	// Should have zoom-1
 	if cm.Zoom1 == "" {
@@ -134,10 +135,11 @@ export type UserID = string
 export const VERSION = "1.0.0"
 `)
 
-	cm, err := ScanCodebase(tmpDir)
+	result, err := ScanCodebase(tmpDir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cm := result.CodeMap
 
 	var srcMod *ModuleMap
 	for i := range cm.Zoom2 {
@@ -192,10 +194,11 @@ def _helper():
     pass
 `)
 
-	cm, err := ScanCodebase(tmpDir)
+	result, err := ScanCodebase(tmpDir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cm := result.CodeMap
 
 	var pyMod *ModuleMap
 	for i := range cm.Zoom2 {
@@ -275,10 +278,11 @@ fn parse_config() -> Config {
 }
 `)
 
-	cm, err := ScanCodebase(tmpDir)
+	result, err := ScanCodebase(tmpDir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cm := result.CodeMap
 
 	var rsMod *ModuleMap
 	for i := range cm.Zoom2 {
@@ -362,7 +366,7 @@ func TestSearchCodeMap(t *testing.T) {
 func BenchmarkScanCodebase(b *testing.B) {
 	// Benchmark on the geoffreyengram repo itself
 	for i := 0; i < b.N; i++ {
-		ScanCodebase(".")
+		ScanCodebase(".", nil)
 	}
 }
 
@@ -460,10 +464,11 @@ func TestScanCodebase_FiltersNonCodeDirs(t *testing.T) {
 		writeFile(t, miscDir, fmt.Sprintf("file%d.txt", i), "data")
 	}
 
-	cm, err := ScanCodebase(tmpDir)
+	result, err := ScanCodebase(tmpDir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cm := result.CodeMap
 
 	for _, m := range cm.Zoom2 {
 		for _, bad := range []string{"images", "icons", "fonts", "sass", ".github", ".changeset", ".superpowers", ".venv", "random-stuff"} {
@@ -803,10 +808,11 @@ export class ResumeFieldSource {}
 `)
 
 	// --- Scan and verify splitting ---
-	cm, err := ScanCodebase(tmpDir)
+	result, err := ScanCodebase(tmpDir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cm := result.CodeMap
 
 	t.Log("Modules found:")
 	for _, m := range cm.Zoom2 {
@@ -894,7 +900,7 @@ export function Component%d() { return null }
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		ScanCodebase(tmpDir)
+		ScanCodebase(tmpDir, nil)
 	}
 }
 
@@ -1262,10 +1268,11 @@ export const Widget: React.FC<WidgetProps> = ({ title }) => <div>{title}</div>;
 export default Widget;
 `)
 
-	cm, err := ScanCodebase(tmpDir)
+	result, err := ScanCodebase(tmpDir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cm := result.CodeMap
 	found := false
 	for _, m := range cm.Zoom2 {
 		if strings.Contains(m.Path, "Widget") {
@@ -1290,10 +1297,11 @@ func TestScanCodebase_ManyDirs(t *testing.T) {
 		writeFile(t, dir, "index.ts", fmt.Sprintf(`export const value%d = %d;`, i, i))
 	}
 
-	cm, err := ScanCodebase(tmpDir)
+	result, err := ScanCodebase(tmpDir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cm := result.CodeMap
 	if len(cm.Zoom2) < 300 {
 		t.Errorf("expected >=300 modules, got %d (maxDirs cap too low?)", len(cm.Zoom2))
 	}
@@ -1314,10 +1322,11 @@ func main() {}
 func BenchStuff() {}
 `)
 
-	cm, err := ScanCodebase(tmpDir)
+	result, err := ScanCodebase(tmpDir, nil)
 	if err != nil {
 		t.Fatalf("ScanCodebase: %v", err)
 	}
+	cm := result.CodeMap
 
 	for _, m := range cm.Zoom2 {
 		if strings.Contains(m.Path, "benchmarks") {
@@ -1451,10 +1460,11 @@ This project provides authentication and authorization services for web applicat
 It supports OAuth 2.0, SAML, and custom identity providers.
 `)
 
-	cm, err := ScanCodebase(tmpDir)
+	result, err := ScanCodebase(tmpDir, nil)
 	if err != nil {
 		t.Fatalf("ScanCodebase: %v", err)
 	}
+	cm := result.CodeMap
 
 	// Should find markdown modules
 	var foundGuide, foundReadme bool

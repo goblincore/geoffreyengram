@@ -280,15 +280,20 @@ export function compute() { x(); }
 		t.Fatal(err)
 	}
 
-	edges, err := BuildStructuralGraph(tmpDir, "test-ns")
+	result, err := ScanCodebase(tmpDir, nil)
 	if err != nil {
-		t.Fatalf("BuildStructuralGraph: %v", err)
+		t.Fatalf("ScanCodebase: %v", err)
 	}
+	edges := result.Edges
+
 	if len(edges) < 3 {
 		t.Fatalf("expected at least 3 edges, got %d", len(edges))
 	}
 
-	// All edges should have Namespace "test-ns"
+	// Set namespace and verify
+	for i := range edges {
+		edges[i].Namespace = "test-ns"
+	}
 	for _, e := range edges {
 		if e.Namespace != "test-ns" {
 			t.Errorf("expected Namespace test-ns, got %q", e.Namespace)
@@ -382,10 +387,11 @@ func main() {}
 		t.Fatal(err)
 	}
 
-	edges, err := BuildStructuralGraph(tmpDir, "ns")
+	result, err := ScanCodebase(tmpDir, nil)
 	if err != nil {
-		t.Fatalf("BuildStructuralGraph: %v", err)
+		t.Fatalf("ScanCodebase: %v", err)
 	}
+	edges := result.Edges
 
 	for _, e := range edges {
 		if strings.Contains(e.SourcePath, "node_modules") {

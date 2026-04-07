@@ -7,6 +7,22 @@ import (
 	"time"
 )
 
+// --- Scan types ---
+
+// CodemapScanResult holds the combined output of a unified codebase scan.
+type CodemapScanResult struct {
+	CodeMap *CodeMap
+	Edges   []StructuralEdge
+}
+
+// ScanProgress reports indexing progress to callers.
+type ScanProgress struct {
+	Phase     string // "walking", "parsing"
+	DirsFound int
+	DirsDone  int
+	FileCount int
+}
+
 // --- Provider interfaces ---
 
 // EmbeddingProvider generates vector embeddings from text.

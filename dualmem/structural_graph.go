@@ -2,7 +2,6 @@ package dualmem
 
 import (
 	"bytes"
-	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -355,96 +354,4 @@ func extractImportEdges(relPath string, files []string, cfg *langConfig) []Struc
 	return edges
 }
 
-// BuildStructuralGraph scans a project directory and extracts all structural edges
-// (function calls and imports) from Go, TypeScript, Python, and Rust source files.
-// Returns all edges with Namespace set to the provided namespace.
-func BuildStructuralGraph(rootDir, namespace string) ([]StructuralEdge, error) {
-	rootDir, err := filepath.Abs(rootDir)
-	if err != nil {
-		return nil, fmt.Errorf("structural_graph: abs path: %w", err)
-	}
 
-	type dirInfo struct {
-		relPath string
-		goFiles []string
-		tsFiles []string
-		pyFiles []string
-		rsFiles []string
-	}
-	dirs := make(map[string]*dirInfo)
-	maxDepth := 12
-	maxDirs := 1000
-
-	filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		if info.IsDir() {
-			if skipDirs[info.Name()] || skipExactNames[info.Name()] {
-				return filepath.SkipDir
-			}
-			rel, _ := filepath.Rel(rootDir, path)
-			depth := strings.Count(rel, string(os.PathSeparator))
-			if depth > maxDepth {
-				return filepath.SkipDir
-			}
-			if len(dirs) >= maxDirs {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		dir := filepath.Dir(path)
-		relDir, _ := filepath.Rel(rootDir, dir)
-		if relDir == "" {
-			relDir = "."
-		}
-
-		d, ok := dirs[relDir]
-		if !ok {
-			d = &dirInfo{relPath: relDir}
-			dirs[relDir] = d
-		}
-
-		ext := filepath.Ext(info.Name())
-		switch ext {
-		case ".go":
-			d.goFiles = append(d.goFiles, filepath.Join(dir, info.Name()))
-		case ".ts", ".tsx":
-			d.tsFiles = append(d.tsFiles, filepath.Join(dir, info.Name()))
-		case ".py":
-			d.pyFiles = append(d.pyFiles, filepath.Join(dir, info.Name()))
-		case ".rs":
-			d.rsFiles = append(d.rsFiles, filepath.Join(dir, info.Name()))
-		}
-		return nil
-	})
-
-	ensureLangs()
-
-	var edges []StructuralEdge
-	for _, d := range dirs {
-		if len(d.goFiles) > 0 {
-			edges = append(edges, extractGoCallEdges(d.relPath, d.goFiles)...)
-			edges = append(edges, extractImportEdges(d.relPath, d.goFiles, nil)...)
-		}
-		if len(d.tsFiles) > 0 {
-			edges = append(edges, extractTSCallEdges(d.relPath, d.tsFiles)...)
-			edges = append(edges, extractImportEdges(d.relPath, d.tsFiles, &tsLangConfig)...)
-		}
-		if len(d.pyFiles) > 0 {
-			edges = append(edges, extractPyCallEdges(d.relPath, d.pyFiles)...)
-			edges = append(edges, extractImportEdges(d.relPath, d.pyFiles, &pyConfig)...)
-		}
-		if len(d.rsFiles) > 0 {
-			edges = append(edges, extractRsCallEdges(d.relPath, d.rsFiles)...)
-			edges = append(edges, extractImportEdges(d.relPath, d.rsFiles, &rsConfig)...)
-		}
-	}
-
-	for i := range edges {
-		edges[i].Namespace = namespace
-	}
-
-	return edges, nil
-}
