@@ -1652,6 +1652,99 @@ func (e *Engine) ReadCodeEvidence(ctx context.Context, namespace, query string, 
 	evidence := &CodeEvidence{}
 	rootDir := cm.RootDir
 
+	// Expand directory/module-path results into actual source files.
+	// Module paths can be directories ("helpers/auth/") or virtual paths
+	// ("helpers/guardian-approval.helpers/") where the actual file is
+	// "helpers/guardian-approval.helpers.ts". We try multiple resolutions.
+	var expanded []FileResult
+	sourceExts := []string{".ts", ".tsx", ".js", ".jsx", ".go", ".py", ".rs"}
+	for _, fr := range fileResults {
+		fullPath := filepath.Join(rootDir, fr.FilePath)
+		info, statErr := os.Stat(fullPath)
+
+		if statErr == nil && !info.IsDir() {
+			// Direct file hit
+			expanded = append(expanded, fr)
+			continue
+		}
+
+		if statErr == nil && info.IsDir() {
+			// Real directory — list source files inside
+			entries, err := os.ReadDir(fullPath)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				if e.IsDir() {
+					continue
+				}
+				ext := filepath.Ext(e.Name())
+				for _, se := range sourceExts {
+					if ext == se {
+						expanded = append(expanded, FileResult{
+							ModulePath:    fr.ModulePath,
+							FilePath:      filepath.Join(fr.FilePath, e.Name()),
+							FileScore:     fr.FileScore,
+							ModuleScore:   fr.ModuleScore,
+							CombinedScore: fr.CombinedScore,
+							Summary:       fr.Summary,
+						})
+						break
+					}
+				}
+			}
+			continue
+		}
+
+		// Path doesn't exist — try stripping trailing slash and adding extensions.
+		// Module path "helpers/foo/" might map to "helpers/foo.ts".
+		basePath := strings.TrimSuffix(fr.FilePath, "/")
+		for _, ext := range sourceExts {
+			candidate := filepath.Join(rootDir, basePath+ext)
+			if _, err := os.Stat(candidate); err == nil {
+				expanded = append(expanded, FileResult{
+					ModulePath:    fr.ModulePath,
+					FilePath:      basePath + ext,
+					FileScore:     fr.FileScore,
+					ModuleScore:   fr.ModuleScore,
+					CombinedScore: fr.CombinedScore,
+					Summary:       fr.Summary,
+				})
+				break
+			}
+		}
+		// Also try the directory without trailing slash (in case it's a real dir)
+		if info2, err := os.Stat(filepath.Join(rootDir, basePath)); err == nil && info2.IsDir() {
+			entries, err := os.ReadDir(filepath.Join(rootDir, basePath))
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				if e.IsDir() {
+					continue
+				}
+				ext := filepath.Ext(e.Name())
+				for _, se := range sourceExts {
+					if ext == se {
+						expanded = append(expanded, FileResult{
+							ModulePath:    fr.ModulePath,
+							FilePath:      filepath.Join(basePath, e.Name()),
+							FileScore:     fr.FileScore,
+							ModuleScore:   fr.ModuleScore,
+							CombinedScore: fr.CombinedScore,
+							Summary:       fr.Summary,
+						})
+						break
+					}
+				}
+			}
+		}
+	}
+	fileResults = expanded
+	if len(fileResults) > opts.MaxFiles {
+		fileResults = fileResults[:opts.MaxFiles]
+	}
+
 	for _, fr := range fileResults {
 		if evidence.TotalTokens >= opts.MaxTokens {
 			break
