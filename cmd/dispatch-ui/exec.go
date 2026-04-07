@@ -438,14 +438,16 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 		lb.Append(fmt.Sprintf("[dispatch] created worktree at %s (branch: %s from %s)", worktreePath, branch, startPoint))
 
 		// If multiple dependencies, merge the remaining ones into the worktree
-		for _, depBranch := range depBranches[1:] {
-			mergeCmd := exec.Command("git", "-C", worktreePath, "merge", depBranch, "--no-edit",
-				"-m", fmt.Sprintf("dispatch: merge dependency %s", depBranch))
-			if mergeOut, mergeErr := mergeCmd.CombinedOutput(); mergeErr != nil {
-				lb.Append(fmt.Sprintf("[dispatch] WARNING: merge of %s failed: %s — may need manual resolution",
-					depBranch, strings.TrimSpace(string(mergeOut))))
-			} else {
-				lb.Append(fmt.Sprintf("[dispatch] merged dependency branch: %s", depBranch))
+		if len(depBranches) > 1 {
+			for _, depBranch := range depBranches[1:] {
+				mergeCmd := exec.Command("git", "-C", worktreePath, "merge", depBranch, "--no-edit",
+					"-m", fmt.Sprintf("dispatch: merge dependency %s", depBranch))
+				if mergeOut, mergeErr := mergeCmd.CombinedOutput(); mergeErr != nil {
+					lb.Append(fmt.Sprintf("[dispatch] WARNING: merge of %s failed: %s — may need manual resolution",
+						depBranch, strings.TrimSpace(string(mergeOut))))
+				} else {
+					lb.Append(fmt.Sprintf("[dispatch] merged dependency branch: %s", depBranch))
+				}
 			}
 		}
 
