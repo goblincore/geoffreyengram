@@ -744,44 +744,52 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 	// --- Load checkpoints early (for file hints) ---
 	checkpoints, _ := e.GetCheckpoints(ctx, userID)
 
-	// --- Code map (≤400 tokens, memory-informed ranking) ---
+	// --- Code map (≤400 tokens, graph-ranked PageRank) ---
 	if e.cfg.RootDir != "" && tokenBudget >= 500 {
 		mapBudget := 400
 		if tokenBudget-tokensUsed-200 < mapBudget {
 			mapBudget = tokenBudget - tokensUsed - 200
 		}
 		if mapBudget > 50 {
-			codeMap, codeIdx := e.getOrGenerateCodeMap(ctx, userID)
-			if codeMap != nil {
-				// Codemap uses HDC vectors — encode query with HDC for matching dimensions
-				codemapQuery := HDCEncodeQuery(query)
-				var moduleEmbs map[string][]float32
-				if codeIdx != nil {
-					moduleEmbs = codeIdx.HDCVectors
-				}
-				// Extract file hints from checkpoints and memories to boost relevant modules
-				boostPaths := extractFileHints(checkpoints, results.DetailMemories)
-				// Expand boost paths with co-change neighbors for structural awareness
-				var cochangeNeighbors map[string]float64
-				if ns := e.namespace(); ns != "" && len(boostPaths) > 0 {
-					cochangeNeighbors = e.GetCoChangeForPaths(ns, boostPaths, 1.0)
-					// Expand via structural graph (calls/imports) — blended multi-hop scoring
-					structuralNeighbors := e.GetStructuralNeighborPaths(ns, boostPaths, 2)
-					// Merge structural into co-change map (take the higher score)
-					if cochangeNeighbors == nil {
-						cochangeNeighbors = structuralNeighbors
-					} else {
-						for path, score := range structuralNeighbors {
-							if existing, ok := cochangeNeighbors[path]; !ok || score > existing {
-								cochangeNeighbors[path] = score
-							}
-						}
+			// Build personalization overrides from memory-derived boost paths
+			boostPaths := extractFileHints(checkpoints, results.DetailMemories)
+			personalOverrides := make(map[string]float64)
+
+			// Direct boost paths from checkpoints/memories get high weight
+			for _, bp := range boostPaths {
+				personalOverrides[bp] = 10.0
+			}
+
+			// Expand via co-change and structural graph neighbors
+			if ns := e.namespace(); ns != "" && len(boostPaths) > 0 {
+				cochangeNeighbors := e.GetCoChangeForPaths(ns, boostPaths, 1.0)
+				for path, strength := range cochangeNeighbors {
+					if _, exists := personalOverrides[path]; !exists {
+						personalOverrides[path] = 5.0 * strength
 					}
 				}
-				// For continue intent (vague queries like "what next"), use boost-only mode:
-				// show only modules referenced by checkpoints/memories instead of noisy HDC ranking
-				useBoostOnly := intent == IntentContinue && len(boostPaths) > 0
-				mapText := codeMap.RenderAtBudgetWithCoChange(mapBudget, codemapQuery, moduleEmbs, boostPaths, cochangeNeighbors, useBoostOnly)
+				structuralNeighbors := e.GetStructuralNeighborPaths(ns, boostPaths, 2)
+				for path, score := range structuralNeighbors {
+					if existing, exists := personalOverrides[path]; !exists || 3.0*score > existing {
+						personalOverrides[path] = 3.0 * score
+					}
+				}
+			}
+
+			// Get SQLite store for tag caching (optional)
+			var tagStore *SQLiteStore
+			if s, ok := e.store.(*SQLiteStore); ok {
+				tagStore = s
+			}
+
+			scanner := &RepoScanner{
+				RootDir:   e.cfg.RootDir,
+				Namespace: e.namespace(),
+				Store:     tagStore,
+			}
+			scanResult, scanErr := scanner.ScanAndRank(query, personalOverrides)
+			if scanErr == nil && scanResult != nil && len(scanResult.Files) > 0 {
+				mapText := scanResult.RenderForContext(mapBudget)
 				mapTokens := estimateTokens(mapText)
 				parts = append(parts, "[Codebase Map]\n"+mapText)
 				sources = append(sources, SourceRef{Type: "codemap", ID: userID})

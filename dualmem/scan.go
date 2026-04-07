@@ -119,6 +119,17 @@ func (s *RepoScanner) discoverFiles() ([]fileEntry, error) {
 			return nil
 		}
 
+		// Skip large files (>100KB) — likely bundled/generated
+		if info, err := d.Info(); err == nil && info.Size() > 100*1024 {
+			return nil
+		}
+
+		// Skip known generated file patterns
+		base := filepath.Base(path)
+		if isGeneratedFileName(base) {
+			return nil
+		}
+
 		files = append(files, fileEntry{
 			absPath: path,
 			relPath: filepath.ToSlash(rel),
@@ -402,4 +413,93 @@ func (sr *ScanResult) SortFilesByPath() {
 	sort.Slice(sr.Files, func(i, j int) bool {
 		return sr.Files[i].Path < sr.Files[j].Path
 	})
+}
+
+// RenderForContext produces a codemap text block from graph-ranked files,
+// suitable for injection into AssembleContext output. It includes a zoom1
+// summary header followed by top-ranked files within the token budget.
+func (sr *ScanResult) RenderForContext(maxTokens int) string {
+	if sr == nil || len(sr.Files) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+
+	// Zoom1-style header: language composition + file count
+	header := sr.synthesizeHeader()
+	sb.WriteString(header)
+	headerTokens := len(header) / 4
+
+	remaining := maxTokens - headerTokens
+	if remaining < 50 {
+		return sb.String()
+	}
+
+	sb.WriteString("\n")
+	body := RenderRankedFiles(sr.Files, remaining)
+	sb.WriteString(body)
+
+	return sb.String()
+}
+
+// synthesizeHeader generates a one-line project summary from scan results,
+// similar to the old CodeMap.Zoom1 but derived from tags rather than AST modules.
+func (sr *ScanResult) synthesizeHeader() string {
+	langCounts := make(map[string]int)
+	for _, t := range sr.AllTags {
+		if t.Kind == "def" {
+			lang := detectLangFromPath(t.File)
+			if lang != "" {
+				langCounts[lang]++
+			}
+		}
+	}
+
+	var langs []string
+	for _, l := range []string{"Go", "TypeScript", "Python", "Rust"} {
+		key := strings.ToLower(l)
+		if langCounts[key] > 0 {
+			langs = append(langs, l)
+		}
+	}
+
+	prefix := "Project"
+	if len(langs) > 0 {
+		prefix = strings.Join(langs, "+") + " project"
+	}
+
+	return fmt.Sprintf("%s. %d files scanned, %d symbols extracted.\n", prefix, sr.FileCount, sr.TagCount)
+}
+
+// isGeneratedFileName returns true for filenames that typically indicate
+// bundled, minified, or generated code.
+func isGeneratedFileName(name string) bool {
+	lower := strings.ToLower(name)
+	for _, pattern := range []string{
+		".min.js", ".bundle.js", ".chunk.js",
+		"swagger-ui", ".generated.", ".pb.go",
+		"_generated.go", ".d.ts",
+	} {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// detectLangFromPath returns the language name from a file extension.
+func detectLangFromPath(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".go":
+		return "go"
+	case ".ts", ".tsx", ".js", ".jsx", ".mjs":
+		return "typescript"
+	case ".py":
+		return "python"
+	case ".rs":
+		return "rust"
+	default:
+		return ""
+	}
 }

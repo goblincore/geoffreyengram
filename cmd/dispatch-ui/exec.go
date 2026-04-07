@@ -407,12 +407,47 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 	// Delete stale branch if it exists
 	exec.Command("git", "-C", plan.Project, "branch", "-D", branch).Run()
 
-	wtCmd := exec.Command("git", "-C", plan.Project, "worktree", "add", worktreePath, "-b", branch, "HEAD")
+	// Resolve the base commit for the worktree:
+	// - If depends_on has entries, branch from the first dependency's branch
+	// - Otherwise branch from HEAD (main)
+	startPoint := "HEAD"
+	var depBranches []string
+	if len(plan.DependsOn) > 0 {
+		for _, dep := range plan.DependsOn {
+			depPlan, err := parsePlanFile(filepath.Join(e.Config.PlansDir, dep+".md"))
+			if err != nil {
+				continue
+			}
+			depBranch := depPlan.Branch
+			if depBranch == "" {
+				depBranch = "dispatch/" + dep
+			}
+			depBranches = append(depBranches, depBranch)
+		}
+		if len(depBranches) > 0 {
+			startPoint = depBranches[0]
+			lb.Append(fmt.Sprintf("[dispatch] branching from dependency: %s", startPoint))
+		}
+	}
+
+	wtCmd := exec.Command("git", "-C", plan.Project, "worktree", "add", worktreePath, "-b", branch, startPoint)
 	if out, err := wtCmd.CombinedOutput(); err != nil {
 		lb.Append(fmt.Sprintf("[dispatch] worktree creation failed: %s — running in project dir", strings.TrimSpace(string(out))))
 	} else {
 		workDir = worktreePath
-		lb.Append(fmt.Sprintf("[dispatch] created worktree at %s (branch: %s)", worktreePath, branch))
+		lb.Append(fmt.Sprintf("[dispatch] created worktree at %s (branch: %s from %s)", worktreePath, branch, startPoint))
+
+		// If multiple dependencies, merge the remaining ones into the worktree
+		for _, depBranch := range depBranches[1:] {
+			mergeCmd := exec.Command("git", "-C", worktreePath, "merge", depBranch, "--no-edit",
+				"-m", fmt.Sprintf("dispatch: merge dependency %s", depBranch))
+			if mergeOut, mergeErr := mergeCmd.CombinedOutput(); mergeErr != nil {
+				lb.Append(fmt.Sprintf("[dispatch] WARNING: merge of %s failed: %s — may need manual resolution",
+					depBranch, strings.TrimSpace(string(mergeOut))))
+			} else {
+				lb.Append(fmt.Sprintf("[dispatch] merged dependency branch: %s", depBranch))
+			}
+		}
 
 		// Symlink .claude/ from main repo so Claude Code finds CLAUDE.md
 		claudeDir := filepath.Join(plan.Project, ".claude")

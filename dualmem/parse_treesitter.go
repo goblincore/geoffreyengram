@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	ts "github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammars"
@@ -104,16 +105,14 @@ var (
 )
 
 // lazily initialized tree-sitter language pointers.
-var langsInitialized bool
+var langsOnce sync.Once
 
 func ensureLangs() {
-	if langsInitialized {
-		return
-	}
-	tsLangConfig.lang = grammars.TypescriptLanguage()
-	pyConfig.lang = grammars.PythonLanguage()
-	rsConfig.lang = grammars.RustLanguage()
-	langsInitialized = true
+	langsOnce.Do(func() {
+		tsLangConfig.lang = grammars.TypescriptLanguage()
+		pyConfig.lang = grammars.PythonLanguage()
+		rsConfig.lang = grammars.RustLanguage()
+	})
 }
 
 // parseTSModule parses TypeScript/JavaScript files using tree-sitter.

@@ -5,14 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"go/ast"
-	"math"
 	"go/parser"
 	"go/token"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -55,17 +57,28 @@ var skipDirs = map[string]bool{
 	".nx-cache": true, ".github": true, ".changeset": true, ".superpowers": true,
 	".turbo": true, ".cache": true, ".parcel-cache": true, ".output": true,
 	".nuxt": true, ".svelte-kit": true, "tmp": true, "temp": true, "logs": true,
-	".vexp": true, "benchmarks": true,
+	".vexp": true, "benchmarks": true, "benchmark": true, "validation": true,
 	// Python virtual environments & tool caches
 	".venv": true, "venv": true, ".virtualenv": true, "env": true, ".env": true,
 	".tox": true, ".mypy_cache": true, ".pytest_cache": true, ".ruff_cache": true,
+	// Test/report artifacts
+	"playwright-report": true, "test-results": true, "storybook-static": true,
+	// Generated code (OpenAPI, protobuf, etc.)
+	".openapi-generator": true,
 }
+
+// skipContainsMarker skips directories that contain a marker file indicating generated code.
+var generatedMarkers = []string{".openapi-generator", ".swagger-codegen"}
 
 // skipExactNames filters out non-code content directories by exact base name.
 var skipExactNames = map[string]bool{
 	"assets": true, "images": true, "icons": true, "fonts": true,
 	"sass": true, "scss": true, "styles": true, "css": true,
 	"fixtures": true, "snapshots": true, "__snapshots__": true, "__mocks__": true,
+	// Test directories — useful code but low signal for codemap search
+	"__tests__": true, "__test__": true,
+	// Mobile build artifacts
+	"android": true, "ios": true,
 }
 
 // ScanCodebase walks a directory tree and builds a multi-resolution code map.
@@ -88,7 +101,7 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 	}
 	dirs := make(map[string]*dirInfo)
 	maxDepth := 12
-	maxDirs := 1000
+	maxDirs := 5000
 
 	filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -97,6 +110,12 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 		if info.IsDir() {
 			if skipDirs[info.Name()] || skipExactNames[info.Name()] {
 				return filepath.SkipDir
+			}
+			// Skip directories containing generated code markers
+			for _, marker := range generatedMarkers {
+				if _, err := os.Stat(filepath.Join(path, marker)); err == nil {
+					return filepath.SkipDir
+				}
 			}
 			rel, _ := filepath.Rel(rootDir, path)
 			depth := strings.Count(rel, string(os.PathSeparator))
@@ -126,8 +145,15 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 		switch ext {
 		case ".go":
 			d.goFiles = append(d.goFiles, filepath.Join(dir, info.Name()))
-		case ".ts", ".tsx":
-			d.tsFiles = append(d.tsFiles, filepath.Join(dir, info.Name()))
+		case ".ts", ".tsx", ".js", ".jsx":
+			// Skip test files from deep parsing — they add bulk but low codemap signal
+			name := info.Name()
+			if !strings.HasSuffix(name, ".test.ts") && !strings.HasSuffix(name, ".test.tsx") &&
+				!strings.HasSuffix(name, ".spec.ts") && !strings.HasSuffix(name, ".spec.tsx") &&
+				!strings.HasSuffix(name, ".test.js") && !strings.HasSuffix(name, ".test.jsx") &&
+				!strings.HasSuffix(name, ".spec.js") && !strings.HasSuffix(name, ".spec.jsx") {
+				d.tsFiles = append(d.tsFiles, filepath.Join(dir, name))
+			}
 		case ".py":
 			d.pyFiles = append(d.pyFiles, filepath.Join(dir, info.Name()))
 		case ".rs":
@@ -138,37 +164,65 @@ func ScanCodebase(rootDir string) (*CodeMap, error) {
 		return nil
 	})
 
-	// Build module maps for directories with source code
-	var modules []ModuleMap
+	// Build module maps for directories with source code (parallel)
+	type moduleResult struct {
+		mods []ModuleMap
+	}
+	results := make(chan moduleResult, len(dirs))
+	sem := make(chan struct{}, runtime.NumCPU())
+
+	dirSlice := make([]*dirInfo, 0, len(dirs))
 	for _, d := range dirs {
-		var mod *ModuleMap
-		switch {
-		case len(d.goFiles) > 0:
-			mods := parseGoPackageSplit(d.relPath, d.goFiles)
-			modules = append(modules, mods...)
-			continue
-		case len(d.tsFiles) > 0:
-			// TypeScript: split significant files into own modules
-			mods := parseTSModuleSplit(d.relPath, d.tsFiles)
-			modules = append(modules, mods...)
-			continue
-		case len(d.pyFiles) > 0:
-			mod = parsePythonModule(d.relPath, d.pyFiles)
-		case len(d.rsFiles) > 0:
-			mod = parseRustModule(d.relPath, d.rsFiles)
-		default:
-			if isInterestingDir(d.relPath) {
-				mod = &ModuleMap{
-					Path:      d.relPath + "/",
-					Language:  detectLanguage(d.allFiles),
-					FileCount: len(d.allFiles),
-					Summary:   fmt.Sprintf("%d files", len(d.allFiles)),
+		dirSlice = append(dirSlice, d)
+	}
+
+	var wg sync.WaitGroup
+	for _, d := range dirSlice {
+		d := d
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			var mods []ModuleMap
+			switch {
+			case len(d.goFiles) > 0:
+				mods = parseGoPackageSplit(d.relPath, d.goFiles)
+			case len(d.tsFiles) > 0:
+				mods = parseTSModuleSplit(d.relPath, d.tsFiles)
+			case len(d.pyFiles) > 0:
+				if mod := parsePythonModule(d.relPath, d.pyFiles); mod != nil {
+					mods = []ModuleMap{*mod}
+				}
+			case len(d.rsFiles) > 0:
+				if mod := parseRustModule(d.relPath, d.rsFiles); mod != nil {
+					mods = []ModuleMap{*mod}
+				}
+			default:
+				if isInterestingDir(d.relPath) {
+					mods = []ModuleMap{{
+						Path:      d.relPath + "/",
+						Language:  detectLanguage(d.allFiles),
+						FileCount: len(d.allFiles),
+						Summary:   fmt.Sprintf("%d files", len(d.allFiles)),
+					}}
 				}
 			}
-		}
-		if mod != nil {
-			modules = append(modules, *mod)
-		}
+			if len(mods) > 0 {
+				results <- moduleResult{mods: mods}
+			}
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var modules []ModuleMap
+	for r := range results {
+		modules = append(modules, r.mods...)
 	}
 
 	// Process markdown files in all directories
