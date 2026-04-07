@@ -18,6 +18,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -114,9 +115,23 @@ func resolveNamespace(flagNS string, cfg CLIConfig) string {
 		return cfg.DefaultNamespace
 	}
 
-	// Auto-detect from cwd
+	// Auto-detect from git root, falling back to cwd basename.
+	// This prevents namespace fragmentation when running from
+	// subdirectories, worktrees, or the root directory.
 	cwd, _ := os.Getwd()
+
+	// Try git toplevel first (handles subdirectories and worktrees)
+	if out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output(); err == nil {
+		gitRoot := strings.TrimSpace(string(out))
+		if gitRoot != "" && gitRoot != "/" {
+			return "claude:" + filepath.Base(gitRoot)
+		}
+	}
+
 	base := filepath.Base(cwd)
+	if base == "/" || base == "." {
+		return "claude:default"
+	}
 	return "claude:" + base
 }
 

@@ -6,54 +6,49 @@ Pure Go, SQLite (no CGO), single binary.
 
 ## Architecture
 
-```mermaid
-graph TB
-    subgraph Input
-        Add["dualmem add"] --> Router{"Importance<br/>Router"}
-        Distill["dualmem distill"] --> Router
-    end
-
-    subgraph "Storage Layers"
-        Router -->|"score ≥ 0.65"| Detail["🔬 Detail Path<br/>Full fidelity · Top-100<br/>768d embeddings"]
-        Router -->|"score < 0.65"| Sketch["📐 Sketch Path<br/>Episodes → Arcs → Profile<br/>768d → 128d → 64d"]
-    end
-
-    subgraph "Structural Layers"
-        Detail -->|"file associations"| CoChange["🔗 Co-Change Graph<br/>File pairs · strength · concepts"]
-        Detail -->|"entity extraction"| EntityGraph["🕸️ Entity Graph<br/>Nodes · typed edges · memory links"]
-        CodeMap["📦 HDC Codemap<br/>2048d per module · no API calls"]
-    end
-
-    subgraph "Synthesis"
-        Detail --> KDocs["📄 Knowledge Docs<br/>Clustered concept summaries"]
-    end
-
-    subgraph "Context Assembly"
-        Query["Query + Token Budget"] --> Context["AssembleContext"]
-        Detail --> Context
-        Sketch --> Context
-        CodeMap --> Context
-        CoChange -->|"boost neighbors"| Context
-        EntityGraph -->|"structure-aware boost"| Context
-        KDocs --> Context
-        Context --> Output["Token-budgeted<br/>context block"]
-    end
-
-    subgraph "Intelligence"
-        ConsultQ["Consult Query"] --> Consult["Consult"]
-        KDocs -->|"cache hit ≥0.75"| Consult
-        CodeMap -->|"HDC ranking"| Consult
-        CoChange --> Consult
-        Detail --> Consult
-        Consult -->|"cache miss"| LLM["Gemini Flash<br/>Synthesize"]
-        LLM -->|"save"| KDocs
-        Consult --> Report["3-section<br/>intelligence report"]
-    end
+```
+                            ┌─────────────────────────────────────────────┐
+                            │              CONTEXT ASSEMBLY               │
+                            │                                             │
+  ┌──────────┐              │   Query + Token Budget                      │
+  │ dualmem  │              │         │                                   │
+  │   add    │──┐           │         ▼                                   │
+  └──────────┘  │  ┌────────│── Structural Diff (what changed?)           │
+  ┌──────────┐  │  │        │── Codemap (cold start only, ~400 tok)      │
+  │ dualmem  │──┤  │        │── Checkpoints (session handoffs)            │
+  │ distill  │  │  │        │── File Annotations (grouped by file)  ◄────│── NEW
+  └──────────┘  │  │        │── Knowledge Docs (synthesized concepts)     │
+                ▼  │        │── Detail Memories (decisions, warnings)     │
+          ┌─────────────┐   │── Sketch (arcs, profile)                   │
+          │ Importance   │  │         │                                   │
+          │   Router     │  │         ▼                                   │
+          │  (no LLM)    │  │   Token-budgeted context block             │
+          └──────┬───────┘  └─────────────────────────────────────────────┘
+           ┌─────┴─────┐
+           │           │
+     ≥ 0.65│     < 0.65│        ┌─────────────────────────────┐
+           ▼           ▼        │       STRUCTURAL LAYERS     │
+    ┌────────────┐ ┌────────┐   │                             │
+    │Detail Path │ │ Sketch │   │  Co-Change Graph            │
+    │full fidelity│ │episodes│   │   └─ file pairs + strength  │
+    │top-100     │ │→ arcs  │   │  Entity Graph               │
+    │768d embeds │ │→ profile│   │   └─ typed edges + links    │
+    └─────┬──────┘ └────────┘   │  HDC Codemap                │
+          │                     │   └─ 2048d, no API calls     │
+          ├── file associations │  Structural Graph            │
+          ├── entity extraction │   └─ calls, imports, contains│
+          └── synthesis ──────► │  Knowledge Docs              │
+                                │   └─ clustered summaries     │
+                                └─────────────────────────────┘
 ```
 
 **Dual-path routing**: Memories are scored at insert time (no LLM calls). High-importance memories (decisions, warnings) stay at full fidelity in the Detail Path. Everything else is compressed into a hierarchical sketch: episodes (30-day retention) → narrative arcs (90-day, 128d projection) → user profile (64d projection).
 
-**Context assembly**: Given a query and token budget, `AssembleContext` packs the most relevant context in priority order: structural diff → checkpoints → code map (HDC-ranked, co-change-expanded) → knowledge docs → profile → arcs → detail memories → episodes. Task-aware: auto-detects intent (debug/continue/feature/explore) and adjusts memory type weights. Supports **progressive disclosure** (`--index` mode) — outputs a compact index of available items with token costs, then the agent fetches only what it needs via `dualmem show`.
+**File-centric context**: The primary retrieval model is file-centric — `FileAnnotations` pulls warnings, decisions, traces, knowledge docs, and checkpoints indexed by file path. Context output groups related memories under their files instead of flat type-sorted lists. File paths are extracted from checkpoints and recent memories, creating a natural "what do I need to know about the files I'm working on?" view.
+
+**Smart codemap toggle**: The structural codemap is only included on cold starts (no active checkpoints, explore/default intent). For task-specific sessions, the ~400 tokens are reallocated to file-centric context and memories.
+
+**Context assembly**: Given a query and token budget, `AssembleContext` packs context in priority order: structural diff → codemap (cold start only) → checkpoints → file annotations → knowledge docs → profile → arcs → detail memories → episodes. Task-aware: auto-detects intent (debug/continue/feature/explore) and adjusts memory type weights. Supports **progressive disclosure** (`--index` mode) — outputs a compact index of available items with token costs, then the agent fetches only what it needs via `dualmem show`.
 
 ## Quickstart
 
@@ -156,6 +151,7 @@ Find relevant code modules by natural language — uses hyperdimensional computi
 ```bash
 dualmem search-code "authentication middleware"
 dualmem search-code "database connection pooling" --limit 5
+dualmem search-code "auth" --graph   # experimental: PageRank + tag extraction
 ```
 
 ### Session distillation — ambient memory capture
@@ -176,6 +172,19 @@ Inject relevant memories when Claude opens a file — warnings about `rate_limit
 dualmem file-context rate_limiter.go   # memories for a specific file (warnings, decisions, maps, traces)
 dualmem file-index                     # regenerate file index for hook
 ```
+
+`FileAnnotations` is also used internally by `AssembleContext` — file paths from checkpoints and memories are expanded into grouped annotations in the `[File Context]` section of context output.
+
+### Staleness detection
+
+Memories can go stale when code changes. `gc --stale` checks each memory against the current codebase:
+
+```bash
+dualmem gc --stale              # check all memories for staleness
+dualmem gc --stale --dry-run    # preview only
+```
+
+Three checks: **file staleness** (>50% of referenced files changed since memory was written), **symbol staleness** (identifiers mentioned in memory text no longer exist in current tags), and **age staleness** (memory older than 30 days without reinforcement). Stale memories are flagged in context output so the agent knows to verify before acting on them.
 
 ### Context quality ratings & adaptive re-ranker
 
@@ -252,6 +261,7 @@ dualmem search "LC-1663"                                # identifier pre-filter
 
 # Code search (HDC-powered, no API calls)
 dualmem search-code "authentication middleware"
+dualmem search-code "auth" --graph                      # experimental: PageRank + tags
 
 # Context assembly
 dualmem context "auth system" --budget 3000
@@ -262,7 +272,10 @@ dualmem show --snapshot snap_xxx mem_a kdoc_b              # fetch specific item
 # Session management
 dualmem checkpoint --task "auth refactor" --status in_progress --files "auth.go" --done "JWT" --remaining "refresh,logout"
 dualmem checkpoint --list
-dualmem map                                             # codebase structure map
+dualmem map                                             # graph-based codebase map (default)
+dualmem map --legacy                                    # HDC-based codebase map
+dualmem map --refresh                                   # force full re-scan
+dualmem map --git-graph                                 # diagnostic: git co-change edges
 dualmem diff                                            # changes since last session
 
 # Seed and distillation
@@ -279,6 +292,10 @@ dualmem entities [stats|search|show|top]
 # Co-change graph
 dualmem cochange <file> [--min-strength N] [--decay]
 
+# Structural graph
+dualmem graph                                           # edge statistics
+dualmem graph --json                                    # JSON output
+
 # Knowledge docs
 dualmem docs [list|show|delete|export]
 dualmem synthesize [--dry-run] [--force] [--all]
@@ -294,6 +311,7 @@ dualmem stats                                           # quality metrics + tren
 dualmem promote --id <id> [--type warning --salience 0.9]
 dualmem demote --id <id>
 dualmem gc [--dry-run --verbose]
+dualmem gc --stale                                      # check for stale memories
 dualmem profile
 dualmem status
 ```
@@ -341,33 +359,44 @@ results := mem.Search("travel", "lily:player123", 5, nil)
 
 ```
 geoffreyengram/
-├── engram.go              # Engram core (Init, Search, Add, Reflect)
-├── dualmem/               # DualMem agent memory engine
-│   ├── dualmem.go         # Engine (Add, DualSearch, AssembleContext, Consult, Synthesize)
-│   ├── types.go           # Config, Store interface, Intent, all data types
-│   ├── detail.go          # Detail Path (importance scoring, capacity management)
-│   ├── sketch.go          # Sketch Path (episodes, arcs, profiles)
-│   ├── pipeline.go        # Background compression workers
-│   ├── cochange.go        # Co-change graph (builder, query, entity enrichment)
-│   ├── codemap.go         # Codebase scanner, HDC search, co-change-aware ranking
-│   ├── hdc.go             # HDC encoder (2048-dim, 4-layer)
-│   ├── parse_treesitter.go # Tree-sitter (TypeScript, Python, Rust)
-│   ├── diff.go            # Git-based structural diffs, stale memory detection
-│   ├── knowledge.go       # Knowledge doc synthesis
-│   ├── distill.go         # Session transcript distillation
-│   ├── rating.go          # Context quality ratings, snapshots, training rows
-│   ├── reranker.go        # Learned re-ranker (logistic regression from ratings)
-│   ├── store_sqlite.go    # SQLite backend (migrations v1-v9)
-│   └── project.go         # Random projection, cosine similarity
+├── engram.go                # Engram core (Init, Search, Add, Reflect)
+├── dualmem/                 # DualMem agent memory engine
+│   ├── dualmem.go           # Engine (Add, DualSearch, AssembleContext, FileAnnotations, Consult)
+│   ├── types.go             # Config, Store interface, Intent, all data types
+│   ├── detail.go            # Detail Path (importance scoring, capacity management)
+│   ├── sketch.go            # Sketch Path (episodes, arcs, profiles)
+│   ├── scorer.go            # Importance scoring (sector bias, salience, specificity, novelty)
+│   ├── pipeline.go          # Background compression workers
+│   ├── codemap.go           # HDC-based codebase scanner, module search, co-change-aware ranking
+│   ├── hdc.go               # HDC encoder (2048-dim, 4-layer: path/symbols/lang/content)
+│   ├── scan.go              # Graph-based scanner (RepoScanner, ScanAndRank pipeline)
+│   ├── graph.go             # File dependency graph + personalized PageRank
+│   ├── tags.go              # Tree-sitter tag extraction (Go, TS, Python, Rust)
+│   ├── tag_cache.go         # SQLite-cached tags with mtime invalidation
+│   ├── git_cochange.go      # Git co-change graph (commit history mining, time decay)
+│   ├── parse_treesitter.go  # Regex-based TS/Python/Rust parsing (codemap path)
+│   ├── cochange.go          # Memory co-change graph (builder, query, entity enrichment)
+│   ├── structural_graph.go  # Structural edge graph (calls, imports, contains)
+│   ├── staleness.go         # Memory staleness detection (file, symbol, age checks)
+│   ├── diff.go              # Git-based structural diffs
+│   ├── knowledge.go         # Knowledge doc synthesis
+│   ├── distill.go           # Session transcript distillation
+│   ├── rating.go            # Context quality ratings, snapshots, training rows
+│   ├── reranker.go          # Learned re-ranker (logistic regression from ratings)
+│   ├── store_sqlite.go      # SQLite backend (migrations v1-v9)
+│   ├── project.go           # Random projection, cosine similarity
+│   ├── embed_gemini.go      # Gemini embedding API
+│   ├── summarize_gemini.go  # Gemini summarization API
+│   └── format.go            # Output formatting utilities
 ├── cmd/
-│   ├── dualmem/           # CLI tool
-│   ├── dualmem-mcp/       # MCP server
-│   ├── dispatch-ui/       # Dispatch dashboard (web UI)
-��   └── engram-mcp/        # Engram MCP server
+│   ├── dualmem/             # CLI tool
+│   ├── dualmem-mcp/         # MCP server (13 tools)
+│   ├── dispatch-ui/         # Dispatch dashboard (web UI)
+│   └── engram-mcp/          # Engram MCP server
 └── examples/
-    ├── chat/              # Local REPL with Ollama
-    ├── comparison/        # Memory mode comparison + LLM judge
-    └── dualmem-bench/     # LLM-as-judge benchmark (9 tasks: QA, codegen, triage)
+    ├── chat/                # Local REPL with Ollama
+    ├── comparison/          # Memory mode comparison + LLM judge
+    └── dualmem-bench/       # LLM-as-judge benchmark (9 tasks: QA, codegen, triage)
 ```
 
 ## Dispatch UI
@@ -461,29 +490,36 @@ export GEMINI_API_KEY="your-key"   # needed for dualmem embedding search
 
 Pi setup: `npm install -g @mariozechner/pi-coding-agent`, configure `~/.pi/agent/models.json` with your provider.
 
-## Structural Graph
+## Graph-Based Codemap
 
-AST-based extraction of typed edges (calls, imports, contains) from Go, TypeScript, Python, and Rust codebases. Built automatically alongside the code map.
+The `map` command uses a graph-based pipeline: tree-sitter tag extraction → file-level dependency graph → personalized PageRank ranking. The scan pipeline caches tags in SQLite (keyed by file mtime) for fast incremental re-scans.
 
 ```bash
-dualmem map          # rebuilds code map + structural graph
-dualmem graph        # print edge statistics
-dualmem graph --json # JSON output
+dualmem map                    # graph-based codemap (default)
+dualmem map --legacy           # HDC-based codemap (original)
+dualmem map --refresh          # force full re-scan, clear tag cache
+dualmem map --git-graph        # diagnostic: dump git co-change edges
+dualmem graph                  # structural edge statistics
+dualmem graph --json           # JSON output
 ```
 
-### Weighted multi-hop traversal
+The `map` output is personalized by query — modules matching the query get higher PageRank weight via adaptive damping. Git co-change edges provide a secondary signal: files that historically change together are boosted in ranking.
 
-Structural neighbors are expanded using a blended scoring formula inspired by UnravelAI:
+**Note**: `search-code` still defaults to the HDC+BM25 approach (no tag extraction, ~55us/query). The graph-based search is available via `search-code --graph` but is slower and experimental.
+
+### Structural neighbors in context assembly
+
+Structural neighbors (from the dependency graph) are merged with co-change neighbors to expand file hints during context assembly:
 
 ```
 score = parentScore * 0.7 + edgeWeight * 0.3
 ```
 
-With beam search (top-5 per hop) and pruning (threshold 0.2) to prevent score collapse across hops. Structural neighbors are merged into co-change neighbors for codemap module ranking.
+With beam search (top-5 per hop) and pruning (threshold 0.2) to prevent score collapse across hops.
 
 ## Status
 
-Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use. 280+ tests passing.
+Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use.
 
 ## License
 
