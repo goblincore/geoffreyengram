@@ -10,7 +10,7 @@ import (
 
 // setupTestGitRepo creates a temporary git repo with 3 commits.
 // Returns (repoDir, firstCommit, latestCommit).
-func setupTestGitRepo(t *testing.T) (string, string, string) {
+func setupStalenessTestGitRepo(t *testing.T) (string, string, string) {
 	t.Helper()
 	repoDir := t.TempDir()
 
@@ -52,7 +52,7 @@ func setupTestGitRepo(t *testing.T) (string, string, string) {
 }
 
 func TestCheckFileStaleness(t *testing.T) {
-	repoDir, firstCommit, _ := setupTestGitRepo(t)
+	repoDir, firstCommit, _ := setupStalenessTestGitRepo(t)
 
 	// Memory references 3 files; 2 of 3 changed since firstCommit (66% > 50%)
 	result := CheckFileStaleness(repoDir, firstCommit, []string{"auth.go", "middleware.go", "handler.go"})
@@ -66,7 +66,7 @@ func TestCheckFileStaleness(t *testing.T) {
 }
 
 func TestCheckFileStaleness_NoChange(t *testing.T) {
-	repoDir, _, latestCommit := setupTestGitRepo(t)
+	repoDir, _, latestCommit := setupStalenessTestGitRepo(t)
 
 	// Memory from latest commit — nothing changed since then
 	result := CheckFileStaleness(repoDir, latestCommit, []string{"auth.go", "middleware.go"})
@@ -79,7 +79,7 @@ func TestCheckFileStaleness_NoChange(t *testing.T) {
 }
 
 func TestCheckFileStaleness_EmptyFiles(t *testing.T) {
-	repoDir, firstCommit, _ := setupTestGitRepo(t)
+	repoDir, firstCommit, _ := setupStalenessTestGitRepo(t)
 
 	result := CheckFileStaleness(repoDir, firstCommit, nil)
 	if result.IsStale {
@@ -88,7 +88,7 @@ func TestCheckFileStaleness_EmptyFiles(t *testing.T) {
 }
 
 func TestCheckFileStaleness_EmptyCommit(t *testing.T) {
-	repoDir, _, _ := setupTestGitRepo(t)
+	repoDir, _, _ := setupStalenessTestGitRepo(t)
 
 	result := CheckFileStaleness(repoDir, "", []string{"auth.go"})
 	if result.IsStale {

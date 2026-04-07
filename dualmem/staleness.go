@@ -117,11 +117,6 @@ func CheckAgeStaleness(createdAt time.Time, maxAgeDays int, reinforced bool) Sta
 	return StalenessResult{IsStale: false}
 }
 
-// Tag represents a named symbol extracted from a source file.
+// Tag is defined in types.go (canonical definition with SubKind and Line fields).
 // Used by CheckSymbolStaleness to verify that symbols mentioned in memories
 // still exist in the current codebase.
-type Tag struct {
-	Name string `json:"name"`
-	Kind string `json:"kind"` // "function", "type", "method", "variable", etc.
-	File string `json:"file"`
-}
