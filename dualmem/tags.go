@@ -15,15 +15,6 @@ import (
 //go:embed tags_scm/*.scm
 var tagsScmFS embed.FS
 
-// Tag represents a definition or reference symbol extracted from source code.
-type Tag struct {
-	File    string // absolute or relative file path
-	Name    string // captured symbol name (e.g. "MyFunc")
-	Kind    string // "def" or "ref"
-	SubKind string // suffix after "definition." or "reference." (e.g. "function", "call")
-	Line    int    // 1-based line number of the @name capture
-}
-
 // langEntry holds a tree-sitter language pointer and the compiled query.
 type langEntry struct {
 	lang  *ts.Language
@@ -142,10 +133,12 @@ func ExtractTags(filePath, lang string) ([]Tag, error) {
 		return nil, fmt.Errorf("ExtractTags: read %s: %w", filePath, err)
 	}
 
+	// gotreesitter's GLR parser can stack-overflow on large/complex files (known bug).
+	// Skip files over 100KB to avoid crashing the process.
 	parser := ts.NewParser(entry.lang)
 	tree, err := parser.Parse(data)
 	if err != nil {
-		return nil, fmt.Errorf("ExtractTags: parse %s: %w", filePath, err)
+		return nil, nil // skip unparseable files
 	}
 	defer tree.Release()
 

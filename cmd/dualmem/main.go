@@ -761,6 +761,7 @@ func cmdGC(cfg CLIConfig) {
 	ns := fs.String("ns", "", "Namespace")
 	dryRun := fs.Bool("dry-run", false, "Show what would be done without making changes")
 	verbose := fs.Bool("verbose", false, "Show each affected entry")
+	stale := fs.Bool("stale", false, "Check for stale memories using symbol/age analysis")
 	fs.Parse(os.Args[2:])
 
 	namespace := resolveNamespace(*ns, cfg)
@@ -770,6 +771,59 @@ func cmdGC(cfg CLIConfig) {
 		os.Exit(1)
 	}
 	defer engine.Close()
+
+	// Staleness check mode
+	if *stale {
+		rootDir, _ := os.Getwd()
+		var store *dualmem.SQLiteStore
+		if s, ok := engine.GetStore().(*dualmem.SQLiteStore); ok {
+			store = s
+		}
+
+		// Build current tags for symbol checking
+		scanner := &dualmem.RepoScanner{RootDir: rootDir, Namespace: namespace, Store: store}
+		scanResult, scanErr := scanner.ScanAndRank("", nil)
+
+		staleCount := 0
+		totalCount := 0
+
+		// Get all detail memories via search with empty query
+		ctx := context.Background()
+		results, _ := engine.DualSearch(ctx, namespace, "", dualmem.SearchOpts{})
+		if results != nil {
+			for _, mem := range results.DetailMemories {
+				totalCount++
+				// Age-based check (30 day threshold)
+				ageResult := dualmem.CheckAgeStaleness(mem.CreatedAt, 30, false)
+				// Symbol-level check if we have tags
+				var symResult dualmem.StalenessResult
+				if scanErr == nil && len(mem.Files) > 0 {
+					for _, f := range mem.Files {
+						symResult = dualmem.CheckSymbolStaleness(f, mem.Text, scanResult.AllTags)
+						if symResult.IsStale {
+							break
+						}
+					}
+				}
+
+				if ageResult.IsStale || symResult.IsStale {
+					staleCount++
+					reason := ageResult.Reason
+					if symResult.IsStale {
+						reason = symResult.Reason
+					}
+					fmt.Printf("STALE: %s\n", mem.ID[:8])
+					fmt.Printf("  reason: %s\n", reason)
+					if len(mem.Files) > 0 {
+						fmt.Printf("  files: %v\n", mem.Files)
+					}
+					fmt.Printf("  text: %.80s...\n\n", mem.Text)
+				}
+			}
+		}
+		fmt.Fprintf(os.Stderr, "%d/%d memories are stale\n", staleCount, totalCount)
+		return
+	}
 
 	report, err := engine.GarbageCollect(context.Background(), namespace, dualmem.GCOptions{
 		DryRun:  *dryRun,
@@ -1041,6 +1095,10 @@ func cmdMap(cfg CLIConfig) {
 	root := fs.String("root", "", "Project root (default: cwd)")
 	ns := fs.String("ns", "", "Namespace")
 	jsonOut := fs.Bool("json", false, "JSON output")
+	refresh := fs.Bool("refresh", false, "Force full re-scan, clear tag cache")
+	gitGraph := fs.Bool("git-graph", false, "Dump git co-change graph (diagnostic)")
+	depth := fs.Int("depth", 6, "Git co-change depth in months (0 = full history)")
+	legacy := fs.Bool("legacy", false, "Use legacy HDC-based codemap")
 	fs.Parse(os.Args[2:])
 
 	rootDir := *root
@@ -1049,43 +1107,94 @@ func cmdMap(cfg CLIConfig) {
 	}
 	namespace := resolveNamespace(*ns, cfg)
 
-	cm, err := dualmem.ScanCodebase(rootDir)
+	// Git co-change diagnostic mode
+	if *gitGraph {
+		edges, err := dualmem.BuildGitCoChangeGraph(rootDir, *depth, 50)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Git co-change edges: %d\n\n", len(edges))
+		for _, edge := range edges {
+			fmt.Printf("  %s ↔ %s (count=%d, weight=%.2f)\n", edge.FileA, edge.FileB, edge.CoCount, edge.Weight)
+			for _, r := range edge.Reasons {
+				fmt.Printf("    reason: %s\n", r)
+			}
+		}
+		return
+	}
+
+	// Legacy mode: use old HDC-based codemap
+	if *legacy {
+		cm, err := dualmem.ScanCodebase(rootDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		cm.Namespace = namespace
+		_, commit := dualmem.GetGitState(rootDir)
+		cm.GitCommit = commit
+		engine, engErr := newEngine(cfg)
+		if engErr == nil {
+			engine.StoreCodeMap(context.Background(), namespace, cm)
+			engine.Close()
+		}
+		if *jsonOut {
+			json.NewEncoder(os.Stdout).Encode(cm)
+			return
+		}
+		fmt.Println("=== Codebase Map (legacy) ===")
+		fmt.Println()
+		fmt.Println(cm.Zoom1)
+		fmt.Println()
+		for _, m := range cm.Zoom2 {
+			fmt.Printf("  %s — %s (%d files)\n", m.Path, m.Summary, m.FileCount)
+			if len(m.KeyTypes) > 0 {
+				fmt.Printf("    Types: %s\n", strings.Join(m.KeyTypes, ", "))
+			}
+			if len(m.EntryPoints) > 0 {
+				fmt.Printf("    Entry: %s\n", strings.Join(m.EntryPoints, ", "))
+			}
+		}
+		return
+	}
+
+	// New graph-based codemap
+	var store *dualmem.SQLiteStore
+	engine, engErr := newEngine(cfg)
+	if engErr == nil {
+		defer engine.Close()
+		if s, ok := engine.GetStore().(*dualmem.SQLiteStore); ok {
+			store = s
+		}
+	}
+
+	if *refresh && store != nil {
+		store.ClearTagCache(namespace)
+	}
+
+	scanner := &dualmem.RepoScanner{
+		RootDir:   rootDir,
+		Namespace: namespace,
+		Store:     store,
+	}
+
+	result, err := scanner.ScanAndRank("", nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	cm.Namespace = namespace
-
-	// Get git commit for the map
-	_, commit := dualmem.GetGitState(rootDir)
-	cm.GitCommit = commit
-
-	// Store in DB (needs engine for store access)
-	engine, engErr := newEngine(cfg)
-	if engErr == nil {
-		engine.StoreCodeMap(context.Background(), namespace, cm)
-		engine.Close()
-	}
 
 	if *jsonOut {
-		json.NewEncoder(os.Stdout).Encode(cm)
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(result.Files)
 		return
 	}
 
-	// Pretty print
-	fmt.Println("=== Codebase Map ===")
-	fmt.Println()
-	fmt.Println(cm.Zoom1)
-	fmt.Println()
-	for _, m := range cm.Zoom2 {
-		fmt.Printf("  %s — %s (%d files)\n", m.Path, m.Summary, m.FileCount)
-		if len(m.KeyTypes) > 0 {
-			fmt.Printf("    Types: %s\n", strings.Join(m.KeyTypes, ", "))
-		}
-		if len(m.EntryPoints) > 0 {
-			fmt.Printf("    Entry: %s\n", strings.Join(m.EntryPoints, ", "))
-		}
-	}
+	output := dualmem.RenderRankedFiles(result.Files, 2000)
+	fmt.Print(output)
+	fmt.Fprintf(os.Stderr, "\n%d files, %d tags\n", result.FileCount, result.TagCount)
 }
 
 // --- Search-code command ---
@@ -1096,6 +1205,7 @@ func cmdSearchCode(cfg CLIConfig) {
 	limit := fs.Int("limit", 10, "Max results")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	moduleOnly := fs.Bool("module-only", false, "Module-level results (skip file ranking)")
+	graphMode := fs.Bool("graph", false, "Use graph-based PageRank search (new)")
 	fs.Parse(os.Args[2:])
 
 	query := strings.Join(fs.Args(), " ")
@@ -1110,6 +1220,45 @@ func cmdSearchCode(cfg CLIConfig) {
 	}
 
 	ns := "claude:" + filepath.Base(rootDir)
+
+	// Graph-based search mode (new pipeline)
+	if *graphMode {
+		var store *dualmem.SQLiteStore
+		engine, engErr := newEngine(cfg)
+		if engErr == nil {
+			defer engine.Close()
+			if s, ok := engine.GetStore().(*dualmem.SQLiteStore); ok {
+				store = s
+			}
+		}
+		scanner := &dualmem.RepoScanner{
+			RootDir:   rootDir,
+			Namespace: ns,
+			Store:     store,
+		}
+		result, err := scanner.ScanAndRank(query, nil)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		files := result.Files
+		if len(files) > *limit {
+			files = files[:*limit]
+		}
+		if *jsonOut {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			enc.Encode(files)
+			return
+		}
+		for i, f := range files {
+			fmt.Printf("%2d. %-40s (%.4f)\n", i+1, f.Path, f.Score)
+			if f.Desc != "" {
+				fmt.Printf("    %s\n", f.Desc)
+			}
+		}
+		return
+	}
 
 	// Try Engine path (uses SQLite-backed codemap cache)
 	engine, engErr := dualmem.NewForCodeSearch(dualmem.Config{

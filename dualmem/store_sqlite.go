@@ -330,6 +330,27 @@ func (s *SQLiteStore) migrate() error {
 		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (10)`)
 	}
 
+	if version < 11 {
+		if _, err := s.db.Exec(`
+			CREATE TABLE IF NOT EXISTS codemap_tags (
+				namespace  TEXT NOT NULL,
+				file_path  TEXT NOT NULL,
+				file_mtime INTEGER NOT NULL,
+				language   TEXT NOT NULL DEFAULT '',
+				tags_json  TEXT NOT NULL,
+				scanned_at INTEGER NOT NULL,
+				PRIMARY KEY (namespace, file_path)
+			);
+			CREATE INDEX IF NOT EXISTS idx_tags_ns ON codemap_tags(namespace);
+		`); err != nil {
+			return fmt.Errorf("migrate v11 (codemap tag cache): %w", err)
+		}
+		// Add source column to file_cochange to distinguish git-derived vs memory-derived edges
+		// Safe ALTER TABLE — ignore error if column already exists
+		s.db.Exec(`ALTER TABLE file_cochange ADD COLUMN source TEXT NOT NULL DEFAULT 'memory'`)
+		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (11)`)
+	}
+
 	return nil
 }
 
