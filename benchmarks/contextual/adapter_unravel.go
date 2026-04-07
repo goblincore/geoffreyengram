@@ -3,24 +3,44 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"time"
 )
 
 // unravelAdapterPath is the path to the Node.js adapter script.
-var unravelAdapterPath = filepath.Join("benchmarks", "contextual", "adapters", "unravel.js")
+var unravelAdapterPath = filepath.Join("benchmarks", "contextual", "adapters", "unravel.mjs")
 
-// nodeBinary returns the path to the node binary, checking common locations.
+// nodeBinary returns the path to the node binary, checking common locations
+// including fnm (Fast Node Manager) installations.
 func nodeBinary() string {
 	// Check PATH first
 	if p, err := exec.LookPath("node"); err == nil {
 		return p
 	}
-	// Common locations
+	// Common direct install locations
 	for _, p := range []string{"/usr/local/bin/node", "/opt/homebrew/bin/node"} {
-		if _, err := exec.LookPath(p); err == nil {
+		if _, err := os.Stat(p); err == nil {
 			return p
+		}
+	}
+	// fnm (Fast Node Manager) — stable path under ~/.local/share/fnm/
+	// Pick the latest version (reverse-sorted directory names like v18.x, v22.x)
+	home, _ := os.UserHomeDir()
+	if home != "" {
+		fnmDir := filepath.Join(home, ".local", "share", "fnm", "node-versions")
+		if entries, err := os.ReadDir(fnmDir); err == nil {
+			// Iterate in reverse to pick the latest version
+			for i := len(entries) - 1; i >= 0; i-- {
+				e := entries[i]
+				if e.IsDir() {
+					p := filepath.Join(fnmDir, e.Name(), "installation", "bin", "node")
+					if _, err := os.Stat(p); err == nil {
+						return p
+					}
+				}
+			}
 		}
 	}
 	return "node" // fallback, will fail with clear error
