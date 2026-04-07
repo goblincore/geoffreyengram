@@ -986,11 +986,25 @@ func BuildCodeIndex(cm *CodeMap) *CodeIndex {
 	return idx
 }
 
+// CodeSearchOpts holds optional parameters for SearchCodeMap.
+type CodeSearchOpts struct {
+	// CoChangeNeighbors maps file paths to co-change strength (0-1).
+	// Modules matching these paths get a score boost proportional to strength.
+	// Obtain from Engine.GetCoChangeForPaths or Engine.GetCoChangeNeighbors.
+	CoChangeNeighbors map[string]float64
+}
+
 // SearchCodeMap ranks modules by hybrid HDC+BM25 similarity to a query string.
 // Returns up to limit results sorted by descending hybrid score.
-func SearchCodeMap(cm *CodeMap, idx *CodeIndex, query string, limit int) []ModuleResult {
+// Optional CodeSearchOpts can provide co-change graph data for relationship-aware ranking.
+func SearchCodeMap(cm *CodeMap, idx *CodeIndex, query string, limit int, opts ...CodeSearchOpts) []ModuleResult {
 	if cm == nil || len(cm.Zoom2) == 0 || idx == nil {
 		return nil
+	}
+
+	var opt CodeSearchOpts
+	if len(opts) > 0 {
+		opt = opts[0]
 	}
 
 	queryVec := HDCEncodeQuery(query)
@@ -998,9 +1012,10 @@ func SearchCodeMap(cm *CodeMap, idx *CodeIndex, query string, limit int) []Modul
 
 	// Score all modules (exclude markdown — docs have their own search tier)
 	type scored struct {
-		module ModuleMap
-		hdc    float64
-		bm25   float64
+		module   ModuleMap
+		hdc      float64
+		bm25     float64
+		cochange float64
 	}
 	items := make([]scored, 0, len(cm.Zoom2))
 	hdcScores := make([]float64, 0, len(cm.Zoom2))
@@ -1012,7 +1027,8 @@ func SearchCodeMap(cm *CodeMap, idx *CodeIndex, query string, limit int) []Modul
 		}
 		hdc := CosineSimilarity(queryVec, idx.HDCVectors[m.Path])
 		bm25 := BM25Score(idx, m.Path, queryTokens)
-		items = append(items, scored{module: m, hdc: hdc, bm25: bm25})
+		cc := moduleCoChangeStrength(m.Path, opt.CoChangeNeighbors)
+		items = append(items, scored{module: m, hdc: hdc, bm25: bm25, cochange: cc})
 		hdcScores = append(hdcScores, hdc)
 		if bm25 > maxBM25 {
 			maxBM25 = bm25
@@ -1035,7 +1051,17 @@ func SearchCodeMap(cm *CodeMap, idx *CodeIndex, query string, limit int) []Modul
 		alpha = 1.0
 	}
 
+	// Normalize co-change scores to 0-1 range
+	maxCoChange := 0.0
+	for _, s := range items {
+		if s.cochange > maxCoChange {
+			maxCoChange = s.cochange
+		}
+	}
+
 	// Blend and build results
+	// With co-change: 85% hybrid (HDC+BM25) + 15% co-change (normalized)
+	// Without co-change: 100% hybrid (backward compatible)
 	results := make([]ModuleResult, 0, len(items))
 	for _, s := range items {
 		hdcNorm := (s.hdc + 1) / 2 // [-1,1] → [0,1]
@@ -1045,11 +1071,17 @@ func SearchCodeMap(cm *CodeMap, idx *CodeIndex, query string, limit int) []Modul
 		}
 		hybrid := alpha*hdcNorm + (1-alpha)*bm25Norm
 
+		final := hybrid
+		if maxCoChange > 0 {
+			ccNorm := s.cochange / maxCoChange
+			final = 0.85*hybrid + 0.15*ccNorm
+		}
+
 		results = append(results, ModuleResult{
 			ModuleMap:    s.module,
 			Similarity:   s.hdc,
 			KeywordScore: s.bm25,
-			HybridScore:  hybrid,
+			HybridScore:  final,
 		})
 	}
 
@@ -1153,39 +1185,76 @@ type FileResult struct {
 
 // SearchCodeMapFiles performs two-stage search: module-level (stage 1) then
 // file-level BM25 ranking within top modules (stage 2).
-func SearchCodeMapFiles(cm *CodeMap, idx *CodeIndex, query string, limit int) []FileResult {
+// Optional CodeSearchOpts are passed through to the module-level search.
+func SearchCodeMapFiles(cm *CodeMap, idx *CodeIndex, query string, limit int, opts ...CodeSearchOpts) []FileResult {
 	if cm == nil || idx == nil {
 		return nil
 	}
 
-	// Stage 1: module-level search
-	topK := 5
+	// Stage 1: module-level search (use higher topK to capture split files)
+	topK := 10
 	if topK > len(cm.Zoom2) {
 		topK = len(cm.Zoom2)
 	}
-	moduleResults := SearchCodeMap(cm, idx, query, topK)
+	moduleResults := SearchCodeMap(cm, idx, query, topK, opts...)
 
+	queryVec := HDCEncodeQuery(query)
 	queryTokens := hdcTokenize(query)
+
+	// Track files already emitted by split modules to avoid duplication
+	// when both a split file (e.g., "dualmem/hdc.go") and its parent
+	// remainder module ("dualmem/") are in the results.
+	emittedFiles := make(map[string]bool)
 
 	// Stage 2: rank files within each top module
 	var fileResults []FileResult
 
+	// First pass: emit split files (single-file modules) — these have higher specificity
 	for _, mr := range moduleResults {
-		if len(mr.Files) == 0 {
-			// Module has no per-file info — emit as single file result
+		if mr.FileCount == 1 && len(mr.Files) == 1 {
+			fi := mr.Files[0]
+			fileScore := fileBM25Score(fi, queryTokens)
+			combined := 0.6*mr.HybridScore + 0.4*fileScore
 			fileResults = append(fileResults, FileResult{
 				ModulePath:    mr.Path,
-				FilePath:      mr.Path,
-				FileScore:     0,
+				FilePath:      fi.RelPath,
+				FileScore:     fileScore,
 				ModuleScore:   mr.HybridScore,
-				CombinedScore: mr.HybridScore,
+				CombinedScore: combined,
 				Summary:       mr.Summary,
 			})
+			emittedFiles[fi.RelPath] = true
+		}
+	}
+
+	// Second pass: expand multi-file (remainder) modules
+	for _, mr := range moduleResults {
+		if mr.FileCount == 1 && len(mr.Files) == 1 {
+			continue // already handled above
+		}
+		if len(mr.Files) == 0 {
+			// Module has no per-file info — emit as single file result
+			if !emittedFiles[mr.Path] {
+				fileResults = append(fileResults, FileResult{
+					ModulePath:    mr.Path,
+					FilePath:      mr.Path,
+					FileScore:     0,
+					ModuleScore:   mr.HybridScore,
+					CombinedScore: mr.HybridScore,
+					Summary:       mr.Summary,
+				})
+			}
 			continue
 		}
 
 		for _, fi := range mr.Files {
-			fileScore := fileBM25Score(fi, queryTokens)
+			if emittedFiles[fi.RelPath] {
+				continue // already emitted from a split module
+			}
+			bm25 := fileBM25Score(fi, queryTokens)
+			hdc := fileHDCScore(fi, queryVec)
+			// Blend BM25 and HDC for file-level ranking within remainder modules
+			fileScore := 0.5*bm25 + 0.5*hdc
 			combined := 0.6*mr.HybridScore + 0.4*fileScore
 			fileResults = append(fileResults, FileResult{
 				ModulePath:    mr.Path,
@@ -1207,6 +1276,25 @@ func SearchCodeMapFiles(cm *CodeMap, idx *CodeIndex, query string, limit int) []
 		fileResults = fileResults[:limit]
 	}
 	return fileResults
+}
+
+// fileHDCScore encodes a file's identifiers into an HDC vector and computes
+// cosine similarity against the query vector. This provides semantic matching
+// for files within remainder modules where BM25 alone can't differentiate.
+func fileHDCScore(fi FileInfo, queryVec []float32) float64 {
+	// Build a mini ModuleMap for this file to reuse the HDC encoder
+	fileMod := ModuleMap{
+		Path:        fi.RelPath,
+		Language:    "go",
+		Identifiers: fi.Identifiers,
+		Imports:     fi.Imports,
+		FileCount:   1,
+	}
+	enc := NewHDCEncoder()
+	fileVec := enc.EncodeModule(fileMod)
+	sim := CosineSimilarity(queryVec, fileVec)
+	// Normalize from [-1,1] to [0,1]
+	return (sim + 1) / 2
 }
 
 // fileBM25Score computes a simple BM25-like score for a file against query tokens.

@@ -1137,12 +1137,32 @@ func cmdSearchCode(cfg CLIConfig) {
 		os.Exit(1)
 	}
 
-	printSearchResults(cm, idx, query, *limit, *jsonOut, *moduleOnly)
+	// Build search opts with co-change data if available
+	var opts dualmem.CodeSearchOpts
+
+	// Get top results first (without co-change) to seed co-change lookup
+	seedResults := dualmem.SearchCodeMap(cm, idx, query, 3)
+	if len(seedResults) > 0 {
+		var seedPaths []string
+		for _, r := range seedResults {
+			seedPaths = append(seedPaths, r.Path)
+			// Also include file paths from FileInfo
+			for _, fi := range r.Files {
+				seedPaths = append(seedPaths, fi.RelPath)
+			}
+		}
+		neighbors := engine.GetCoChangeForPaths(ns, seedPaths, 0.1)
+		if len(neighbors) > 0 {
+			opts.CoChangeNeighbors = neighbors
+		}
+	}
+
+	printSearchResults(cm, idx, query, *limit, *jsonOut, *moduleOnly, opts)
 }
 
-func printSearchResults(cm *dualmem.CodeMap, idx *dualmem.CodeIndex, query string, limit int, jsonOut bool, moduleOnly bool) {
+func printSearchResults(cm *dualmem.CodeMap, idx *dualmem.CodeIndex, query string, limit int, jsonOut bool, moduleOnly bool, opts ...dualmem.CodeSearchOpts) {
 	if !moduleOnly {
-		fileResults := dualmem.SearchCodeMapFiles(cm, idx, query, limit)
+		fileResults := dualmem.SearchCodeMapFiles(cm, idx, query, limit, opts...)
 		docResults := dualmem.SearchCodeMapDocs(cm, idx, query, 3)
 		if jsonOut {
 			json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
@@ -1164,7 +1184,7 @@ func printSearchResults(cm *dualmem.CodeMap, idx *dualmem.CodeIndex, query strin
 		return
 	}
 
-	results := dualmem.SearchCodeMap(cm, idx, query, limit)
+	results := dualmem.SearchCodeMap(cm, idx, query, limit, opts...)
 	docResults := dualmem.SearchCodeMapDocs(cm, idx, query, 3)
 	if jsonOut {
 		json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
