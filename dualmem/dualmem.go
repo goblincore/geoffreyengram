@@ -35,6 +35,23 @@ type Engine struct {
 	cfg        *Config
 }
 
+// NewForCodeSearch creates a minimal Engine for code search only.
+// No embedder, projector, or pipeline is initialized.
+// Use this for CLI commands that only need GetCodeMap / ScanCodebase.
+func NewForCodeSearch(cfg Config) (*Engine, error) {
+	cfg.ApplyDefaults()
+
+	store, err := NewSQLiteStore(cfg.SQLitePath)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Engine{
+		store: store,
+		cfg:   &cfg,
+	}, nil
+}
+
 // New creates and initializes a DualMem engine.
 func New(cfg Config) (*Engine, error) {
 	cfg.ApplyDefaults()

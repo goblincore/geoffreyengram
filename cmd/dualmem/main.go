@@ -1095,6 +1095,7 @@ func cmdSearchCode(cfg CLIConfig) {
 	root := fs.String("root", "", "Project root (default: cwd)")
 	limit := fs.Int("limit", 10, "Max results")
 	jsonOut := fs.Bool("json", false, "JSON output")
+	moduleOnly := fs.Bool("module-only", false, "Module-level results (skip file ranking)")
 	fs.Parse(os.Args[2:])
 
 	query := strings.Join(fs.Args(), " ")
@@ -1108,20 +1109,56 @@ func cmdSearchCode(cfg CLIConfig) {
 		rootDir, _ = os.Getwd()
 	}
 
-	cm, err := dualmem.ScanCodebase(rootDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+	ns := "claude:" + filepath.Base(rootDir)
+
+	// Try Engine path (uses SQLite-backed codemap cache)
+	engine, engErr := dualmem.NewForCodeSearch(dualmem.Config{
+		RootDir:   rootDir,
+		SQLitePath: cfg.Storage.SQLitePath,
+	})
+	if engErr != nil {
+		// Fallback: no cache, scan directly
+		fmt.Fprintf(os.Stderr, "warning: could not open store for cache: %v\n", engErr)
+		cm, scanErr := dualmem.ScanCodebase(rootDir)
+		if scanErr != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", scanErr)
+			os.Exit(1)
+		}
+		idx := dualmem.BuildCodeIndex(cm)
+		printSearchResults(cm, idx, query, *limit, *jsonOut, *moduleOnly)
+		return
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+	cm, idx := engine.GetCodeMap(ctx, ns)
+	if cm == nil {
+		fmt.Fprintln(os.Stderr, "error: could not generate code map")
 		os.Exit(1)
 	}
 
-	idx := dualmem.BuildCodeIndex(cm)
-	results := dualmem.SearchCodeMap(cm, idx, query, *limit)
+	printSearchResults(cm, idx, query, *limit, *jsonOut, *moduleOnly)
+}
 
-	if *jsonOut {
-		json.NewEncoder(os.Stdout).Encode(results)
+func printSearchResults(cm *dualmem.CodeMap, idx *dualmem.CodeIndex, query string, limit int, jsonOut bool, moduleOnly bool) {
+	if !moduleOnly {
+		fileResults := dualmem.SearchCodeMapFiles(cm, idx, query, limit)
+		if jsonOut {
+			json.NewEncoder(os.Stdout).Encode(fileResults)
+			return
+		}
+		for i, r := range fileResults {
+			fmt.Printf("  %d. %-35s score=%.4f (module: %s %.2f, file: %.2f)\n",
+				i+1, r.FilePath, r.CombinedScore, r.ModulePath, r.ModuleScore, r.FileScore)
+		}
 		return
 	}
 
+	results := dualmem.SearchCodeMap(cm, idx, query, limit)
+	if jsonOut {
+		json.NewEncoder(os.Stdout).Encode(results)
+		return
+	}
 	for i, r := range results {
 		fmt.Printf("  %d. %-30s score=%.4f (hdc=%.2f kw=%.2f)  %s\n",
 			i+1, r.Path, r.HybridScore, r.Similarity, r.KeywordScore, r.Summary)
