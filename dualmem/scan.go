@@ -130,6 +130,11 @@ func (s *RepoScanner) discoverFiles() ([]fileEntry, error) {
 			return nil
 		}
 
+		// Skip test/spec files — they add noise to codemap ranking
+		if isTestFile(base) {
+			return nil
+		}
+
 		files = append(files, fileEntry{
 			absPath: path,
 			relPath: filepath.ToSlash(rel),
@@ -481,6 +486,21 @@ func isGeneratedFileName(name string) bool {
 		"_generated.go", ".d.ts",
 	} {
 		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// isTestFile returns true for filenames that are test/spec files.
+func isTestFile(name string) bool {
+	lower := strings.ToLower(name)
+	for _, suffix := range []string{
+		".test.ts", ".test.tsx", ".test.js", ".test.jsx",
+		".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx",
+		"_test.go", "_test.py",
+	} {
+		if strings.HasSuffix(lower, suffix) {
 			return true
 		}
 	}
