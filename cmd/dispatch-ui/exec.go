@@ -432,6 +432,18 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 		// Pi has its own edit tool that works fine — only inject preamble for Claude CLI
 		prompt = e.Config.Preamble + "\n\n" + prompt
 	}
+	// Inject worktree orientation so the agent knows its environment
+	if workDir != plan.Project {
+		worktreeNote := fmt.Sprintf(`[Environment: Git Worktree]
+You are running in an isolated git worktree, NOT the main repository.
+- Worktree path: %s
+- Main repo: %s
+- Branch: %s
+All files you read/edit are in the worktree. Use absolute paths based on the worktree path above.
+The worktree is a full copy of the repo — your edits will not affect the main repo.
+`, workDir, plan.Project, branch)
+		prompt = worktreeNote + "\n" + prompt
+	}
 	// Inject dualmem context + CLI instructions for harnesses without MCP support (Pi).
 	// Claude CLI gets context via dualmem hooks; Pi doesn't have MCP, so we prepend it.
 	if harness == "pi" {
