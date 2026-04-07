@@ -267,33 +267,117 @@ func (s *RepoScanner) buildPersonalization(query string, tags []Tag, overrides m
 		fileSet[t.File] = true
 	}
 
+	// Pre-group tags by file for efficient lookup
+	tagsByFile := make(map[string][]Tag)
+	for _, t := range tags {
+		tagsByFile[t.File] = append(tagsByFile[t.File], t)
+	}
+
+	// Compute IDF (inverse document frequency) for each token — tokens that
+	// match symbols in fewer files are more discriminative and should carry
+	// more weight. "user" matches 500 files → low IDF. "login" matches 10
+	// files → high IDF.
+	tokenDocFreq := make(map[string]int)
+	for file := range fileSet {
+		fileLower := strings.ToLower(file)
+		matched := make(map[string]bool)
+		// Count path matches
+		for _, token := range tokens {
+			if len(token) < 3 {
+				continue
+			}
+			if strings.Contains(fileLower, token) {
+				matched[token] = true
+			}
+		}
+		// Count symbol matches
+		for _, t := range tagsByFile[file] {
+			nameLower := strings.ToLower(t.Name)
+			for _, token := range tokens {
+				if len(token) < 3 {
+					continue
+				}
+				if strings.Contains(nameLower, token) {
+					matched[token] = true
+				}
+			}
+		}
+		for token := range matched {
+			tokenDocFreq[token]++
+		}
+	}
+
+	totalFiles := float64(len(fileSet))
+	numTokens := 0
+	for _, t := range tokens {
+		if len(t) >= 3 {
+			numTokens++
+		}
+	}
+
 	for file := range fileSet {
 		score := 0.0
 		fileLower := strings.ToLower(file)
+		matchedTokens := make(map[string]bool)
 
-		// Check file path matches (strong signal)
+		// Path matches weighted by IDF
 		for _, token := range tokens {
+			if len(token) < 3 {
+				continue
+			}
 			if strings.Contains(fileLower, token) {
-				score += 100.0
+				df := float64(tokenDocFreq[token])
+				if df > 0 {
+					score += 100.0 * (totalFiles / df)
+				}
+				matchedTokens[token] = true
 			}
 		}
 
-		// Check tag name matches in this file
-		for _, t := range tags {
-			if t.File != file {
-				continue
-			}
+		// Symbol name matches weighted by IDF and definition vs reference
+		for _, t := range tagsByFile[file] {
 			nameLower := strings.ToLower(t.Name)
 			for _, token := range tokens {
-				if nameLower == token || strings.Contains(nameLower, token) {
-					score += 1.0
-					break // one match per tag is enough
+				if len(token) < 3 {
+					continue
+				}
+				df := float64(tokenDocFreq[token])
+				if df == 0 {
+					continue
+				}
+				idf := totalFiles / df
+				if nameLower == token {
+					if t.Kind == "def" {
+						score += 50.0 * idf
+					} else {
+						score += 10.0 * idf
+					}
+					matchedTokens[token] = true
+				} else if strings.Contains(nameLower, token) {
+					if t.Kind == "def" {
+						score += 20.0 * idf
+					} else {
+						score += 5.0 * idf
+					}
+					matchedTokens[token] = true
 				}
 			}
 		}
 
+		// Multi-token co-occurrence bonus: files matching MORE query tokens
+		// get an exponential boost. This rewards files that are relevant to
+		// the full query, not just one token.
+		if numTokens > 1 && len(matchedTokens) > 1 {
+			coverage := float64(len(matchedTokens)) / float64(numTokens)
+			// Exponential bonus: 2 of 4 tokens → 2x, 3 of 4 → 4x, 4 of 4 → 8x
+			cooccurrenceBoost := 1.0
+			for i := 1; i < len(matchedTokens); i++ {
+				cooccurrenceBoost *= 2.0
+			}
+			score *= cooccurrenceBoost * coverage
+		}
+
 		if score > 0 {
-			// Add to any existing override
 			personalization[file] += score
 		}
 	}

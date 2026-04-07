@@ -159,8 +159,32 @@ func (g *FileGraph) PageRank(personalization map[string]float64, damping float64
 
 // RankFiles runs personalized PageRank and returns files sorted by score (descending).
 // Each FileRank includes its definition tags from the provided tag set.
+//
+// When personalization targets specific files, the damping factor is lowered
+// to give query-relevant files more weight over structurally central ones.
+// Without personalization, standard damping (0.85) is used so the most
+// connected/imported files rank highest.
 func (g *FileGraph) RankFiles(tags []Tag, personalization map[string]float64) []FileRank {
-	scores := g.PageRank(personalization, 0.85, 30)
+	// Adaptive damping: lower damping = more personalization influence.
+	// Standard PageRank uses 0.85 (85% structure, 15% teleport).
+	// With personalization, we lower damping so query-relevant files
+	// can overcome structurally central but irrelevant nodes.
+	// The damping scales with how focused the personalization is:
+	// few personalized files → very low damping (query dominates)
+	// many personalized files → moderate damping (blend with structure)
+	damping := 0.85
+	if len(personalization) > 0 {
+		ratio := float64(len(personalization)) / float64(len(g.Nodes))
+		switch {
+		case ratio < 0.05: // <5% of files match query → strong personalization
+			damping = 0.30
+		case ratio < 0.20: // 5-20% match → moderate
+			damping = 0.50
+		default: // >20% match → mild (query is too generic)
+			damping = 0.65
+		}
+	}
+	scores := g.PageRank(personalization, damping, 30)
 
 	// Collect definition tags per file
 	defs := make(map[string][]Tag)
