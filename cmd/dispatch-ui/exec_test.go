@@ -76,10 +76,11 @@ Do some work.
 	planPath := makeTempPlan(t, tmpDir, "test-plan", planContent)
 
 	cfg := &DispatchConfig{
-		PlansDir:   tmpDir,
-		ReportsDir: reportsDir,
-		ClaudeBin:  claudePath,
-		EnvVars:    map[string]string{},
+		PlansDir:      tmpDir,
+		ReportsDir:    reportsDir,
+		ClaudeBin:     claudePath,
+		MaxConcurrent: 2,
+		EnvVars:       map[string]string{},
 	}
 	engine := NewEngine(cfg)
 
@@ -157,10 +158,11 @@ Do slow work.
 	planPath := makeTempPlan(t, tmpDir, "slow-plan", planContent)
 
 	cfg := &DispatchConfig{
-		PlansDir:   tmpDir,
-		ReportsDir: reportsDir,
-		ClaudeBin:  claudePath,
-		EnvVars:    map[string]string{},
+		PlansDir:      tmpDir,
+		ReportsDir:    reportsDir,
+		ClaudeBin:     claudePath,
+		MaxConcurrent: 2,
+		EnvVars:       map[string]string{},
 	}
 	engine := NewEngine(cfg)
 
@@ -191,15 +193,16 @@ Do slow work.
 	}
 }
 
-func TestCancelRunning(t *testing.T) {
-	// With no running task, CancelRunning should return false
+func TestCancelTask(t *testing.T) {
+	// With no running task, CancelTask should return false
 	cfg := &DispatchConfig{
-		PlansDir:   t.TempDir(),
-		ReportsDir: t.TempDir(),
-		EnvVars:    map[string]string{},
+		PlansDir:      t.TempDir(),
+		ReportsDir:    t.TempDir(),
+		MaxConcurrent: 2,
+		EnvVars:       map[string]string{},
 	}
 	engine := NewEngine(cfg)
-	if engine.CancelRunning() {
-		t.Error("CancelRunning() = true; want false when nothing running")
+	if engine.CancelTask("nonexistent") {
+		t.Error("CancelTask() = true; want false when nothing running")
 	}
 }
