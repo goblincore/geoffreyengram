@@ -38,16 +38,22 @@ func main() {
 }
 
 // pollQueue continuously checks for pending plans whose dependencies are met
-// and executes the highest-priority one. It skips if a task is already running.
+// and executes up to MaxConcurrent tasks in parallel.
 func pollQueue(eng *Engine) {
 	for {
 		time.Sleep(5 * time.Second)
 
-		// Skip if already running
+		// Check available slots
 		eng.mu.Lock()
-		isRunning := eng.running != nil
+		slots := eng.Config.MaxConcurrent - len(eng.running)
+		// Snapshot running names to avoid launching duplicates
+		runningNames := make(map[string]bool, len(eng.running))
+		for name := range eng.running {
+			runningNames[name] = true
+		}
 		eng.mu.Unlock()
-		if isRunning {
+
+		if slots <= 0 {
 			continue
 		}
 
@@ -57,24 +63,24 @@ func pollQueue(eng *Engine) {
 			continue
 		}
 
-		// ListPlans returns running first, then pending by descending priority.
-		// Find the first pending plan with dependencies met.
-		var next *Plan
+		// Find eligible pending plans (deps met, not already running)
+		var eligible []*Plan
 		for _, p := range plans {
-			if p.Status == "pending" && eng.dependenciesMet(p) {
-				next = p
-				break
+			if p.Status == "pending" && !runningNames[p.Name] && eng.dependenciesMet(p) {
+				eligible = append(eligible, p)
+				if len(eligible) >= slots {
+					break
+				}
 			}
 		}
 
-		if next == nil {
-			continue
+		// Launch all eligible plans
+		for _, plan := range eligible {
+			go func(p *Plan) {
+				if err := eng.ExecutePlan(context.Background(), p); err != nil {
+					log.Printf("execute plan %s: %v", p.Name, err)
+				}
+			}(plan)
 		}
-
-		go func(plan *Plan) {
-			if err := eng.ExecutePlan(context.Background(), plan); err != nil {
-				log.Printf("execute plan %s: %v", plan.Name, err)
-			}
-		}(next)
 	}
 }
