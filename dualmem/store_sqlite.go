@@ -330,6 +330,13 @@ func (s *SQLiteStore) migrate() error {
 		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (10)`)
 	}
 
+	if version < 11 {
+		// Add source column to file_cochange to distinguish git-derived vs memory-derived edges
+		// Safe ALTER TABLE — ignore error if column already exists
+		s.db.Exec(`ALTER TABLE file_cochange ADD COLUMN source TEXT NOT NULL DEFAULT 'memory'`)
+		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (11)`)
+	}
+
 	return nil
 }
 
