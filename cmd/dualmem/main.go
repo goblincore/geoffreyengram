@@ -476,7 +476,7 @@ func cmdContext(cfg CLIConfig) {
 	fs := flag.NewFlagSet("context", flag.ExitOnError)
 	ns := fs.String("ns", "", "Namespace")
 	budget := fs.Int("budget", 3000, "Token budget")
-	intent := fs.String("intent", "", "Task intent override: debug, continue, feature, explore (default: auto-detect)")
+	intent := fs.String("intent", "", "Task intent override: debug, continue, feature, explore, plan (default: auto-detect)")
 	noGraph := fs.Bool("no-graph", false, "Disable entity graph boosting")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	indexMode := fs.Bool("index", false, "Progressive disclosure: output compact index instead of full context")

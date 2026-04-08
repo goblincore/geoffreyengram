@@ -3003,8 +3003,16 @@ func DetectIntent(query string) Intent {
 		}
 	}
 
+	// Plan: roadmap, sprint planning, status reviews
+	planKeywords := []string{"plan", "roadmap", "schedule", "sprint", "milestone", "quarter", "q1", "q2", "q3", "q4", "priorities", "backlog", "remaining work", "status update"}
+	for _, kw := range planKeywords {
+		if strings.Contains(q, kw) {
+			return IntentPlan
+		}
+	}
+
 	// Continue: session resumption, picking up work, status checks
-	continueKeywords := []string{"continue", "resume", "pick up", "where we left", "last session", "in progress", "what was i", "session context", "what were we", "what next", "what's next", "next step", "what should", "todo", "status", "progress"}
+	continueKeywords := []string{"continue", "resume", "pick up", "where we left", "last session", "in progress", "what was i", "session context", "what were we", "what next", "what's next", "next step", "what should", "todo", "status", "progress", "what's in progress", "what are we working on", "ongoing"}
 	for _, kw := range continueKeywords {
 		if strings.Contains(q, kw) {
 			return IntentContinue
