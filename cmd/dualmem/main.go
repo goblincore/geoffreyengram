@@ -276,6 +276,8 @@ func main() {
 		cmdConsult(cfg)
 	case "index":
 		cmdIndex(cfg)
+	case "unfold":
+		cmdUnfold(cfg)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -315,6 +317,7 @@ Commands:
   explore     Read ranked code files and produce grounded briefing
   consult     Structured intelligence report (lazy-synthesis)
   index       Pre-warm codebase index with progress output
+  unfold      Extract a single symbol (function/type) from a file
 
 Flags (all commands):
   --ns     Namespace (default: auto-detect from cwd or config)
@@ -2400,6 +2403,58 @@ func cmdIndex(cfg CLIConfig) {
 	fmt.Fprintf(os.Stderr, "  Structural edges: %d\n", len(result.Edges))
 	fmt.Fprintf(os.Stderr, "  Modules: %d\n", len(result.CodeMap.Zoom2))
 	fmt.Fprintf(os.Stderr, "Cached at commit %s (took %s)\n", commitStr, time.Since(start).Round(time.Millisecond))
+}
+
+func cmdUnfold(cfg CLIConfig) {
+	fs := flag.NewFlagSet("unfold", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace (unused, for compatibility)")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	maxLines := fs.Int("max-lines", 200, "Maximum lines to extract")
+	fs.Parse(os.Args[2:])
+
+	args := fs.Args()
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, "Usage: dualmem unfold <file-path> <symbol-name> [--max-lines N] [--json]")
+		fmt.Fprintln(os.Stderr, "  Extracts a single function/type/struct from a file with line numbers.")
+		fmt.Fprintln(os.Stderr, "  Supports Go, TypeScript/JavaScript, Python, Rust.")
+		os.Exit(1)
+	}
+
+	filePath := args[0]
+	symbolName := args[1]
+
+	// Resolve to absolute path if relative
+	if !filepath.IsAbs(filePath) {
+		absPath, err := filepath.Abs(filePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error resolving path: %v\n", err)
+			os.Exit(1)
+		}
+		filePath = absPath
+	}
+
+	// Suppress unused variable warning
+	_ = *ns
+
+	result, err := dualmem.ExtractSymbol(filePath, symbolName, *maxLines)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(result)
+		return
+	}
+
+	// Print with line numbers
+	lines := strings.Split(result.Content, "\n")
+	for i, line := range lines {
+		fmt.Printf("%6d\t%s\n", result.StartLine+i, line)
+	}
+	fmt.Fprintf(os.Stderr, "\n--- %s:%d-%d (%d lines, ~%d tokens) ---\n",
+		result.FilePath, result.StartLine, result.EndLine,
+		result.EndLine-result.StartLine+1, result.TokenCount)
 }
 
 func cmdConsult(cfg CLIConfig) {

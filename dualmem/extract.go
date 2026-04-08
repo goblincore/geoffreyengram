@@ -2,6 +2,7 @@ package dualmem
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"strings"
 )
@@ -89,8 +90,8 @@ func containsDefinition(line, identifier, lang string) bool {
 	}
 }
 
-// extractBraceBlock finds the end of a brace-delimited block.
-func extractBraceBlock(lines []string, startLine int) (int, int) {
+// extractBraceBlockWithLimit finds the end of a brace-delimited block with a configurable line limit.
+func extractBraceBlockWithLimit(lines []string, startLine, limit int) (int, int) {
 	depth := 0
 	opened := false
 	for i := startLine; i < len(lines); i++ {
@@ -104,21 +105,26 @@ func extractBraceBlock(lines []string, startLine int) (int, int) {
 		}
 		if opened && depth <= 0 {
 			end := i
-			if end-startLine+1 > maxBlockLines {
-				end = startLine + maxBlockLines - 1
+			if end-startLine+1 > limit {
+				end = startLine + limit - 1
 			}
 			return startLine, end
 		}
 	}
-	end := startLine + maxBlockLines - 1
+	end := startLine + limit - 1
 	if end >= len(lines) {
 		end = len(lines) - 1
 	}
 	return startLine, end
 }
 
-// extractPythonBlock finds the end of an indentation-delimited block.
-func extractPythonBlock(lines []string, startLine int) (int, int) {
+// extractBraceBlock finds the end of a brace-delimited block.
+func extractBraceBlock(lines []string, startLine int) (int, int) {
+	return extractBraceBlockWithLimit(lines, startLine, maxBlockLines)
+}
+
+// extractPythonBlockWithLimit finds the end of an indentation-delimited block with a configurable line limit.
+func extractPythonBlockWithLimit(lines []string, startLine, limit int) (int, int) {
 	if startLine >= len(lines) {
 		return startLine, startLine
 	}
@@ -136,10 +142,15 @@ func extractPythonBlock(lines []string, startLine int) (int, int) {
 		end = i
 	}
 
-	if end-startLine+1 > maxBlockLines {
-		end = startLine + maxBlockLines - 1
+	if end-startLine+1 > limit {
+		end = startLine + limit - 1
 	}
 	return startLine, end
+}
+
+// extractPythonBlock finds the end of an indentation-delimited block.
+func extractPythonBlock(lines []string, startLine int) (int, int) {
+	return extractPythonBlockWithLimit(lines, startLine, maxBlockLines)
 }
 
 // indentLevel returns the number of leading spaces (tabs count as 4).
@@ -155,6 +166,95 @@ func indentLevel(s string) int {
 		}
 	}
 	return n
+}
+
+// SymbolExtraction holds the result of extracting a symbol from a file.
+type SymbolExtraction struct {
+	FilePath   string `json:"file"`
+	Symbol     string `json:"symbol"`
+	StartLine  int    `json:"start_line"` // 1-indexed
+	EndLine    int    `json:"end_line"`   // 1-indexed
+	Content    string `json:"content"`
+	TokenCount int    `json:"tokens"`
+}
+
+// ExtractSymbol reads a file and extracts the code block for the named symbol.
+// Returns a SymbolExtraction with the extracted content and metadata.
+func ExtractSymbol(filePath, symbol string, maxLines int) (*SymbolExtraction, error) {
+	lines, err := readFileLines(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("reading file: %w", err)
+	}
+
+	lang := detectLangFromPath(filePath)
+	if lang == "" {
+		lang = "go" // default fallback
+	}
+
+	// Try extractBlock with custom limit
+	start, end := extractBlockWithLimit(lines, symbol, lang, maxLines)
+	if start >= 0 {
+		content := strings.Join(lines[start:end+1], "\n")
+		return &SymbolExtraction{
+			FilePath:   filePath,
+			Symbol:     symbol,
+			StartLine:  start + 1,
+			EndLine:    end + 1,
+			Content:    content,
+			TokenCount: estimateTokens(content),
+		}, nil
+	}
+
+	// Fallback: case-insensitive search
+	symbolLower := strings.ToLower(symbol)
+	for i, line := range lines {
+		if strings.Contains(strings.ToLower(line), symbolLower) {
+			// Found a mention; extract surrounding block
+			blkStart := i
+			var blkEnd int
+			if lang == "python" {
+				blkStart, blkEnd = extractPythonBlockWithLimit(lines, i, maxLines)
+			} else {
+				blkStart, blkEnd = extractBraceBlockWithLimit(lines, i, maxLines)
+			}
+			if blkStart >= 0 {
+				content := strings.Join(lines[blkStart:blkEnd+1], "\n")
+				return &SymbolExtraction{
+					FilePath:   filePath,
+					Symbol:     symbol,
+					StartLine:  blkStart + 1,
+					EndLine:    blkEnd + 1,
+					Content:    content,
+					TokenCount: estimateTokens(content),
+				}, nil
+			}
+			break
+		}
+	}
+
+	return nil, fmt.Errorf("symbol %q not found in %s", symbol, filePath)
+}
+
+// extractBlockWithLimit is like extractBlock but accepts a configurable line limit.
+func extractBlockWithLimit(lines []string, identifier, lang string, limit int) (int, int) {
+	defLine := -1
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if containsDefinition(trimmed, identifier, lang) {
+			defLine = i
+			break
+		}
+	}
+	if defLine == -1 {
+		return -1, -1
+	}
+
+	switch lang {
+	case "python":
+		return extractPythonBlockWithLimit(lines, defLine, limit)
+	default:
+		return extractBraceBlockWithLimit(lines, defLine, limit)
+	}
 }
 
 // matchIdentifiers scores identifiers against query tokens and returns
