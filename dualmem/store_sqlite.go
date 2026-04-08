@@ -27,11 +27,18 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("dualmem: mkdir %s: %w", filepath.Dir(path), err)
 	}
 
-	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("dualmem: open db: %w", err)
 	}
 	db.SetMaxOpenConns(1)
+
+	// Set pragmas separately — modernc.org/sqlite doesn't support DSN query params.
+	// Use DELETE journal mode for reliable persistence; WAL with this driver
+	// leaves writes in shared memory that may not checkpoint on Close().
+	db.Exec("PRAGMA journal_mode=DELETE")
+	db.Exec("PRAGMA busy_timeout=5000")
+	db.Exec("PRAGMA synchronous=FULL")
 
 	s := &SQLiteStore{db: db}
 	if err := s.migrate(); err != nil {

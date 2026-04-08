@@ -540,6 +540,69 @@ score = parentScore * 0.7 + edgeWeight * 0.3
 
 With beam search (top-5 per hop) and pruning (threshold 0.2) to prevent score collapse across hops.
 
+## vs claude-mem
+
+Head-to-head comparison against [claude-mem](https://github.com/thedotmack/claude-mem) (v12.0.1, 46k stars) — the most popular Claude Code memory framework.
+
+### Context quality (LLM-as-judge)
+
+5 developer task scenarios rated by GLM 5.1 on relevance, completeness, signal-to-noise, and actionability (1-10 scale). Position-randomized A/B. claude-mem tested with ChromaDB vector search enabled.
+
+| Scenario | dualmem | claude-mem |
+|----------|---------|------------|
+| Add Apple Pay to checkout | **5.8** | 2.5 |
+| Debug WebSocket drops under load | **7.5** | 2.8 |
+| Set up CI/CD for new microservice | **8.2** | 2.8 |
+| Junior dev refactoring cache layer | **7.8** | 1.5 |
+| Q3 roadmap planning (continuity) | 3.0 | **7.2** |
+| **Average** | **6.5** | **3.4** |
+
+dualmem wins on targeted technical tasks (4/5 scenarios) by returning query-aware, file-scoped context with warnings and decisions surfaced first. claude-mem wins on broad continuity queries where its flat recency-based retrieval happens to match the "show me everything in progress" intent.
+
+### Architecture comparison
+
+| | dualmem | claude-mem |
+|---|---|---|
+| Language | Go binary (38MB, ~5ms startup) | TypeScript/Bun + ChromaDB subprocess |
+| Vectors | Gemini 768d inline at write time | ChromaDB via MCP (deferred) |
+| Search | Hybrid cosine + BM25 (adaptive alpha) | ChromaDB semantic + SQLite fallback |
+| Context | 7-tier budget-aware + intent detection | Progressive disclosure (count-based) |
+| Code search | HDC 2048d + BM25, no API calls | None |
+| Compression | 3-tier sketch (episodes → arcs → profile) | Observation summaries |
+
+**Where dualmem is better**: Query-aware context assembly, code search, hierarchical compression, zero-dependency binary, semantic deduplication via cosine novelty.
+
+**Where claude-mem is better**: Multi-IDE support (Claude Code, Gemini CLI, Cursor, Codex), web memory viewer UI, privacy tags, token economics tracking, richer observation types, instant writes (deferred embedding).
+
+Full benchmark report and scripts in `benchmarks/`.
+
+## Test suite
+
+```bash
+go test ./dualmem/ -v                      # all unit + integration tests
+go test ./dualmem/ -run TestBench -v       # context assembly benchmarks (mock embeddings)
+go test ./dualmem/ -run TestBenchLive -v   # context benchmarks with real Gemini API
+go test ./dualmem/ -run TestSearchBenchmark # HDC+BM25 code search accuracy
+go test ./dualmem/ -run TestSQLite -v      # SQLite persistence regression tests
+go test ./cmd/dualmem/ -run TestTilde -v   # config tilde expansion tests
+```
+
+### Test categories
+
+| Category | Files | What it covers |
+|----------|-------|----------------|
+| **Core engine** | `dualmem_test.go` | Add, search, context assembly, dual-path routing |
+| **Benchmarks** | `bench_test.go`, `bench_scenarios.go` | Precision, recall, NDCG, token utilization across 20+ queries |
+| **Code search** | `search_bench_test.go` | HDC vs Hybrid vs Grep accuracy on 8 natural language queries |
+| **Codemap** | `codemap_test.go` | Tree-sitter parsing, module extraction, budget-aware rendering |
+| **Co-change** | `cochange_test.go` | File relationship graph, decay, path normalization |
+| **Embedding** | `classify_embedding_test.go` | Sector classification from embedding vectors |
+| **Structural** | `structural_graph_test.go` | Call/import/containment edges from tree-sitter AST |
+| **Clustering** | `cluster_test.go` | Import graph construction, community detection |
+| **SQLite** | `store_sqlite_regression_test.go` | Persistence across close/reopen, PRAGMA handling |
+| **Config** | `cmd/dualmem/config_test.go` | Tilde expansion, absolute path passthrough |
+| **vs claude-mem** | `benchmarks/` | Head-to-head comparison scripts (Python) |
+
 ## Status
 
 Extracted from [Club Mutant](https://github.com/goblincore/club-mutant) (production NPC memory) and extended for coding agent use.

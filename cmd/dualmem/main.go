@@ -82,6 +82,12 @@ func loadConfig() CLIConfig {
 		yaml.Unmarshal(data, &cfg)
 	}
 
+	// Expand ~ in SQLite path (YAML doesn't expand shell vars)
+	if strings.HasPrefix(cfg.Storage.SQLitePath, "~/") {
+		home, _ := os.UserHomeDir()
+		cfg.Storage.SQLitePath = filepath.Join(home, cfg.Storage.SQLitePath[2:])
+	}
+
 	return cfg
 }
 
