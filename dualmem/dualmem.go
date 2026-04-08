@@ -156,6 +156,12 @@ func (e *Engine) AddWithOptions(ctx context.Context, input MemoryInput, userID s
 		switch input.Type {
 		case "trace":
 			salience = 0.8 // exploration traces represent significant effort
+		case "architecture":
+			salience = 0.8 // architectural knowledge is high-value
+		case "investigation":
+			salience = 0.75 // research findings worth surfacing
+		case "requirement":
+			salience = 0.75 // disambiguated requirements are important
 		default:
 			salience = 0.5
 		}
@@ -2112,6 +2118,14 @@ func typeIcon(memType string) string {
 		return "↻"
 	case "seed":
 		return "🌱"
+	case "architecture":
+		return "🏗"
+	case "investigation":
+		return "🔎"
+	case "requirement":
+		return "📋"
+	case "test-strategy":
+		return "🧪"
 	default:
 		return ""
 	}
@@ -3042,7 +3056,7 @@ func typePriority(t string) int {
 	switch t {
 	case "warning":
 		return 2
-	case "decision", "continuity", "trace":
+	case "decision", "continuity", "trace", "architecture", "investigation", "requirement", "test-strategy":
 		return 1
 	default:
 		return 0
@@ -3060,6 +3074,14 @@ func formatTypeLabel(memType, sector string, importance float64) string {
 		return fmt.Sprintf("[Continuity — %s (importance: %.2f)]", sector, importance)
 	case "trace":
 		return fmt.Sprintf("[🔍 Trace — %s (importance: %.2f)]", sector, importance)
+	case "architecture":
+		return fmt.Sprintf("[🏗 Architecture — %s (importance: %.2f)]", sector, importance)
+	case "investigation":
+		return fmt.Sprintf("[🔎 Investigation — %s (importance: %.2f)]", sector, importance)
+	case "requirement":
+		return fmt.Sprintf("[📋 Requirement — %s (importance: %.2f)]", sector, importance)
+	case "test-strategy":
+		return fmt.Sprintf("[🧪 Test Strategy — %s (importance: %.2f)]", sector, importance)
 	case "seed":
 		return fmt.Sprintf("[Codebase Context — %s]", sector)
 	default:

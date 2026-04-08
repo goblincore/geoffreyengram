@@ -71,7 +71,7 @@ type MemoryInput struct {
 	SectorHint       string   // Optional: skip classification
 	Salience         float64  // Optional: override default 0.5 (0 = use default)
 	Entities         []Entity // Optional: pre-extracted entities
-	Type             string   // Optional: "decision", "warning", "continuity", "" (general)
+	Type             string   // Optional: "decision", "warning", "continuity", "trace", "architecture", "investigation", "requirement", "test-strategy", "" (general)
 	Files            []string // Optional: associated file paths (e.g., source files relevant to this memory)
 }
 

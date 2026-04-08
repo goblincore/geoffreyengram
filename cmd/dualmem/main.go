@@ -342,7 +342,7 @@ func cmdAdd(cfg CLIConfig) {
 	sector := fs.String("sector", "", "Sector hint (default: auto-classify; coding presets: decision, warning, map, continuity)")
 	salience := fs.Float64("salience", 0, "Salience override (0 = default 0.5)")
 	session := fs.String("session", "", "Session ID")
-	memType := fs.String("type", "", "Memory type: decision, warning, continuity (default: general)")
+	memType := fs.String("type", "", "Memory type: decision, warning, continuity, trace, architecture, investigation, requirement, test-strategy (default: general)")
 	files := fs.String("files", "", "Comma-separated associated file paths")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	fs.Parse(os.Args[2:])
@@ -755,7 +755,7 @@ func cmdPromote(cfg CLIConfig) {
 	ns := fs.String("ns", "", "Namespace")
 	id := fs.String("id", "", "Memory ID (single promote)")
 	all := fs.Bool("all", false, "Re-evaluate all sketch_raw entries")
-	memType := fs.String("type", "", "Type override for promoted memories (warning, decision, continuity)")
+	memType := fs.String("type", "", "Type override for promoted memories (warning, decision, continuity, trace, architecture, investigation, requirement, test-strategy)")
 	sal := fs.Float64("salience", 0, "Salience override (0 = default)")
 	fs.Parse(os.Args[2:])
 
