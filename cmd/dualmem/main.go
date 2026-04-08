@@ -2043,13 +2043,14 @@ func cmdFileContext(cfg CLIConfig) {
 	fs := flag.NewFlagSet("file-context", flag.ExitOnError)
 	ns := fs.String("ns", "", "Namespace")
 	jsonOut := fs.Bool("json", false, "JSON output")
-	limit := fs.Int("limit", 5, "Max results")
+	gate := fs.Bool("gate", false, "File-read gate mode: structured output for PreToolUse hook")
+	limit := fs.Int("limit", 10, "Max results")
 	fs.Parse(os.Args[2:])
 
 	filename := strings.Join(fs.Args(), " ")
 	if filename == "" {
 		fmt.Fprintln(os.Stderr, "error: filename required")
-		fmt.Fprintln(os.Stderr, "usage: dualmem file-context <filename> [--ns <namespace>] [--json]")
+		fmt.Fprintln(os.Stderr, "usage: dualmem file-context <filename> [--ns <namespace>] [--json] [--gate]")
 		os.Exit(1)
 	}
 
@@ -2061,8 +2062,24 @@ func cmdFileContext(cfg CLIConfig) {
 	}
 	defer engine.Close()
 
+	// Gate mode: check file size first
+	if *gate {
+		info, err := os.Stat(filename)
+		if err != nil || info.Size() < 1500 {
+			return // Silent exit — file too small or not found
+		}
+	}
+
+	queryLimit := *limit
+	if !*gate && queryLimit <= 0 {
+		queryLimit = 5
+	}
+	if *gate && queryLimit <= 0 {
+		queryLimit = 10
+	}
+
 	ctx := context.Background()
-	results, err := engine.FileContext(ctx, namespace, filename, *limit)
+	results, err := engine.FileContext(ctx, namespace, filename, queryLimit)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -2070,6 +2087,49 @@ func cmdFileContext(cfg CLIConfig) {
 
 	if len(results) == 0 {
 		return // Silent exit — no memories for this file
+	}
+
+	if *gate {
+		// Gate mode: structured format for PreToolUse hook
+		info, _ := os.Stat(filename)
+		tokEst := int(info.Size() / 4)
+
+		// Cap at 10 annotations
+		cap_ := len(results)
+		if cap_ > 10 {
+			cap_ = 10
+		}
+		results = results[:cap_]
+
+		relPath := filename
+		if abs, err := filepath.Abs(filename); err == nil {
+			relPath = filepath.Base(abs)
+		}
+
+		fmt.Printf("[File Memory] %s (%d cached observations, file ~%dtok)\n", relPath, len(results), tokEst)
+		fmt.Println("Prior context for this file — the full read will follow, but these may already answer your question:")
+		fmt.Println()
+
+		typeIcons := map[string]string{
+			"warning":    "⚠",
+			"decision":   "★",
+			"continuity": "↻",
+			"knowledge":  "📖",
+			"checkpoint":  "📋",
+			"map":        "🗺",
+			"trace":      "🔍",
+			"seed":       "🌱",
+		}
+
+		for _, r := range results {
+			icon := typeIcons[r.Type]
+			if icon == "" {
+				icon = "●"
+			}
+			dateStr := r.CreatedAt.Format("2006-01-02")
+			fmt.Printf("%s [%s] %s (%s)\n", icon, r.Type, r.Text, dateStr)
+		}
+		return
 	}
 
 	if *jsonOut {
