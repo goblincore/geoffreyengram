@@ -7,14 +7,23 @@ For each scenario, we:
 3. Ask an LLM judge to rate both on relevance, completeness, noise, and usefulness
 4. Aggregate scores
 
-Uses Claude CLI as judge (claude -p "..." --model claude-sonnet-4-6).
+Usage:
+  python3 judge_quality.py                    # GLM 5.1 judge (default, uses ZAI_API_KEY)
+  python3 judge_quality.py --judge opus       # Claude Opus judge (uses ANTHROPIC_API_KEY)
+  python3 judge_quality.py --judge sonnet     # Claude Sonnet judge (uses ANTHROPIC_API_KEY)
+  python3 judge_quality.py --judge gemini     # Gemini 2.5 Flash (uses GEMINI_API_KEY)
 """
 
+import argparse
 import json
 import subprocess
 import time
 import os
 import urllib.request
+import urllib.parse
+
+JUDGE_BACKEND = "glm"  # set by --judge flag
+JUDGE_NAMES = {"glm": "GLM 5.1", "opus": "Claude Opus 4.6", "sonnet": "Claude Sonnet 4.6", "gemini": "Gemini 2.5 Flash"}
 
 CORPUS_PATH = os.path.join(os.path.dirname(__file__), "corpus.json")
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
@@ -146,30 +155,55 @@ def judge_contexts(task, ideal, ctx_a, ctx_b, label_a="dualmem", label_b="claude
         context_b=ctx_b[:4000],
     )
 
-    # Use GLM 5.1 via z.ai as judge
-    api_key = os.environ.get("ZAI_API_KEY", "")
-    if not api_key:
-        return {"error": "ZAI_API_KEY not set"}
-
-    url = "https://api.z.ai/api/anthropic/v1/messages"
-    payload = {
-        "model": "glm-5.1",
-        "max_tokens": 2048,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1,
+    backends = {
+        "glm": {
+            "url": "https://api.z.ai/api/anthropic/v1/messages",
+            "model": "glm-5.1",
+            "key_env": "ZAI_API_KEY",
+            "headers": lambda k: {"Content-Type": "application/json", "x-api-key": k, "anthropic-version": "2023-06-01"},
+            "extract": lambda d: d["content"][0]["text"],
+        },
+        "opus": {
+            "url": "https://api.anthropic.com/v1/messages",
+            "model": "claude-opus-4-6",
+            "key_env": "ANTHROPIC_API_KEY",
+            "headers": lambda k: {"Content-Type": "application/json", "x-api-key": k, "anthropic-version": "2023-06-01"},
+            "extract": lambda d: d["content"][0]["text"],
+        },
+        "sonnet": {
+            "url": "https://api.anthropic.com/v1/messages",
+            "model": "claude-sonnet-4-6",
+            "key_env": "ANTHROPIC_API_KEY",
+            "headers": lambda k: {"Content-Type": "application/json", "x-api-key": k, "anthropic-version": "2023-06-01"},
+            "extract": lambda d: d["content"][0]["text"],
+        },
+        "gemini": {
+            "url_fn": lambda k: f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={k}",
+            "key_env": "GEMINI_API_KEY",
+        },
     }
 
-    try:
-        req = urllib.request.Request(url, json.dumps(payload).encode(), {
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        })
-        with urllib.request.urlopen(req, timeout=90) as resp:
-            data = json.loads(resp.read())
+    backend = backends.get(JUDGE_BACKEND, backends["glm"])
+    api_key = os.environ.get(backend["key_env"], "")
+    if not api_key:
+        return {"error": f"{backend['key_env']} not set (needed for --judge {JUDGE_BACKEND})"}
 
-        text = data["content"][0]["text"]
-        # Strip markdown code fences if present
+    try:
+        if JUDGE_BACKEND == "gemini":
+            url = backend["url_fn"](api_key)
+            payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048}}
+            req = urllib.request.Request(url, json.dumps(payload).encode(), {"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=90) as resp:
+                data = json.loads(resp.read())
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+        else:
+            url = backend["url"]
+            payload = {"model": backend["model"], "max_tokens": 2048, "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}
+            req = urllib.request.Request(url, json.dumps(payload).encode(), backend["headers"](api_key))
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = json.loads(resp.read())
+            text = backend["extract"](data)
+
         text = text.replace("```json", "").replace("```", "").strip()
         start = text.find("{")
         end = text.rfind("}") + 1
@@ -178,15 +212,24 @@ def judge_contexts(task, ideal, ctx_a, ctx_b, label_a="dualmem", label_b="claude
         else:
             return {"error": f"No JSON in response: {text[:200]}"}
     except json.JSONDecodeError as e:
-        return {"error": f"JSON parse: {e}, raw: {text[:200] if 'text' in dir() else 'no text'}"}
+        return {"error": f"JSON parse: {e}"}
     except Exception as e:
         return {"error": str(e)}
 
 
 def main():
+    global JUDGE_BACKEND
+    parser = argparse.ArgumentParser(description="LLM-as-Judge context quality comparison")
+    parser.add_argument("--judge", choices=["glm", "opus", "sonnet", "gemini"], default="glm",
+                        help="Judge model: glm (default, ZAI_API_KEY), opus/sonnet (ANTHROPIC_API_KEY), gemini (GEMINI_API_KEY)")
+    args = parser.parse_args()
+    JUDGE_BACKEND = args.judge
+
+
+
     print("\n" + "=" * 60)
     print("  LLM-as-Judge: Context Quality Comparison")
-    print("  dualmem vs claude-mem")
+    print(f"  dualmem vs claude-mem  (judge: {JUDGE_NAMES[JUDGE_BACKEND]})")
     print("=" * 60)
 
     results = []
@@ -254,7 +297,7 @@ def main():
     with open(report_path, "w") as f:
         f.write("# LLM-as-Judge: Context Quality Comparison\n\n")
         f.write(f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write("Judge: GLM 5.1 via z.ai (position-randomized A/B)\n\n")
+        f.write(f"Judge: {JUDGE_NAMES[JUDGE_BACKEND]} (position-randomized A/B)\n\n")
 
         # Summary
         valid = [r for r in results if "dm_avg" in r]
