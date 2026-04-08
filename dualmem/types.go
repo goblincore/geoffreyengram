@@ -317,6 +317,7 @@ const (
 	IntentContinue Intent = "continue"
 	IntentFeature  Intent = "feature"
 	IntentExplore  Intent = "explore"
+	IntentPlan     Intent = "plan"
 )
 
 // IntentProfile defines per-type weight multipliers for a given intent.
@@ -363,6 +364,14 @@ var IntentProfiles = map[Intent]IntentProfile{
 		Map:        2.0,
 		General:    1.2,
 		Seed:       1.2,
+	},
+	IntentPlan: {
+		Warning:    0.8,
+		Decision:   0.8,
+		Continuity: 2.5,
+		Map:        0.5,
+		General:    0.5,
+		Seed:       0.3,
 	},
 }
 
