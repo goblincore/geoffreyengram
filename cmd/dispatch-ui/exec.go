@@ -414,13 +414,14 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 	var depBranches []string
 	if len(plan.DependsOn) > 0 {
 		for _, dep := range plan.DependsOn {
-			depPlan, err := parsePlanFile(filepath.Join(e.Config.PlansDir, dep+".md"))
+			depName := strings.TrimSuffix(dep, ".md")
+			depPlan, err := parsePlanFile(filepath.Join(e.Config.PlansDir, depName+".md"))
 			if err != nil {
 				continue
 			}
 			depBranch := depPlan.Branch
 			if depBranch == "" {
-				depBranch = "dispatch/" + dep
+				depBranch = "dispatch/" + depName
 			}
 			depBranches = append(depBranches, depBranch)
 		}

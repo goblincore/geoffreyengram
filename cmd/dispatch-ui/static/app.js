@@ -89,6 +89,9 @@ function renderActionButtons(task) {
   if (task.status === 'running') {
     btns += `<button class="btn-sm btn-danger" onclick="cancelTask('${task.name}')">Cancel</button>`;
   }
+  if (task.status === 'pending') {
+    btns += `<button class="btn-sm btn-primary" onclick="runTask('${task.name}')">Run Now</button>`;
+  }
   if (task.status === 'failed' || task.status === 'cancelled') {
     btns += `<button class="btn-sm" onclick="retryTask('${task.name}')">Retry</button>`;
   }
@@ -158,6 +161,11 @@ async function cancelTask(name) {
 
 async function retryTask(name) {
   await fetch(`/api/tasks/${name}/retry`, { method: 'POST' });
+  refreshTasks();
+}
+
+async function runTask(name) {
+  await fetch(`/api/tasks/${name}/run`, { method: 'POST' });
   refreshTasks();
 }
 

@@ -141,7 +141,8 @@ func invertString(s string) string {
 // dependenciesMet checks that all plans in plan.DependsOn have status "done".
 func (e *Engine) dependenciesMet(plan *Plan) bool {
 	for _, dep := range plan.DependsOn {
-		depPath := filepath.Join(e.Config.PlansDir, dep+".md")
+		depName := strings.TrimSuffix(dep, ".md")
+		depPath := filepath.Join(e.Config.PlansDir, depName+".md")
 		depPlan, err := parsePlanFile(depPath)
 		if err != nil || depPlan.Status != "done" {
 			return false

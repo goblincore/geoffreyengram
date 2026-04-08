@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -64,6 +66,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("DELETE /api/tasks/{name}", s.handleDeleteTask)
 	s.mux.HandleFunc("POST /api/tasks/{name}/cancel", s.handleCancelTask)
 	s.mux.HandleFunc("POST /api/tasks/{name}/retry", s.handleRetryTask)
+	s.mux.HandleFunc("POST /api/tasks/{name}/run", s.handleRunTask)
 	s.mux.HandleFunc("GET /api/tasks/{name}/report", s.handleGetReport)
 	s.mux.HandleFunc("GET /api/tasks/{name}/plan", s.handleGetPlan)
 	s.mux.HandleFunc("GET /api/tasks/{name}/logs", s.handleSSELogs)
@@ -339,6 +342,36 @@ func (s *Server) handleRetryTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, planToAPI(plan))
+}
+
+// handleRunTask forces immediate execution of a pending task, bypassing dependency checks.
+func (s *Server) handleRunTask(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	path := filepath.Join(s.eng.Config.PlansDir, name+".md")
+
+	plan, err := parsePlanFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, "task not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	if plan.Status != "pending" {
+		writeError(w, http.StatusBadRequest, "task is not pending (status: "+plan.Status+")")
+		return
+	}
+
+	// Launch immediately in background
+	go func() {
+		if err := s.eng.ExecutePlan(context.Background(), plan); err != nil {
+			log.Printf("run task %s: %v", plan.Name, err)
+		}
+	}()
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "started", "name": plan.Name})
 }
 
 // handleGetReport returns the report file content as plain text.
