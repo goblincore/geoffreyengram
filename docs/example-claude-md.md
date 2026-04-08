@@ -22,7 +22,7 @@ export GEMINI_API_KEY=your-key  # add to ~/.zshrc or equivalent
 ```
 Internalize the output silently — use it to inform your responses but don't repeat it back unless asked.
 
-Context is **task-aware**: intent is auto-detected from the query (debug/continue/feature/explore) and adjusts memory ranking. Override with `--intent debug` if the user's first message is clearly a bug fix, etc.
+Context is **task-aware**: intent is auto-detected from the query (debug/continue/feature/explore/plan) and adjusts memory ranking. Planning queries ("roadmap", "sprint", "Q3 status") boost continuity memories 2.5x. Override with `--intent debug` if the user's first message is clearly a bug fix, etc.
 
 **During the session**: When you learn something important that should persist across conversations, save it:
 ```
@@ -88,12 +88,22 @@ Find relevant modules by natural language query — uses hyperdimensional comput
 ```
 Returns modules ranked by structural similarity (path, symbols, imports, identifiers). Useful for fuzzy queries where you don't know what to grep for ("where does auth happen?", "what handles codebase scanning?"). For exact symbol lookup, grep is still better.
 
+### Symbol extraction
+Extract a single function or type from a file without reading the whole thing:
+```
+~/go/bin/dualmem unfold <file> <symbol-name>
+```
+Returns the symbol's source with line numbers. Supports Go, TypeScript, Python, Rust. Use this instead of reading a 3000-line file when you only need one function.
+
 ### Co-change graph
 Before modifying a file, check what else might need to change:
 ```
 ~/go/bin/dualmem cochange auth.go
 ```
 This shows files that historically co-change with `auth.go`, ranked by strength. The co-change graph builds automatically from `--files` associations — no explicit action needed.
+
+### File-read gate (PreToolUse hook)
+The PreToolUse hook on `Read` calls `dualmem file-context --gate <file>`. For files >1500 bytes with cached memories, it injects a structured context block before the read — showing type-labeled observations with dates. This primes the agent with relevant context (~400 tokens) before the full file read (~5-50k tokens). Small files and files with no memories pass through silently.
 
 ---
 

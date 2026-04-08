@@ -45,7 +45,10 @@ Storage is one SQLite file. No external services.
 | **Entity graph** | Typed edges between concepts for structure-aware retrieval boost |
 | **Session distillation** | Extracts memories from session transcripts automatically |
 | **Staleness detection** | Flags memories when referenced files or symbols have changed |
-| **File-scoped recall** | PreToolUse hook surfaces warnings when Claude opens a file |
+| **File-scoped recall** | PreToolUse hook surfaces cached observations before file reads |
+| **File-read gate** | Structured decision tree primes agent with file context (~400 tok vs 5-50k full read) |
+| **Symbol extraction** | `dualmem unfold <file> <symbol>` extracts a single function/type with line numbers |
+| **Planning intent** | "roadmap" and "sprint" queries auto-boost continuity memories 2.5x |
 
 See [docs/features.md](docs/features.md) for detailed usage and examples.
 
