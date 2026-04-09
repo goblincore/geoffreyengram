@@ -39,6 +39,7 @@ func benchScenarios() []benchScenario {
 		scenarioCoChangeBoost(),
 		scenarioEntityGraphBoost(),
 		scenarioKnowledgeDocPreference(),
+		scenarioSupersede(),
 	}
 }
 
@@ -315,6 +316,51 @@ func scenarioEntityGraphBoost() benchScenario {
 				TokenBudget:  2000,
 				ExpectedTags: []string{"auth-service", "token-store", "oauth-provider"},
 				ForbidTags:   []string{"email-sendgrid", "search-elastic"},
+			},
+		},
+	}
+}
+
+// scenarioSupersede tests that superseded memories don't pollute retrieval results.
+// After supersession, querying should return the newer version, not the stale one.
+func scenarioSupersede() benchScenario {
+	return benchScenario{
+		Name:        "Supersede Retrieval",
+		Description: "Tests that superseded (stale) memories are excluded from retrieval, only current versions surface",
+		Memories: []benchMemory{
+			// These will be added sequentially — newer ones should supersede older ones.
+			// The bench runner adds them in order, so supersede fires on each add.
+
+			// Step 1-4: initial memories
+			// Note: old/new pairs are designed to be lexically similar so the mock
+			// hash-based embedder produces cosine similarity above the supersede threshold.
+			{Text: "chose SQLite for zero-setup local storage in the store layer", Type: "decision", Sector: "decision", Salience: 0.8, Files: []string{"store.go"}, Tag: "old-decision"},
+			{Text: "in progress: auth refactor, remaining: JWT validation and refresh tokens", Type: "continuity", Sector: "continuity", Salience: 0.7, Tag: "old-continuity"},
+			{Text: "auth middleware skips /health endpoint check intentionally for performance", Type: "warning", Sector: "warning", Salience: 0.9, Files: []string{"auth/middleware.go"}, Tag: "old-warning"},
+			{Text: "architecture: storage layer uses SQLite via store.go for persistence", Type: "architecture", Sector: "decision", Salience: 0.7, Files: []string{"store.go"}, Tag: "old-architecture"},
+
+			// Step 5-8: superseding memories (should replace the above)
+			{Text: "chose Postgres for production scalability in the store layer", Type: "decision", Sector: "decision", Salience: 0.8, Files: []string{"store.go", "migrations/"}, Tag: "new-decision"},
+			{Text: "in progress: auth refactor, remaining: refresh tokens only", Type: "continuity", Sector: "continuity", Salience: 0.7, Tag: "new-continuity"},
+			{Text: "auth middleware skips /health and /metrics endpoint checks intentionally for performance", Type: "warning", Sector: "warning", Salience: 0.9, Files: []string{"auth/middleware.go"}, Tag: "new-warning"},
+			{Text: "architecture: storage layer uses Postgres via store.go for persistence", Type: "architecture", Sector: "decision", Salience: 0.7, Files: []string{"store.go", "migrations/"}, Tag: "new-architecture"},
+
+			// Noise (should survive — unrelated)
+			{Text: "Frontend uses React 18 with server components", Sector: "map", Salience: 0.3, Tag: "noise-frontend"},
+			{Text: "CI runs on GitHub Actions with Go 1.22 matrix", Sector: "map", Salience: 0.3, Tag: "noise-ci"},
+		},
+		Queries: []benchQuery{
+			{
+				Query:        "database storage choice",
+				TokenBudget:  2000,
+				ExpectedTags: []string{"new-decision", "new-architecture"},
+				ForbidTags:   []string{"old-decision", "old-architecture", "noise-frontend", "noise-ci"},
+			},
+			{
+				Query:        "auth middleware endpoint skipping",
+				TokenBudget:  2000,
+				ExpectedTags: []string{"new-warning"},
+				ForbidTags:   []string{"old-warning"},
 			},
 		},
 	}
