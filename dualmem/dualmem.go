@@ -2686,7 +2686,7 @@ func (e *Engine) GarbageCollect(ctx context.Context, userID string, opts GCOptio
 						e.store.DeleteDetail(other.ID)
 					}
 					demoted[other.ID] = true
-					report.SupersededContinuity++
+					report.SupersededMemories++
 				}
 			}
 		}

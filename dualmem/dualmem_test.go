@@ -732,7 +732,7 @@ func TestGarbageCollect_DryRun(t *testing.T) {
 
 	t.Logf("GC dry-run report: episodes=%d, arcs=%d, stale=%d, superseded=%d, cold=%d",
 		report.ExpiredEpisodes, report.ExpiredArcs, report.StaleDetails,
-		report.SupersededContinuity, report.AccessColdDetails)
+		report.SupersededMemories, report.AccessColdDetails)
 }
 
 func TestGarbageCollect_ExpiredEpisodes(t *testing.T) {
