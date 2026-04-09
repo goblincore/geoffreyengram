@@ -239,11 +239,9 @@ func (e *Engine) AddWithOptions(ctx context.Context, input MemoryInput, userID s
 			e.notifyPipeline()
 		}
 
-		// Continuity supersession: when a new continuity entry is added,
-		// auto-demote older continuity entries about the same topic.
-		if input.Type == "continuity" {
-			e.supersedeContinuity(ctx, userID, dm.ID, embedding)
-		}
+		// Type-aware supersession: demote older memories of the same type
+		// that are semantically similar to the new one.
+		e.supersedeByType(ctx, userID, dm.ID, input.Type, embedding)
 	} else {
 		// Route to Sketch Path
 		if err := e.sketch.IngestRaw(ctx, userID, content, sector, input.SessionID, embedding); err != nil {
@@ -2528,24 +2526,41 @@ func (e *Engine) ReEvaluateSketchRaw(ctx context.Context, userID string, opts *P
 	return promoted, nil
 }
 
-// supersedeContinuity demotes older continuity entries that are semantically
-// similar to the newly added one (cosine similarity > 0.75). This prevents
-// stale "remaining: X" entries from accumulating when X has been completed
-// and a newer continuity entry reflects the updated status.
-func (e *Engine) supersedeContinuity(ctx context.Context, userID, newID string, newEmbedding []float32) {
-	existing, err := e.store.GetDetailsByType(userID, "continuity")
+// supersedeThresholds maps memory types to their cosine similarity threshold
+// for automatic supersession. When a new memory of a given type is added,
+// older memories of the same type with cosine similarity >= the threshold
+// are demoted to sketch path.
+var supersedeThresholds = map[string]float64{
+	"continuity":    0.75,
+	"decision":      0.80,
+	"architecture":  0.80,
+	"investigation": 0.80,
+	"requirement":   0.80,
+	"test-strategy": 0.80,
+	"trace":         0.80,
+	"warning":       0.85,
+}
+
+// supersedeByType demotes older memories of the same type that are semantically
+// similar to the newly added one (cosine similarity >= type-specific threshold).
+// This prevents stale entries from accumulating when a newer memory covers the same topic.
+func (e *Engine) supersedeByType(ctx context.Context, userID, newID, memType string, newEmbedding []float32) {
+	threshold, ok := supersedeThresholds[memType]
+	if !ok {
+		return
+	}
+
+	existing, err := e.store.GetDetailsByType(userID, memType)
 	if err != nil || len(existing) <= 1 {
 		return
 	}
 
-	const supersessionThreshold = 0.75
 	for _, old := range existing {
 		if old.ID == newID {
 			continue
 		}
 		sim := CosineSimilarity(newEmbedding, old.Vector)
-		if sim >= supersessionThreshold {
-			// Demote the older entry to sketch path
+		if sim >= threshold {
 			e.sketch.IngestRaw(ctx, userID, old.Text, old.Sector, old.SessionID, old.Vector)
 			e.store.DeleteDetail(old.ID)
 		}

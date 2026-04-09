@@ -704,6 +704,134 @@ func TestContinuitySupersession_DifferentTopics(t *testing.T) {
 	// Different topics should both survive (cosine similarity < 0.75)
 }
 
+func TestSupersedeByType_Decision(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Add a decision about database choice
+	err := engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "chose SQLite for local storage",
+		Salience:    0.9,
+		Type:        "decision",
+	}, "user1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	count, _ := engine.store.GetDetailCount("user1")
+	if count != 1 {
+		t.Fatalf("expected 1 detail, got %d", count)
+	}
+
+	// Add a newer decision about the same topic (should supersede at 0.80)
+	err = engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "chose SQLite for local storage with WAL mode",
+		Salience:    0.9,
+		Type:        "decision",
+	}, "user1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Check that only 1 decision remains in detail
+	details, _ := engine.store.GetDetailMemories("user1")
+	decisionCount := 0
+	var survivorText string
+	for _, d := range details {
+		if d.Type == "decision" {
+			decisionCount++
+			survivorText = d.Text
+		}
+	}
+	if decisionCount > 1 {
+		t.Errorf("expected at most 1 decision in detail (supersession should demote old), got %d", decisionCount)
+	}
+	// The newer memory should be the survivor
+	if decisionCount == 1 && !strings.Contains(survivorText, "WAL") {
+		t.Errorf("expected newer decision to survive, got: %s", survivorText)
+	}
+}
+
+func TestSupersedeByType_Warning(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Add a warning
+	err := engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "auth middleware skips /health endpoint intentionally",
+		Salience:    0.9,
+		Type:        "warning",
+	}, "user1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add a refined version of the same warning (should supersede at 0.85)
+	err = engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "auth middleware skips /health and /metrics endpoints intentionally",
+		Salience:    0.9,
+		Type:        "warning",
+	}, "user1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	details, _ := engine.store.GetDetailMemories("user1")
+	warningCount := 0
+	for _, d := range details {
+		if d.Type == "warning" {
+			warningCount++
+		}
+	}
+	// With mock embedder, these are very similar texts — should supersede
+	t.Logf("Warning entries in detail: %d (expect 1 if supersession worked)", warningCount)
+	if warningCount > 1 {
+		t.Errorf("expected at most 1 warning in detail, got %d", warningCount)
+	}
+}
+
+func TestSupersedeByType_DifferentTypes_NoInterference(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Add a decision and a warning about the same topic — should NOT supersede each other
+	err := engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "chose SQLite for local storage database",
+		Salience:    0.9,
+		Type:        "decision",
+	}, "user1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "warning: SQLite local storage database has no concurrent write support",
+		Salience:    0.9,
+		Type:        "warning",
+	}, "user1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	details, _ := engine.store.GetDetailMemories("user1")
+	decisionCount := 0
+	warningCount := 0
+	for _, d := range details {
+		switch d.Type {
+		case "decision":
+			decisionCount++
+		case "warning":
+			warningCount++
+		}
+	}
+	if decisionCount != 1 {
+		t.Errorf("expected 1 decision, got %d", decisionCount)
+	}
+	if warningCount != 1 {
+		t.Errorf("expected 1 warning, got %d", warningCount)
+	}
+}
+
 func TestGarbageCollect_DryRun(t *testing.T) {
 	engine := newTestEngine(t)
 	ctx := context.Background()
@@ -1206,11 +1334,12 @@ func TestDualSearch_WithGraphBoost(t *testing.T) {
 	userID := "test-graphboost"
 	ns := "test-ns"
 
-	// Insert memories via engine with high salience to ensure detail routing
+	// Insert memories via engine with high salience to ensure detail routing.
+	// Texts are chosen with varied lengths to avoid mock embedder false supersession.
 	memories := []MemoryInput{
-		{UserMessage: "button component uses React.memo for performance optimization", Salience: 0.9, Type: "decision"},
-		{UserMessage: "auth middleware rewrite driven by legal compliance requirements", Salience: 0.9, Type: "decision"},
-		{UserMessage: "database migration uses SQLite for zero-setup deployments", Salience: 0.9, Type: "decision"},
+		{UserMessage: "auth middleware rewrite driven by legal compliance requirements for SOC2 Type II certification and GDPR Article 25 data protection by design", Salience: 0.9, Type: "decision"},
+		{UserMessage: "React.memo optimization", Salience: 0.9, Type: "decision"},
+		{UserMessage: "database migration uses SQLite for zero-setup deployments in embedded systems with strict binary size constraints and no network connectivity database migration uses SQLite for zero-setup deployments in embedded systems with strict binary size constraints and no network connectivity database migration uses SQLite for zero-setup deployments in embedded systems with strict binary size constraints and no network connectivity", Salience: 0.9, Type: "decision"},
 	}
 	for _, m := range memories {
 		if err := engine.AddWithOptions(ctx, m, userID); err != nil {
@@ -1299,11 +1428,11 @@ func TestAssembleContextWith_GraphBoost(t *testing.T) {
 	userID := "test-ctx-graphboost"
 	ns := userID // AssembleContextWith uses userID as namespace for GraphBoost
 
-	// Insert memories with distinct topics
+	// Insert memories with distinct topics (varied lengths to avoid mock embedder false supersession).
 	memories := []MemoryInput{
-		{UserMessage: "payment gateway uses Stripe for card processing", Salience: 0.9, Type: "decision"},
-		{UserMessage: "caching layer uses Redis for session storage", Salience: 0.9, Type: "decision"},
-		{UserMessage: "deployment pipeline runs on GitHub Actions CI/CD", Salience: 0.9, Type: "decision"},
+		{UserMessage: "payment gateway uses Stripe for card processing with 3D Secure authentication and webhook signature verification", Salience: 0.9, Type: "decision"},
+		{UserMessage: "Redis session cache", Salience: 0.9, Type: "decision"},
+		{UserMessage: "deployment pipeline runs on GitHub Actions CI/CD with automated testing matrix across Linux macOS and Windows deployment pipeline runs on GitHub Actions CI/CD with automated testing matrix across Linux macOS and Windows deployment pipeline runs on GitHub Actions CI/CD with automated testing matrix across Linux macOS and Windows", Salience: 0.9, Type: "decision"},
 	}
 	for _, m := range memories {
 		if err := engine.AddWithOptions(ctx, m, userID); err != nil {
