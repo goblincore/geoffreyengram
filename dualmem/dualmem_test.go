@@ -1696,3 +1696,49 @@ func TestTraceType(t *testing.T) {
 		t.Errorf("explore intent: trace (%.2f) should score > general (%.2f)", traceScore, generalScore)
 	}
 }
+
+func TestGarbageCollect_SupersedesAllTypes(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+	userID := "gc-supersede-user"
+
+	// Manually insert two similar decisions (bypass AddWithOptions to skip eager supersede)
+	// This simulates a scenario where eager supersede didn't fire (e.g., old data)
+	emb1, _ := engine.cfg.EmbeddingProvider.Embed(ctx, "chose SQLite for local storage", "")
+	emb2, _ := engine.cfg.EmbeddingProvider.Embed(ctx, "chose SQLite for local storage database", "")
+
+	dm1 := &DetailMemory{
+		ID: "gc-dec-old", Text: "chose SQLite for local storage",
+		Sector: "decision", Salience: 0.9, ImportanceScore: 0.9,
+		Type: "decision", CreatedAt: time.Now().Add(-2 * time.Hour), LastAccessedAt: time.Now(),
+	}
+	dm2 := &DetailMemory{
+		ID: "gc-dec-new", Text: "chose SQLite for local storage database",
+		Sector: "decision", Salience: 0.9, ImportanceScore: 0.9,
+		Type: "decision", CreatedAt: time.Now().Add(-1 * time.Hour), LastAccessedAt: time.Now(),
+	}
+	engine.detail.Insert(ctx, dm1, emb1, userID)
+	engine.detail.Insert(ctx, dm2, emb2, userID)
+
+	// Verify both exist
+	decisions, _ := engine.store.GetDetailsByType(userID, "decision")
+	if len(decisions) < 2 {
+		t.Fatalf("expected 2 decisions before GC, got %d", len(decisions))
+	}
+
+	// Run GC
+	report, err := engine.GarbageCollect(ctx, userID, GCOptions{Verbose: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if report.SupersededMemories == 0 {
+		t.Error("expected GC to supersede at least 1 decision memory")
+	}
+
+	// Only 1 decision should remain
+	decisionsAfter, _ := engine.store.GetDetailsByType(userID, "decision")
+	if len(decisionsAfter) > 1 {
+		t.Errorf("expected at most 1 decision after GC, got %d", len(decisionsAfter))
+	}
+}

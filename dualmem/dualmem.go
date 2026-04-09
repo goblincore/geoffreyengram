@@ -2671,25 +2671,27 @@ func (e *Engine) GarbageCollect(ctx context.Context, userID string, opts GCOptio
 		}
 	}
 
-	// 4. Continuity supersession scan — group by cosine similarity, keep newest per cluster
-	continuity, _ := e.store.GetDetailsByType(userID, "continuity")
-	if len(continuity) > 1 {
-		// Mark which IDs to keep (newest in each similarity cluster)
+	// 4. Type-aware supersession scan — for each type with a threshold,
+	// group by cosine similarity, keep newest per cluster, demote rest.
+	for memType, threshold := range supersedeThresholds {
+		memories, _ := e.store.GetDetailsByType(userID, memType)
+		if len(memories) <= 1 {
+			continue
+		}
 		kept := make(map[string]bool)
-		demoted := make(map[string]bool)
-		for i, c := range continuity {
-			if demoted[c.ID] {
+		demotedSet := make(map[string]bool)
+		for i, c := range memories {
+			if demotedSet[c.ID] {
 				continue
 			}
 			kept[c.ID] = true
-			for j := i + 1; j < len(continuity); j++ {
-				other := continuity[j]
-				if demoted[other.ID] || kept[other.ID] {
+			for j := i + 1; j < len(memories); j++ {
+				other := memories[j]
+				if demotedSet[other.ID] || kept[other.ID] {
 					continue
 				}
 				sim := CosineSimilarity(c.Vector, other.Vector)
-				if sim >= 0.75 {
-					// c is newer (sorted by created_at DESC), demote other
+				if sim >= threshold {
 					if opts.Verbose {
 						report.Entries = append(report.Entries, GCEntry{
 							ID: other.ID, Action: "demote", Reason: "superseded",
@@ -2700,7 +2702,7 @@ func (e *Engine) GarbageCollect(ctx context.Context, userID string, opts GCOptio
 						e.sketch.IngestRaw(ctx, userID, other.Text, other.Sector, other.SessionID, other.Vector)
 						e.store.DeleteDetail(other.ID)
 					}
-					demoted[other.ID] = true
+					demotedSet[other.ID] = true
 					report.SupersededMemories++
 				}
 			}
