@@ -2652,10 +2652,6 @@ func (e *Engine) GarbageCollect(ctx context.Context, userID string, opts GCOptio
 				if !ok {
 					continue
 				}
-				// Don't demote warnings — they're intentional invariants
-				if d.Type == "warning" {
-					continue
-				}
 				if opts.Verbose {
 					report.Entries = append(report.Entries, GCEntry{
 						ID: id, Action: "demote", Reason: "git_stale",
@@ -2712,9 +2708,6 @@ func (e *Engine) GarbageCollect(ctx context.Context, userID string, opts GCOptio
 	// 5. Access-cold demotion — details not accessed in 30+ days with importance < 0.8
 	details, _ := e.store.GetDetailMemories(userID)
 	for _, d := range details {
-		if d.Type == "warning" {
-			continue // never demote warnings
-		}
 		daysSinceAccess := now.Sub(d.LastAccessedAt).Hours() / 24
 		if daysSinceAccess >= 30 && d.ImportanceScore < 0.8 {
 			if opts.Verbose {

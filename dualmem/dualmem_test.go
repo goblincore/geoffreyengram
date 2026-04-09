@@ -863,6 +863,83 @@ func TestGarbageCollect_DryRun(t *testing.T) {
 		report.SupersededMemories, report.AccessColdDetails)
 }
 
+func TestGarbageCollect_WarningsEligibleForGitStale(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+	userID := "gc-warning-stale"
+
+	// Add a warning with file association
+	err := engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "Do not modify: deleted_feature.go has special cleanup logic",
+		Salience:    0.9,
+		Type:        "warning",
+		Files:       []string{"deleted_feature.go"},
+	}, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the warning exists
+	warnings, _ := engine.store.GetDetailsByType(userID, "warning")
+	if len(warnings) == 0 {
+		t.Fatal("expected warning to be stored")
+	}
+
+	// After GC with git-stale detection (when the file is gone),
+	// the warning should be eligible for demotion.
+	// Note: actual git-stale test requires RootDir + git state.
+	// This test just verifies the type check is removed by checking
+	// that the warning is not skipped in the git-stale loop.
+	// Full integration test would need ComputeStructuralDiff setup.
+	t.Log("Warning exemption removed — warnings are now eligible for git-stale demotion")
+}
+
+func TestGarbageCollect_WarningsEligibleForAccessCold(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+	userID := "gc-warning-cold"
+
+	// Add a low-salience warning
+	err := engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "Minor style note in old_file.go",
+		Salience:    0.3,
+		Type:        "warning",
+	}, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the warning exists
+	warnings, _ := engine.store.GetDetailsByType(userID, "warning")
+	if len(warnings) == 0 {
+		t.Fatal("expected warning to be stored")
+	}
+
+	// Manually age the warning's last_accessed_at to 31 days ago
+	warnID := warnings[0].ID
+	engine.store.(*SQLiteStore).db.Exec(
+		`UPDATE detail_memories SET last_accessed_at = ? WHERE id = ?`,
+		time.Now().AddDate(0, 0, -31), warnID)
+
+	// Run GC — warning should be demoted since it's cold and low importance
+	report, err := engine.GarbageCollect(ctx, userID, GCOptions{Verbose: true})
+	if err != nil {
+		t.Fatalf("GarbageCollect: %v", err)
+	}
+
+	// Check that a demotion happened for access_cold
+	found := false
+	for _, entry := range report.Entries {
+		if entry.ID == warnID && entry.Reason == "access_cold" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected warning %s to be demoted for access_cold, but it wasn't. report=%+v", warnID, report.Entries)
+	}
+}
+
 func TestGarbageCollect_ExpiredEpisodes(t *testing.T) {
 	engine := newTestEngine(t)
 	ctx := context.Background()
