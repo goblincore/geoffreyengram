@@ -3141,6 +3141,20 @@ func (e *Engine) getSynthesisGenerator() (TextGenerator, error) {
 	return gen, nil
 }
 
+// getExplorerGenerator returns the best available TextGenerator for autopilot/anticipatory
+// exploration. Prefers ExplorerGenerator if configured, falls back to getSynthesisGenerator.
+func (e *Engine) getExplorerGenerator() (TextGenerator, error) {
+	if e.cfg.ExplorerGenerator != nil {
+		return e.cfg.ExplorerGenerator, nil
+	}
+	return e.getSynthesisGenerator()
+}
+
+// SetExplorerGenerator sets the dedicated model for autopilot/anticipatory exploration.
+func (e *Engine) SetExplorerGenerator(gen TextGenerator) {
+	e.cfg.ExplorerGenerator = gen
+}
+
 // SeedResult describes what SeedMemories produced.
 type SeedResult struct {
 	Clusters []Cluster

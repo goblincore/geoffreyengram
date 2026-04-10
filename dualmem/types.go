@@ -693,6 +693,7 @@ type Config struct {
 	EntityExtractor   EntityExtractor
 	Summarizer         SummarizerProvider // LLM for episode/arc/profile summarization
 	SynthesisGenerator TextGenerator      // Optional stronger model for Consult/Synthesize (falls back to Summarizer)
+	ExplorerGenerator  TextGenerator      // Optional dedicated model for autopilot/anticipatory
 
 	// Sector classification
 	Sectors *SectorConfig // nil = CodingSectors (default)

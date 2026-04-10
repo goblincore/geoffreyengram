@@ -42,6 +42,10 @@ type CLIConfig struct {
 		SynthesisModel     string `yaml:"synthesis_model"`      // e.g. "glm-5.1"
 		SynthesisAPIKeyEnv string `yaml:"synthesis_api_key_env"` // e.g. "ZAI_API_KEY"
 		SynthesisBaseURL   string `yaml:"synthesis_base_url"`   // e.g. "https://api.z.ai/api/anthropic"
+		ExplorerProvider  string `yaml:"explorer_provider"`
+		ExplorerModel     string `yaml:"explorer_model"`
+		ExplorerAPIKeyEnv string `yaml:"explorer_api_key_env"`
+		ExplorerBaseURL   string `yaml:"explorer_base_url"`
 	} `yaml:"providers"`
 	Pipeline struct {
 		EpisodeInterval string `yaml:"episode_interval"`
@@ -193,6 +197,14 @@ func newEngine(cfg CLIConfig) (*dualmem.Engine, error) {
 		}
 	}
 
+	var explorerGen dualmem.TextGenerator
+	if cfg.Providers.ExplorerProvider == "anthropic" {
+		expKey := os.Getenv(cfg.Providers.ExplorerAPIKeyEnv)
+		if expKey != "" {
+			explorerGen = dualmem.NewAnthropicSummarizer(expKey, cfg.Providers.ExplorerBaseURL, cfg.Providers.ExplorerModel)
+		}
+	}
+
 	cwd, _ := os.Getwd()
 	return dualmem.New(dualmem.Config{
 		SQLitePath:            cfg.Storage.SQLitePath,
@@ -200,6 +212,7 @@ func newEngine(cfg CLIConfig) (*dualmem.Engine, error) {
 		Classifier:            classifier,
 		Summarizer:            dualmem.NewGeminiSummarizer(apiKey, ""),
 		SynthesisGenerator:    synthesisGen,
+		ExplorerGenerator:     explorerGen,
 		Sectors:               sectors,
 		MaxDetailPerUser:      100,
 		ImportanceTheta:       0.65,
