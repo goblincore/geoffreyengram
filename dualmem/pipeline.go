@@ -26,9 +26,11 @@ type Pipeline struct {
 	// Episode worker only wakes when there's actual work to do.
 	notify chan struct{}
 
-	cancelEpisode  context.CancelFunc
-	cancelArc      context.CancelFunc
-	cancelProfile  context.CancelFunc
+	cancelEpisode      context.CancelFunc
+	cancelArc          context.CancelFunc
+	cancelProfile      context.CancelFunc
+	cancelAnticipatory context.CancelFunc
+	engine             *Engine
 }
 
 // NewPipeline creates a compression pipeline.
@@ -88,6 +90,28 @@ func (p *Pipeline) Stop() {
 	}
 	if p.cancelProfile != nil {
 		p.cancelProfile()
+	}
+	p.StopAnticipatory()
+}
+
+// StartAnticipatory launches the anticipatory worker for a specific session.
+func (p *Pipeline) StartAnticipatory(namespace, sessionLogPath string) {
+	if p.engine == nil || sessionLogPath == "" {
+		return
+	}
+	if p.cancelAnticipatory != nil {
+		return // already running
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	p.cancelAnticipatory = cancel
+	go p.engine.anticipatoryWorker(ctx, namespace, sessionLogPath)
+}
+
+// StopAnticipatory stops the anticipatory worker.
+func (p *Pipeline) StopAnticipatory() {
+	if p.cancelAnticipatory != nil {
+		p.cancelAnticipatory()
+		p.cancelAnticipatory = nil
 	}
 }
 

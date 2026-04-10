@@ -105,6 +105,9 @@ func New(cfg Config) (*Engine, error) {
 		e.pipeline = NewPipeline(store, cfg.EmbeddingProvider, cfg.Summarizer, projector, cfg.EntityExtractor, &cfg)
 		e.pipeline.Start()
 	}
+	if e.pipeline != nil {
+		e.pipeline.engine = e
+	}
 
 	return e, nil
 }
