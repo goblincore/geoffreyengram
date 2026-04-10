@@ -529,6 +529,27 @@ func (s *SQLiteStore) GetDetailsByFiles(userID, filename string, types []string,
 	return results, rows.Err()
 }
 
+// GetMemoryCountByFiles returns the count of detail memories with any of the given file paths.
+func (s *SQLiteStore) GetMemoryCountByFiles(userID string, files []string) (int, error) {
+	if len(files) == 0 {
+		return 0, nil
+	}
+	conditions := make([]string, len(files))
+	args := make([]interface{}, 0, len(files)+1)
+	args = append(args, userID)
+	for i, f := range files {
+		conditions[i] = "files_json LIKE ?"
+		args = append(args, "%"+f+"%")
+	}
+	query := fmt.Sprintf(`
+		SELECT COUNT(*) FROM detail_memories
+		WHERE user_id = ? AND (%s)
+	`, strings.Join(conditions, " OR "))
+	var count int
+	err := s.db.QueryRow(query, args...).Scan(&count)
+	return count, err
+}
+
 func (s *SQLiteStore) GetFilesWithMemories(userID string, types []string) ([]string, error) {
 	if len(types) == 0 {
 		return nil, nil
