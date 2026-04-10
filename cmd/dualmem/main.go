@@ -908,7 +908,7 @@ func cmdGC(cfg CLIConfig) {
 		fmt.Println()
 	}
 
-	total := report.ExpiredEpisodes + report.ExpiredArcs + report.StaleDetails + report.SupersededContinuity + report.AccessColdDetails
+	total := report.ExpiredEpisodes + report.ExpiredArcs + report.StaleDetails + report.SupersededMemories + report.AccessColdDetails
 	if total == 0 {
 		fmt.Println("Nothing to clean up.")
 		return
@@ -917,7 +917,7 @@ func cmdGC(cfg CLIConfig) {
 	fmt.Printf("Expired episodes:     %d deleted\n", report.ExpiredEpisodes)
 	fmt.Printf("Expired arcs:         %d deleted\n", report.ExpiredArcs)
 	fmt.Printf("Git-stale details:    %d demoted\n", report.StaleDetails)
-	fmt.Printf("Superseded continuity: %d demoted\n", report.SupersededContinuity)
+	fmt.Printf("Superseded memories:   %d demoted\n", report.SupersededMemories)
 	fmt.Printf("Access-cold details:  %d demoted\n", report.AccessColdDetails)
 	fmt.Printf("Total: %d entries cleaned\n", total)
 }

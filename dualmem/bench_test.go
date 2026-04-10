@@ -473,6 +473,106 @@ func truncate(s string, max int) string {
 	return s
 }
 
+// TestBenchSupersede validates the supersede-by-type mechanism end-to-end.
+// It seeds memories sequentially (old then new versions), checks that each
+// supersede-eligible type has at most 1 detail memory, that sketch preserves
+// the demoted versions, and that retrieval returns only the current version.
+func TestBenchSupersede(t *testing.T) {
+	engine := newBenchEngine(t)
+	userID := "bench-supersede"
+	ctx := context.Background()
+
+	scenario := scenarioSupersede()
+
+	// Add memories sequentially (order matters for supersession)
+	for i, m := range scenario.Memories {
+		salience := m.Salience
+		if salience == 0 {
+			salience = 0.5
+		}
+		err := engine.AddWithOptions(ctx, MemoryInput{
+			UserMessage: m.Text,
+			SectorHint:  m.Sector,
+			Salience:    salience,
+			Type:        m.Type,
+			Files:       m.Files,
+		}, userID)
+		if err != nil {
+			t.Fatalf("AddWithOptions step %d (%s): %v", i+1, m.Tag, err)
+		}
+	}
+
+	// Check memory counts per type — each supersede-eligible type should have at most 1
+	for _, memType := range []string{"decision", "continuity", "warning", "architecture"} {
+		memories, _ := engine.store.GetDetailsByType(userID, memType)
+		t.Logf("Type %q: %d detail memories", memType, len(memories))
+		if len(memories) > 1 {
+			texts := make([]string, len(memories))
+			for i, m := range memories {
+				texts[i] = m.Text[:min(60, len(m.Text))]
+			}
+			t.Errorf("expected at most 1 %s memory after supersede, got %d: %v", memType, len(memories), texts)
+		}
+	}
+
+	// Check sketch preservation — old memories should have been demoted, not lost
+	sketchCount, _ := engine.store.GetSketchRawCount(userID)
+	t.Logf("Sketch raw count: %d (expect >= 4 from superseded memories)", sketchCount)
+	if sketchCount < 4 {
+		t.Errorf("expected at least 4 sketch entries from superseded memories, got %d", sketchCount)
+	}
+
+	// Run retrieval quality checks via normal bench infrastructure
+	m := &idTagMap{
+		idToTag:   make(map[string]string),
+		tagToID:   make(map[string]string),
+		tagToText: make(map[string]string),
+	}
+	details, _ := engine.store.GetDetailMemories(userID)
+	for _, d := range details {
+		for _, bm := range scenario.Memories {
+			if d.Text == bm.Text && bm.Tag != "" {
+				m.idToTag[d.ID] = bm.Tag
+				m.tagToID[bm.Tag] = d.ID
+				m.tagToText[bm.Tag] = bm.Text
+			}
+		}
+	}
+
+	for _, query := range scenario.Queries {
+		// Get assembled context directly to check for forbidden tags
+		block, err := engine.AssembleContext(ctx, userID, query.Query, query.TokenBudget)
+		if err != nil {
+			t.Fatalf("AssembleContext: %v", err)
+		}
+
+		// Extract surfaced detail IDs and map to tags
+		var surfacedTags []string
+		for _, src := range block.Sources {
+			if src.Type == "detail" {
+				if tag, ok := m.idToTag[src.ID]; ok {
+					surfacedTags = append(surfacedTags, tag)
+				}
+			}
+		}
+
+		result := runDualMem(t, engine, userID, query, m)
+		t.Logf("\n  Query: %q", query.Query)
+		t.Logf("  Prec: %.2f | Recall: %.2f | NDCG: %.2f | Tokens: %d/%d",
+			result.Precision, result.Recall, result.NDCG, result.TokensUsed, result.TokenBudget)
+		t.Logf("  Surfaced tags: %v", surfacedTags)
+
+		// Check that forbidden tags (old superseded memories) are NOT in results
+		for _, tag := range query.ForbidTags {
+			for _, surfaced := range surfacedTags {
+				if surfaced == tag {
+					t.Errorf("forbidden tag %q appeared in results for query %q", tag, query.Query)
+				}
+			}
+		}
+	}
+}
+
 // --- Live benchmark with real Gemini Embedding 2 ---
 
 // newLiveBenchEngine creates a test engine with real Gemini Embedding 2.

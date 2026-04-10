@@ -591,7 +591,7 @@ type GCReport struct {
 	ExpiredEpisodes     int // Episodes past retention, deleted
 	ExpiredArcs         int // Arcs past retention, deleted
 	StaleDetails        int // Git-stale details, demoted to sketch
-	SupersededContinuity int // Duplicate continuity entries, demoted
+	SupersededMemories int // Duplicate memories (same type, high cosine similarity), demoted
 	AccessColdDetails   int // Unaccessed details below importance threshold, demoted
 	Entries             []GCEntry // Individual entries affected (populated when Verbose=true)
 }

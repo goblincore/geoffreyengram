@@ -239,11 +239,9 @@ func (e *Engine) AddWithOptions(ctx context.Context, input MemoryInput, userID s
 			e.notifyPipeline()
 		}
 
-		// Continuity supersession: when a new continuity entry is added,
-		// auto-demote older continuity entries about the same topic.
-		if input.Type == "continuity" {
-			e.supersedeContinuity(ctx, userID, dm.ID, embedding)
-		}
+		// Type-aware supersession: demote older memories of the same type
+		// that are semantically similar to the new one.
+		e.supersedeByType(ctx, userID, dm.ID, input.Type, embedding)
 	} else {
 		// Route to Sketch Path
 		if err := e.sketch.IngestRaw(ctx, userID, content, sector, input.SessionID, embedding); err != nil {
@@ -2528,24 +2526,41 @@ func (e *Engine) ReEvaluateSketchRaw(ctx context.Context, userID string, opts *P
 	return promoted, nil
 }
 
-// supersedeContinuity demotes older continuity entries that are semantically
-// similar to the newly added one (cosine similarity > 0.75). This prevents
-// stale "remaining: X" entries from accumulating when X has been completed
-// and a newer continuity entry reflects the updated status.
-func (e *Engine) supersedeContinuity(ctx context.Context, userID, newID string, newEmbedding []float32) {
-	existing, err := e.store.GetDetailsByType(userID, "continuity")
+// supersedeThresholds maps memory types to their cosine similarity threshold
+// for automatic supersession. When a new memory of a given type is added,
+// older memories of the same type with cosine similarity >= the threshold
+// are demoted to sketch path.
+var supersedeThresholds = map[string]float64{
+	"continuity":    0.75,
+	"decision":      0.80,
+	"architecture":  0.80,
+	"investigation": 0.80,
+	"requirement":   0.80,
+	"test-strategy": 0.80,
+	"trace":         0.80,
+	"warning":       0.85,
+}
+
+// supersedeByType demotes older memories of the same type that are semantically
+// similar to the newly added one (cosine similarity >= type-specific threshold).
+// This prevents stale entries from accumulating when a newer memory covers the same topic.
+func (e *Engine) supersedeByType(ctx context.Context, userID, newID, memType string, newEmbedding []float32) {
+	threshold, ok := supersedeThresholds[memType]
+	if !ok {
+		return
+	}
+
+	existing, err := e.store.GetDetailsByType(userID, memType)
 	if err != nil || len(existing) <= 1 {
 		return
 	}
 
-	const supersessionThreshold = 0.75
 	for _, old := range existing {
 		if old.ID == newID {
 			continue
 		}
 		sim := CosineSimilarity(newEmbedding, old.Vector)
-		if sim >= supersessionThreshold {
-			// Demote the older entry to sketch path
+		if sim >= threshold {
 			e.sketch.IngestRaw(ctx, userID, old.Text, old.Sector, old.SessionID, old.Vector)
 			e.store.DeleteDetail(old.ID)
 		}
@@ -2637,10 +2652,6 @@ func (e *Engine) GarbageCollect(ctx context.Context, userID string, opts GCOptio
 				if !ok {
 					continue
 				}
-				// Don't demote warnings — they're intentional invariants
-				if d.Type == "warning" {
-					continue
-				}
 				if opts.Verbose {
 					report.Entries = append(report.Entries, GCEntry{
 						ID: id, Action: "demote", Reason: "git_stale",
@@ -2656,25 +2667,27 @@ func (e *Engine) GarbageCollect(ctx context.Context, userID string, opts GCOptio
 		}
 	}
 
-	// 4. Continuity supersession scan — group by cosine similarity, keep newest per cluster
-	continuity, _ := e.store.GetDetailsByType(userID, "continuity")
-	if len(continuity) > 1 {
-		// Mark which IDs to keep (newest in each similarity cluster)
+	// 4. Type-aware supersession scan — for each type with a threshold,
+	// group by cosine similarity, keep newest per cluster, demote rest.
+	for memType, threshold := range supersedeThresholds {
+		memories, _ := e.store.GetDetailsByType(userID, memType)
+		if len(memories) <= 1 {
+			continue
+		}
 		kept := make(map[string]bool)
-		demoted := make(map[string]bool)
-		for i, c := range continuity {
-			if demoted[c.ID] {
+		demotedSet := make(map[string]bool)
+		for i, c := range memories {
+			if demotedSet[c.ID] {
 				continue
 			}
 			kept[c.ID] = true
-			for j := i + 1; j < len(continuity); j++ {
-				other := continuity[j]
-				if demoted[other.ID] || kept[other.ID] {
+			for j := i + 1; j < len(memories); j++ {
+				other := memories[j]
+				if demotedSet[other.ID] || kept[other.ID] {
 					continue
 				}
 				sim := CosineSimilarity(c.Vector, other.Vector)
-				if sim >= 0.75 {
-					// c is newer (sorted by created_at DESC), demote other
+				if sim >= threshold {
 					if opts.Verbose {
 						report.Entries = append(report.Entries, GCEntry{
 							ID: other.ID, Action: "demote", Reason: "superseded",
@@ -2685,8 +2698,8 @@ func (e *Engine) GarbageCollect(ctx context.Context, userID string, opts GCOptio
 						e.sketch.IngestRaw(ctx, userID, other.Text, other.Sector, other.SessionID, other.Vector)
 						e.store.DeleteDetail(other.ID)
 					}
-					demoted[other.ID] = true
-					report.SupersededContinuity++
+					demotedSet[other.ID] = true
+					report.SupersededMemories++
 				}
 			}
 		}
@@ -2695,9 +2708,6 @@ func (e *Engine) GarbageCollect(ctx context.Context, userID string, opts GCOptio
 	// 5. Access-cold demotion — details not accessed in 30+ days with importance < 0.8
 	details, _ := e.store.GetDetailMemories(userID)
 	for _, d := range details {
-		if d.Type == "warning" {
-			continue // never demote warnings
-		}
 		daysSinceAccess := now.Sub(d.LastAccessedAt).Hours() / 24
 		if daysSinceAccess >= 30 && d.ImportanceScore < 0.8 {
 			if opts.Verbose {
