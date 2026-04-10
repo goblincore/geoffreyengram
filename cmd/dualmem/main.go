@@ -291,6 +291,8 @@ func main() {
 		cmdIndex(cfg)
 	case "unfold":
 		cmdUnfold(cfg)
+	case "autopilot":
+		cmdAutopilot(cfg)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -331,6 +333,7 @@ Commands:
   consult     Structured intelligence report (lazy-synthesis)
   index       Pre-warm codebase index with progress output
   unfold      Extract a single symbol (function/type) from a file
+  autopilot   Autonomously explore codebase and generate memories
 
 Flags (all commands):
   --ns     Namespace (default: auto-detect from cwd or config)
@@ -1548,6 +1551,110 @@ func cmdSeed(cfg CLIConfig) {
 			fmt.Printf("   Files: %s\n", strings.Join(dm.Files, ", "))
 		}
 	}
+}
+
+func cmdAutopilot(cfg CLIConfig) {
+	fs := flag.NewFlagSet("autopilot", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace")
+	budget := fs.Int("budget", 100000, "Total token budget")
+	dryRun := fs.Bool("dry-run", false, "Score modules without exploring")
+	force := fs.Bool("force", false, "Re-explore even if recent memories exist")
+	model := fs.String("model", "", "Override explorer model name")
+	baseURL := fs.String("base-url", "", "Override explorer model base URL")
+	stats := fs.Bool("stats", false, "Show coverage statistics only")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	namespace := resolveNamespace(*ns, cfg)
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+
+	if *stats {
+		printAutopilotStats(ctx, engine, namespace)
+		return
+	}
+
+	// Override explorer generator if model flag provided
+	if *model != "" {
+		apiKeyEnv := cfg.Providers.ExplorerAPIKeyEnv
+		if apiKeyEnv == "" {
+			apiKeyEnv = cfg.Providers.SynthesisAPIKeyEnv
+		}
+		apiKey := os.Getenv(apiKeyEnv)
+		url := *baseURL
+		if url == "" {
+			url = cfg.Providers.ExplorerBaseURL
+			if url == "" {
+				url = cfg.Providers.SynthesisBaseURL
+			}
+		}
+		if apiKey != "" {
+			engine.SetExplorerGenerator(dualmem.NewAnthropicSummarizer(apiKey, url, *model))
+		}
+	}
+
+	opts := dualmem.AutopilotOpts{
+		Budget:    *budget,
+		DryRun:    *dryRun,
+		Force:     *force,
+		ModelName: *model,
+		BaseURL:   *baseURL,
+	}
+
+	result, err := engine.Autopilot(ctx, namespace, opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(result)
+		return
+	}
+
+	if *dryRun {
+		fmt.Printf("Dry run: %d modules scored\n\n", len(result.Targets))
+		for i, t := range result.Targets {
+			if i >= 20 {
+				fmt.Printf("... and %d more\n", len(result.Targets)-20)
+				break
+			}
+			fmt.Printf("  %.3f  %s\n", t.Score, t.ModulePath)
+		}
+		return
+	}
+
+	fmt.Printf("Autopilot: explored %d modules, created %d memories, used %d tokens (skipped %d)\n",
+		result.Explored, result.MemoriesAdded, result.TokensUsed, result.Skipped)
+}
+
+func printAutopilotStats(ctx context.Context, engine *dualmem.Engine, namespace string) {
+	// For stats, just do a dry run and count coverage
+	result, err := engine.Autopilot(ctx, namespace, dualmem.AutopilotOpts{Budget: 100000, DryRun: true})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return
+	}
+	total := len(result.Targets)
+	covered := 0
+	stale := 0
+	for _, t := range result.Targets {
+		if t.Signals["memory_gap"] < 1.0 {
+			covered++
+		}
+		if t.Signals["staleness"] > 0 {
+			stale++
+		}
+	}
+	fmt.Printf("Coverage: %d/%d modules (%.0f%%)\n", covered, total, float64(covered)/float64(max(total, 1))*100)
+	fmt.Printf("Stale: %d modules with outdated memories\n", stale)
 }
 
 func cmdSynthesize(cfg CLIConfig) {
