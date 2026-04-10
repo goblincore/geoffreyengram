@@ -1056,6 +1056,10 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 		if coveredIDs[dm.ID] {
 			continue // already covered by a knowledge doc
 		}
+		// Filter expired anticipation memories (2-hour TTL)
+		if dm.Type == "anticipation" && time.Since(dm.CreatedAt) > 2*time.Hour {
+			continue
+		}
 		dmTokens := estimateTokens(dm.Text) + estimateTokens(strings.Join(dm.Files, ", "))
 		if tokensUsed+dmTokens > tokenBudget {
 			break
