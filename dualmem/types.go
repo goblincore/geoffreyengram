@@ -71,7 +71,7 @@ type MemoryInput struct {
 	SectorHint       string   // Optional: skip classification
 	Salience         float64  // Optional: override default 0.5 (0 = use default)
 	Entities         []Entity // Optional: pre-extracted entities
-	Type             string   // Optional: "decision", "warning", "continuity", "trace", "architecture", "investigation", "requirement", "test-strategy", "" (general)
+	Type             string   // Optional: "decision", "warning", "continuity", "trace", "architecture", "investigation", "requirement", "test-strategy", "anticipation", "" (general)
 	Files            []string // Optional: associated file paths (e.g., source files relevant to this memory)
 }
 
@@ -328,7 +328,8 @@ type IntentProfile struct {
 	Continuity float64
 	Map        float64
 	General    float64
-	Seed       float64 // Auto-generated codebase context memories
+	Seed         float64 // Auto-generated codebase context memories
+	Anticipation float64 // Predictive/curiosity-driven exploration memories
 }
 
 // IntentProfiles maps each intent to its weight multipliers.
@@ -389,6 +390,11 @@ func (ip IntentProfile) TypeMultiplier(memType string) float64 {
 	case "seed":
 		if ip.Seed != 0 {
 			return ip.Seed
+		}
+		return ip.General
+	case "anticipation":
+		if ip.Anticipation != 0 {
+			return ip.Anticipation
 		}
 		return ip.General
 	default:
@@ -497,6 +503,32 @@ type ExploreResult struct {
 	Evidence    *CodeEvidence
 	Summary     string // 50-100 word grounded summary
 	TotalTokens int
+}
+
+// AutopilotOpts configures an autopilot exploration run.
+type AutopilotOpts struct {
+	Budget    int    // Total token budget for this run
+	DryRun   bool   // Score modules but don't explore
+	Force    bool   // Re-explore even if recent memories exist
+	ModelName string // Override explorer model (empty = use config)
+	BaseURL   string // Override explorer base URL
+}
+
+// AutopilotResult describes what an autopilot run produced.
+type AutopilotResult struct {
+	Targets       []CuriosityTarget // All scored targets (sorted by score desc)
+	Explored      int               // How many targets were explored
+	MemoriesAdded int               // How many memories were saved
+	TokensUsed    int               // Total tokens consumed
+	Skipped       int               // How many skipped (novelty/freshness)
+}
+
+// CuriosityTarget is a scored module for exploration.
+type CuriosityTarget struct {
+	ModulePath string             `json:"module_path"`
+	Score      float64            `json:"score"`
+	Signals    map[string]float64 `json:"signals"`
+	Files      []string           `json:"files"`
 }
 
 // FormatSnippetsFirst renders the result in snippets-first format for context injection.

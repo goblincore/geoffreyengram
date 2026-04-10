@@ -3064,7 +3064,7 @@ func DetectIntent(query string) Intent {
 
 func typePriority(t string) int {
 	switch t {
-	case "warning":
+	case "warning", "anticipation":
 		return 2
 	case "decision", "continuity", "trace", "architecture", "investigation", "requirement", "test-strategy":
 		return 1
@@ -3092,6 +3092,8 @@ func formatTypeLabel(memType, sector string, importance float64) string {
 		return fmt.Sprintf("[📋 Requirement — %s (importance: %.2f)]", sector, importance)
 	case "test-strategy":
 		return fmt.Sprintf("[🧪 Test Strategy — %s (importance: %.2f)]", sector, importance)
+	case "anticipation":
+		return fmt.Sprintf("[🔮 Anticipated Context — %s]", sector)
 	case "seed":
 		return fmt.Sprintf("[Codebase Context — %s]", sector)
 	default:
