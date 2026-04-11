@@ -49,6 +49,10 @@ Storage is one SQLite file. No external services.
 | **File-read gate** | Structured decision tree primes agent with file context (~400 tok vs 5-50k full read) |
 | **Symbol extraction** | `dualmem unfold <file> <symbol>` extracts a single function/type with line numbers |
 | **Planning intent** | "roadmap" and "sprint" queries auto-boost continuity memories 2.5x |
+| **Autopilot** | Autonomous codebase exploration — curiosity scorer ranks modules by memory gaps, git heat, complexity, and co-change strength; LLM explores top targets and saves investigation memories |
+| **Anticipatory worker** | Runs during sessions, watches file activity, pre-explores co-change and structural neighbors before the user needs them |
+| **Benchmark CLI** | `dualmem benchmark` compares cold-start (codemap only) vs warm (with memories) context quality using auto-generated queries from git history |
+| **Anticipation stats** | `dualmem anticipation-stats` measures hit rate of pre-explored files — were they actually needed? |
 
 See [docs/features.md](docs/features.md) for detailed usage and examples.
 
@@ -67,12 +71,31 @@ Head-to-head against [claude-mem](https://github.com/thedotmack/claude-mem) v12.
 
 geoffreyengram wins on targeted technical tasks through query-aware, file-scoped context. claude-mem wins on broad "what's in progress" queries. Full results and scripts in `benchmarks/`.
 
+### Cold vs Warm Benchmark
+
+`dualmem benchmark` measures the real-world benefit of accumulated memories. It auto-generates queries from recent git commits and runs context assembly twice: once cold (codemap only) and once warm (with memories). On this repo (111 memories, 31% module coverage):
+
+```
+Query                                    |    Cold |    Warm | +Sources
+"add autopilot integration test"         |  397 tk | 3544 tk | +34
+"add anticipation TTL filter"            |  405 tk | 3520 tk | +30
+"integrate worker into pipeline"         |  296 tk | 3406 tk | +30
+"add session log parsing"                |  365 tk | 3738 tk | +32
+"add autopilot CLI command"              |  371 tk | 3628 tk | +33
+
+Average: +31.8 additional context sources per query
+```
+
+Each additional source is a memory, checkpoint, episode, or knowledge doc that wouldn't exist without the memory system.
+
 ## Tests
 
 ```bash
 go test ./dualmem/ -v                      # unit + integration
 go test ./dualmem/ -run TestBench -v       # context assembly benchmarks
 go test ./dualmem/ -run TestSearchBenchmark # code search accuracy
+dualmem benchmark --auto 5                 # cold vs warm on your project
+dualmem anticipation-stats                 # anticipatory worker hit rate
 ```
 
 See [docs/testing.md](docs/testing.md) for the full breakdown.
