@@ -293,6 +293,10 @@ func main() {
 		cmdUnfold(cfg)
 	case "autopilot":
 		cmdAutopilot(cfg)
+	case "benchmark":
+		cmdBenchmark(cfg)
+	case "anticipation-stats":
+		cmdAnticipationStats(cfg)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -334,6 +338,8 @@ Commands:
   index       Pre-warm codebase index with progress output
   unfold      Extract a single symbol (function/type) from a file
   autopilot   Autonomously explore codebase and generate memories
+  benchmark   Compare cold-start vs warm context assembly quality
+  anticipation-stats  Measure anticipatory pre-exploration hit rate
 
 Flags (all commands):
   --ns     Namespace (default: auto-detect from cwd or config)
@@ -1655,6 +1661,85 @@ func printAutopilotStats(ctx context.Context, engine *dualmem.Engine, namespace 
 	}
 	fmt.Printf("Coverage: %d/%d modules (%.0f%%)\n", covered, total, float64(covered)/float64(max(total, 1))*100)
 	fmt.Printf("Stale: %d modules with outdated memories\n", stale)
+}
+
+func cmdBenchmark(cfg CLIConfig) {
+	fs := flag.NewFlagSet("benchmark", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace")
+	budget := fs.Int("budget", 4000, "Token budget per query")
+	queriesFlag := fs.String("queries", "", "Comma-separated explicit queries")
+	autoN := fs.Int("auto", 5, "Number of auto-generated queries from git log")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	namespace := resolveNamespace(*ns, cfg)
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	opts := dualmem.BenchmarkOpts{
+		TokenBudget: *budget,
+		AutoQueries: *autoN,
+	}
+	if *queriesFlag != "" {
+		opts.Queries = strings.Split(*queriesFlag, ",")
+		for i := range opts.Queries {
+			opts.Queries[i] = strings.TrimSpace(opts.Queries[i])
+		}
+	}
+
+	result, err := engine.Benchmark(context.Background(), namespace, opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(result)
+		return
+	}
+
+	fmt.Print(dualmem.FormatBenchmarkTable(result, namespace))
+}
+
+func cmdAnticipationStats(cfg CLIConfig) {
+	fs := flag.NewFlagSet("anticipation-stats", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace")
+	window := fs.String("window", "30m", "Hit window duration")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	namespace := resolveNamespace(*ns, cfg)
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	windowDur, err := time.ParseDuration(*window)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: invalid window duration: %v\n", err)
+		os.Exit(1)
+	}
+
+	stats, err := engine.ComputeAnticipationStats(context.Background(), namespace, windowDur)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(stats)
+		return
+	}
+
+	fmt.Print(dualmem.FormatAnticipationStats(stats, namespace))
 }
 
 func cmdSynthesize(cfg CLIConfig) {

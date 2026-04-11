@@ -1904,6 +1904,18 @@ func (s *SQLiteStore) GetLatestSnapshot(namespace string) (*storedSnapshot, erro
 	return &ss, nil
 }
 
+// SearchSnapshotsForMemory checks if a memory ID appears in any context snapshot's
+// source_ids_json for the given namespace. Returns true if the memory was ever surfaced.
+func (s *SQLiteStore) SearchSnapshotsForMemory(namespace, memoryID string) (bool, error) {
+	var count int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM context_snapshots
+		 WHERE namespace = ? AND source_ids_json LIKE ?`,
+		namespace, "%"+memoryID+"%",
+	).Scan(&count)
+	return count > 0, err
+}
+
 func (s *SQLiteStore) InsertRating(r *ContextRating) error {
 	_, err := s.db.Exec(
 		`INSERT INTO context_ratings (id, namespace, snapshot_id, memory_id, memory_type, phase, rating,
