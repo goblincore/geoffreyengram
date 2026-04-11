@@ -277,6 +277,7 @@ func parseWithTreeSitter(relPath string, files []string, cfg *langConfig) *Modul
 	identSeen := make(map[string]bool)
 
 	var types, entries, imports, idents []string
+	fileInfos := make([]FileInfo, 0, len(files))
 
 	for _, f := range files {
 		data, err := os.ReadFile(f)
@@ -284,9 +285,37 @@ func parseWithTreeSitter(relPath string, files []string, cfg *langConfig) *Modul
 			continue
 		}
 
-		// Regex-based extraction — safe, no native code panics
+		// Per-file extraction for FileInfo.
+		var fileTypes, fileEntries, fileImports, fileIdents []string
+		ft := make(map[string]bool)
+		fe := make(map[string]bool)
+		fi := make(map[string]bool)
+		fd := make(map[string]bool)
+		extractModuleInfoRegex(data, ft, fe, fi, fd,
+			&fileTypes, &fileEntries, &fileImports, &fileIdents)
+
+		// Merge into module-level (dedup via the shared seen maps).
 		extractModuleInfoRegex(data, typeSeen, entrySeen, importSeen, identSeen,
 			&types, &entries, &imports, &idents)
+
+		base := filepath.Base(f)
+		rel := base
+		if relPath != "." {
+			rel = relPath + "/" + base
+		}
+		// Combine types+entries+idents as identifiers for the file (matches Go pattern).
+		allIdents := append(fileIdents, symbolNames(fileTypes)...)
+		if len(allIdents) > 15 {
+			allIdents = allIdents[:15]
+		}
+		if len(fileImports) > 15 {
+			fileImports = fileImports[:15]
+		}
+		fileInfos = append(fileInfos, FileInfo{
+			RelPath:     rel,
+			Identifiers: allIdents,
+			Imports:     fileImports,
+		})
 	}
 
 	// Apply caps
@@ -316,6 +345,7 @@ func parseWithTreeSitter(relPath string, files []string, cfg *langConfig) *Modul
 		FileCount:   len(files),
 		Imports:     imports,
 		Identifiers: idents,
+		Files:       fileInfos,
 	}
 }
 
