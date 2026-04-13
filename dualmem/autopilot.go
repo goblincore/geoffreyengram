@@ -3,6 +3,9 @@ package dualmem
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -57,9 +60,123 @@ func (e *Engine) hasRecentInvestigation(ctx context.Context, namespace string, f
 	return count > 0
 }
 
+// gitDefaultBranch returns the default branch name (main or master) for the repo.
+func gitDefaultBranch(dir string) string {
+	// Try the remote HEAD first.
+	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD", "--short")
+	cmd.Dir = dir
+	if out, err := cmd.Output(); err == nil {
+		branch := strings.TrimSpace(string(out))
+		// Strip "origin/" prefix.
+		if i := strings.LastIndex(branch, "/"); i >= 0 {
+			branch = branch[i+1:]
+		}
+		return branch
+	}
+	// Fallback: check if main exists, else master.
+	for _, name := range []string{"main", "master"} {
+		cmd := exec.Command("git", "rev-parse", "--verify", name)
+		cmd.Dir = dir
+		if cmd.Run() == nil {
+			return name
+		}
+	}
+	return "main"
+}
+
+// gitCheckout switches the working tree to the given branch.
+func gitCheckout(dir, branch string) error {
+	cmd := exec.Command("git", "checkout", branch)
+	cmd.Dir = dir
+	return cmd.Run()
+}
+
+// readTargetFiles reads source files for a curiosity target, returning
+// concatenated content and an approximate token count. It caps total
+// content to maxTokens (estimated as chars/4).
+func readTargetFiles(rootDir string, files []string, maxTokens int) (string, int) {
+	var sb strings.Builder
+	tokensUsed := 0
+	sourceExts := map[string]bool{
+		".go": true, ".ts": true, ".tsx": true, ".js": true, ".jsx": true,
+		".py": true, ".rs": true, ".java": true, ".rb": true, ".css": true,
+	}
+
+	for _, f := range files {
+		if tokensUsed >= maxTokens {
+			break
+		}
+		fullPath := filepath.Join(rootDir, f)
+		info, err := os.Stat(fullPath)
+		if err != nil {
+			continue
+		}
+
+		if info.IsDir() {
+			// Read source files in the directory.
+			entries, err := os.ReadDir(fullPath)
+			if err != nil {
+				continue
+			}
+			for _, entry := range entries {
+				if entry.IsDir() || !sourceExts[filepath.Ext(entry.Name())] {
+					continue
+				}
+				content, err := os.ReadFile(filepath.Join(fullPath, entry.Name()))
+				if err != nil {
+					continue
+				}
+				toks := len(content) / 4
+				if tokensUsed+toks > maxTokens {
+					// Truncate to fit budget.
+					remaining := (maxTokens - tokensUsed) * 4
+					if remaining > 0 {
+						sb.WriteString(fmt.Sprintf("--- %s ---\n", filepath.Join(f, entry.Name())))
+						sb.Write(content[:remaining])
+						sb.WriteString("\n\n")
+						tokensUsed = maxTokens
+					}
+					break
+				}
+				sb.WriteString(fmt.Sprintf("--- %s ---\n", filepath.Join(f, entry.Name())))
+				sb.Write(content)
+				sb.WriteString("\n\n")
+				tokensUsed += toks
+			}
+			continue
+		}
+
+		// Regular file.
+		content, err := os.ReadFile(fullPath)
+		if err != nil {
+			continue
+		}
+		toks := len(content) / 4
+		if tokensUsed+toks > maxTokens {
+			remaining := (maxTokens - tokensUsed) * 4
+			if remaining > 0 {
+				sb.WriteString(fmt.Sprintf("--- %s ---\n", f))
+				sb.Write(content[:remaining])
+				sb.WriteString("\n\n")
+				tokensUsed = maxTokens
+			}
+			break
+		}
+		sb.WriteString(fmt.Sprintf("--- %s ---\n", f))
+		sb.Write(content)
+		sb.WriteString("\n\n")
+		tokensUsed += toks
+	}
+
+	return sb.String(), tokensUsed
+}
+
 // Autopilot proactively explores the codebase ranked by curiosity signals and saves
 // investigation memories. It respects a token budget and can be run in dry-run mode
 // to preview targets without any LLM calls or memory writes.
+//
+// It always checks out the default branch (main/master) before scanning to ensure
+// consistent results regardless of which branch the repo is on.
 func (e *Engine) Autopilot(ctx context.Context, namespace string, opts AutopilotOpts) (*AutopilotResult, error) {
 	if opts.Budget <= 0 {
 		opts.Budget = 20000
@@ -67,13 +184,25 @@ func (e *Engine) Autopilot(ctx context.Context, namespace string, opts Autopilot
 
 	result := &AutopilotResult{}
 
-	// 1. Load or scan codemap.
+	if e.cfg == nil || e.cfg.RootDir == "" {
+		return result, nil
+	}
+
+	// 0. Switch to the default branch for consistent scanning.
+	originalBranch := gitCurrentBranch(e.cfg.RootDir)
+	defaultBranch := gitDefaultBranch(e.cfg.RootDir)
+	if originalBranch != "" && originalBranch != defaultBranch {
+		if err := gitCheckout(e.cfg.RootDir, defaultBranch); err == nil {
+			defer gitCheckout(e.cfg.RootDir, originalBranch)
+		}
+	}
+
+	// 1. Load or scan codemap (once — not repeated per target).
 	cm, edges, err := e.loadOrScanCodemap(ctx, namespace)
 	if err != nil {
 		return nil, err
 	}
 	if cm == nil {
-		// No RootDir configured — return an empty result gracefully.
 		return result, nil
 	}
 
@@ -102,6 +231,8 @@ func (e *Engine) Autopilot(ctx context.Context, namespace string, opts Autopilot
 	}
 
 	// 7. Loop through targets within budget.
+	// Instead of calling Explore() (which rebuilds the codemap + HDC index each time),
+	// read target files directly — we already know which files to look at from ranking.
 	tokensRemaining := opts.Budget
 	for _, target := range targets {
 		if tokensRemaining <= 0 {
@@ -120,40 +251,25 @@ func (e *Engine) Autopilot(ctx context.Context, namespace string, opts Autopilot
 			break
 		}
 
-		// Build a short query for this module.
-		query := fmt.Sprintf("Explain the role and design of module %s", target.ModulePath)
-
-		// Fetch code evidence via Explore.
-		exploreResult, err := e.Explore(ctx, namespace, query, targetBudget)
-		if err != nil {
-			// Non-fatal: skip this target.
-			continue
-		}
-
-		tokensUsed := 0
-		if exploreResult.Evidence != nil {
-			for _, s := range exploreResult.Evidence.Snippets {
-				tokensUsed += len(s.Content) / 4
-			}
-		}
-
-		summary := exploreResult.Summary
-		if summary == "" && exploreResult.Evidence != nil && len(exploreResult.Evidence.Snippets) > 0 {
-			// Fallback: ask the generator directly.
-			var sb strings.Builder
-			sb.WriteString("Briefly describe what this module does:\n\n")
-			for _, s := range exploreResult.Evidence.Snippets {
-				sb.WriteString(s.Content)
-				sb.WriteString("\n")
-			}
-			summary, _ = gen.GenerateText(ctx, sb.String(), 300)
-			tokensUsed += len(summary) / 4
-		}
-
-		if summary == "" {
+		// Read source files directly instead of doing a full Explore().
+		codeContent, tokensUsed := readTargetFiles(e.cfg.RootDir, target.Files, targetBudget)
+		if codeContent == "" {
 			result.Skipped++
 			continue
 		}
+
+		// Generate summary from the code.
+		prompt := fmt.Sprintf(
+			"Briefly describe what the module %s does (50-100 words). "+
+				"Focus on: key functions, data flow, and design patterns. Reference specific code.\n\n%s",
+			target.ModulePath, codeContent)
+		summary, err := gen.GenerateText(ctx, prompt, 200)
+		if err != nil || strings.TrimSpace(summary) == "" {
+			result.Skipped++
+			continue
+		}
+		summary = strings.TrimSpace(summary)
+		tokensUsed += len(summary) / 4
 
 		// 8. Save result as an investigation memory.
 		memText := fmt.Sprintf("[autopilot] %s: %s", target.ModulePath, summary)
