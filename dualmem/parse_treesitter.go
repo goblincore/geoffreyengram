@@ -358,8 +358,13 @@ var (
 	reExportClass  = regexp.MustCompile(`(?m)^export\s+(?:default\s+)?class\s+(\w+)`)
 	reExportType   = regexp.MustCompile(`(?m)^export\s+(?:type|interface|enum)\s+(\w+)`)
 	reImportFrom   = regexp.MustCompile(`(?m)from\s+['"]([^'"]+)['"]`)
+	reTsFunc       = regexp.MustCompile(`(?m)^(?:async\s+)?function\s+(\w+)`)
 	rePyDef        = regexp.MustCompile(`(?m)^(?:def|class)\s+(\w+)`)
-	reRsItem       = regexp.MustCompile(`(?m)^pub\s+(?:fn|struct|enum|trait|type)\s+(\w+)`)
+	rePyImportFrom = regexp.MustCompile(`(?m)^from\s+(\w+)\s+import`)
+	rePyImport     = regexp.MustCompile(`(?m)^import\s+(\w+)`)
+	reRsItem       = regexp.MustCompile(`(?m)^pub\s+(fn|struct|enum|trait|type)\s+(\w+)`)
+	reRsPrivateFn  = regexp.MustCompile(`(?m)^fn\s+(\w+)`)
+	reRsUse        = regexp.MustCompile(`(?m)^use\s+[\w:]+::(\w+)`)
 )
 
 func extractModuleInfoRegex(data []byte, typeSeen, entrySeen, importSeen, identSeen map[string]bool,
@@ -401,6 +406,18 @@ func extractModuleInfoRegex(data []byte, typeSeen, entrySeen, importSeen, identS
 			*imports = append(*imports, imp)
 		}
 	}
+	// TS/JS non-exported functions → identifiers
+	for _, m := range reTsFunc.FindAllSubmatch(data, -1) {
+		name := string(m[1])
+		entry := name + "()"
+		if entrySeen[entry] {
+			continue // already captured as exported entry point
+		}
+		if !identSeen[name] {
+			identSeen[name] = true
+			*idents = append(*idents, name)
+		}
+	}
 	// Python
 	for _, m := range rePyDef.FindAllSubmatch(data, -1) {
 		name := string(m[1])
@@ -410,6 +427,12 @@ func extractModuleInfoRegex(data []byte, typeSeen, entrySeen, importSeen, identS
 				typeSeen[label] = true
 				*types = append(*types, label)
 			}
+		} else if name[0] == '_' {
+			// Private function → identifier
+			if !identSeen[name] {
+				identSeen[name] = true
+				*idents = append(*idents, name)
+			}
 		} else {
 			entry := name + "()"
 			if !entrySeen[entry] {
@@ -418,13 +441,56 @@ func extractModuleInfoRegex(data []byte, typeSeen, entrySeen, importSeen, identS
 			}
 		}
 	}
-	// Rust
+	for _, m := range rePyImportFrom.FindAllSubmatch(data, -1) {
+		imp := string(m[1])
+		if !importSeen[imp] {
+			importSeen[imp] = true
+			*imports = append(*imports, imp)
+		}
+	}
+	for _, m := range rePyImport.FindAllSubmatch(data, -1) {
+		imp := string(m[1])
+		if !importSeen[imp] {
+			importSeen[imp] = true
+			*imports = append(*imports, imp)
+		}
+	}
+	// Rust pub items: route fn→entries, rest→types with correct prefix
 	for _, m := range reRsItem.FindAllSubmatch(data, -1) {
+		keyword := string(m[1])
+		name := string(m[2])
+		if keyword == "fn" {
+			entry := name + "()"
+			if !entrySeen[entry] {
+				entrySeen[entry] = true
+				*entries = append(*entries, entry)
+			}
+		} else {
+			label := keyword + " " + name
+			if !typeSeen[label] {
+				typeSeen[label] = true
+				*types = append(*types, label)
+			}
+		}
+	}
+	// Rust non-pub functions → identifiers
+	for _, m := range reRsPrivateFn.FindAllSubmatch(data, -1) {
 		name := string(m[1])
-		label := "struct " + name
-		if !typeSeen[label] {
-			typeSeen[label] = true
-			*types = append(*types, label)
+		entry := name + "()"
+		if entrySeen[entry] {
+			continue // already captured as pub entry point
+		}
+		if !identSeen[name] {
+			identSeen[name] = true
+			*idents = append(*idents, name)
+		}
+	}
+	// Rust use declarations → imports
+	for _, m := range reRsUse.FindAllSubmatch(data, -1) {
+		imp := string(m[1])
+		if !importSeen[imp] {
+			importSeen[imp] = true
+			*imports = append(*imports, imp)
 		}
 	}
 }

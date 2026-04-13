@@ -1725,7 +1725,16 @@ func splitLargeComponent(comp []string, graph *ImportGraph, maxSize int) [][]str
 					subs[bestIdx] = append(subs[bestIdx], r)
 				}
 			}
-			return subs
+			// Re-insertion may push a sub over maxSize; recursively split if needed.
+			var result [][]string
+			for _, s := range subs {
+				if len(s) > maxSize {
+					result = append(result, splitLargeComponent(s, graph, maxSize)...)
+				} else {
+					result = append(result, s)
+				}
+			}
+			return result
 		}
 
 		// Find highest-degree node in largest component

@@ -277,8 +277,9 @@ func TestRerankerIsStale(t *testing.T) {
 		t.Error("8-day-old weights should be stale at maxAgeDays=7")
 	}
 
-	// Boundary: exactly at the limit — not yet stale (Before is strict <).
-	w.TrainedAt = time.Now().Add(-7 * 24 * time.Hour)
+	// Boundary: just inside the limit — not yet stale (Before is strict <).
+	// Add 1s buffer to avoid flakiness from clock drift between two time.Now() calls.
+	w.TrainedAt = time.Now().Add(-7*24*time.Hour + time.Second)
 	if w.IsStale(7) {
 		t.Error("exactly 7-day-old weights should not yet be stale at maxAgeDays=7")
 	}
