@@ -788,6 +788,32 @@ func (e *Engine) FileAnnotations(ctx context.Context, namespace string, filePath
 		}
 	}
 
+	// 4. Workflow hints — lightweight pointers to autopilot workflow memories
+	workflowHints, _ := e.store.GetWorkflowHintsForFiles(namespace, filePaths)
+	for _, wh := range workflowHints {
+		whID := "wh_" + wh.WorkflowID
+		if seenIDs[whID] {
+			continue
+		}
+		seenIDs[whID] = true
+		ticketStr := ""
+		if len(wh.Tickets) > 0 {
+			ticketStr = " (" + strings.Join(wh.Tickets, ", ") + ")"
+		}
+		hintText := fmt.Sprintf(`"%s"%s — search "workflow:%s" for full detail`, wh.Summary, ticketStr, wh.WorkflowID)
+		if len(hintText) > 200 {
+			hintText = hintText[:197] + "..."
+		}
+		annotations = append(annotations, Annotation{
+			FilePath: wh.MatchedFile,
+			Type:     "workflow",
+			Text:     hintText,
+			Source:   "workflow_hint",
+			Salience: 0.85,
+			MemoryID: whID,
+		})
+	}
+
 	// Sort by salience descending
 	sort.Slice(annotations, func(i, j int) bool {
 		return annotations[i].Salience > annotations[j].Salience

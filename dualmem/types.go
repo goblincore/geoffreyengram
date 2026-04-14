@@ -957,6 +957,10 @@ type Store interface {
 	GetStructuralNeighbors(namespace, path string, edgeTypes []string, limit int) ([]StructuralEdge, error)
 	GetStructuralEdgesForPath(namespace, path string, limit int) ([]StructuralEdge, error)
 
+	// Workflow hints
+	GetWorkflowHintsForFiles(userID string, filenames []string) ([]WorkflowHint, error)
+	GetWorkflowHintsForTickets(userID string, tickets []string) ([]WorkflowHint, error)
+
 	// Context snapshots & ratings
 	InsertSnapshot(id, namespace, query string, queryEmbedding []byte, sourceIDsJSON string, tokensUsed int) error
 	GetSnapshot(id string) (*storedSnapshot, error)

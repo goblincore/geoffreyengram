@@ -1651,6 +1651,57 @@ func TestFileContext(t *testing.T) {
 	}
 }
 
+func TestFileAnnotationsIncludesWorkflowHints(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	// Add a workflow memory referencing auth.go
+	if err := engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "[workflow:guardian-approval] Guardian approval gate for managed children. Involves LC-1731 ticket.",
+		Type:        "autopilot",
+		Salience:    0.9,
+		Files:       []string{"auth.go", "middleware.go"},
+	}, "user1"); err != nil {
+		t.Fatalf("AddWithOptions workflow: %v", err)
+	}
+
+	// Add a regular warning for the same file
+	if err := engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "Don't modify auth.go hot path",
+		Type:        "warning",
+		Salience:    0.9,
+		Files:       []string{"auth.go"},
+	}, "user1"); err != nil {
+		t.Fatalf("AddWithOptions warning: %v", err)
+	}
+
+	// FileAnnotations should return both the warning and the workflow hint
+	anns := engine.FileAnnotations(ctx, "user1", []string{"auth.go"}, 10)
+
+	hasWarning := false
+	hasWorkflow := false
+	for _, ann := range anns {
+		if ann.Type == "warning" {
+			hasWarning = true
+		}
+		if ann.Type == "workflow" {
+			hasWorkflow = true
+			if ann.Source != "workflow_hint" {
+				t.Errorf("expected source 'workflow_hint', got %q", ann.Source)
+			}
+			if !strings.Contains(ann.Text, "guardian-approval") {
+				t.Errorf("expected workflow hint text to contain 'guardian-approval', got %q", ann.Text)
+			}
+		}
+	}
+	if !hasWarning {
+		t.Error("expected warning annotation for auth.go")
+	}
+	if !hasWorkflow {
+		t.Error("expected workflow hint annotation for auth.go")
+	}
+}
+
 func TestFileIndex(t *testing.T) {
 	engine := newTestEngine(t)
 	ctx := context.Background()
