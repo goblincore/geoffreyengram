@@ -542,6 +542,36 @@ type Area struct {
 	Score float64  // max score of constituent dirs
 }
 
+// WorkflowCluster represents a group of commits that form a coherent workflow,
+// discovered from git history by ticket prefix.
+type WorkflowCluster struct {
+	ID       string   `json:"id"`       // Slug: "guardian-approval"
+	Tickets  []string `json:"tickets"`  // ["LC-1729", "LC-1731"]
+	Subjects []string `json:"subjects"` // Commit subjects for LLM context
+	Files    []string `json:"files"`    // Union of all files touched
+	Commits  int      `json:"commits"`  // Total commit count
+	Score    float64  `json:"score"`    // Recency-weighted activity score
+}
+
+// WorkflowAutopilotOpts configures workflow discovery.
+type WorkflowAutopilotOpts struct {
+	AutopilotOpts              // Embed: Budget, DryRun, Force, etc.
+	DepthMonths   int          // How far back in git history (default 6)
+	MinCommits    int          // Minimum commits per workflow cluster (default 3)
+	MaxWorkflows  int          // Cap on workflows to explore (default 20)
+	TicketPattern string       // Regex for ticket prefix (default `\[([A-Z]+-\d+)\]`)
+}
+
+// WorkflowAutopilotResult describes what a workflow autopilot run produced.
+type WorkflowAutopilotResult struct {
+	Clusters      []WorkflowCluster // All discovered clusters
+	Explored      int               // How many were LLM-analyzed
+	MemoriesAdded int
+	TokensUsed    int
+	Skipped       int
+	Error         string
+}
+
 // FormatSnippetsFirst renders the result in snippets-first format for context injection.
 func (r *ExploreResult) FormatSnippetsFirst() string {
 	var sb strings.Builder

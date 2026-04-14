@@ -584,6 +584,17 @@ func (s *SQLiteStore) GetAutopilotMemoryCountByArea(userID, areaKey string) (int
 	return count, err
 }
 
+// GetWorkflowMemoryCount returns the count of workflow memories for a specific workflow ID.
+func (s *SQLiteStore) GetWorkflowMemoryCount(userID, workflowID string) (int, error) {
+	prefix := "[workflow:" + workflowID + "]%"
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM detail_memories
+		WHERE user_id = ? AND text LIKE ?
+	`, userID, prefix).Scan(&count)
+	return count, err
+}
+
 func (s *SQLiteStore) GetFilesWithMemories(userID string, types []string) ([]string, error) {
 	if len(types) == 0 {
 		return nil, nil
