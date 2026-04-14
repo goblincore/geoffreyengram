@@ -3,6 +3,7 @@ package dualmem
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -303,6 +304,61 @@ func (cp *Checkpoint) FormatForContext() string {
 		sb.WriteString("\n  Blocked on: " + cp.BlockedOn)
 	}
 	return sb.String()
+}
+
+// --- Workflow hints ---
+
+// WorkflowHint is a lightweight pointer to a full workflow memory.
+// Produced by store queries, rendered as one-liner hints in file-context and context assembly.
+type WorkflowHint struct {
+	WorkflowID  string   // e.g. "issue-credentials" — parsed from [workflow:ID] prefix
+	Tickets     []string // e.g. ["LC-1635", "LC-1729"] — extracted from memory text
+	Summary     string   // first ~150 chars of workflow text after the [workflow:ID] prefix
+	MatchedFile string   // which file triggered the match (file-context path only, empty for ticket path)
+}
+
+// parseWorkflowHint extracts a WorkflowHint from a raw autopilot memory text.
+// Input format: "[workflow:issue-credentials] Full summary text mentioning LC-1635..."
+// Returns nil if text doesn't match the [workflow:*] pattern.
+func parseWorkflowHint(text string) *WorkflowHint {
+	if !strings.HasPrefix(text, "[workflow:") {
+		return nil
+	}
+	closeBracket := strings.Index(text, "]")
+	if closeBracket < 0 {
+		return nil
+	}
+	id := text[len("[workflow:"):closeBracket]
+	summary := ""
+	if closeBracket+2 < len(text) {
+		summary = strings.TrimSpace(text[closeBracket+1:])
+		if len(summary) > 150 {
+			summary = summary[:147] + "..."
+		}
+	}
+
+	// Extract ticket prefixes from the full text
+	var tickets []string
+	// Use a simple regex inline — matches LC-1635, PROJ-42, etc.
+	re := regexp.MustCompile(`[A-Z]+-\d+`)
+	for _, m := range re.FindAllString(text, -1) {
+		tickets = append(tickets, m)
+	}
+	// Deduplicate
+	seen := make(map[string]bool)
+	deduped := tickets[:0]
+	for _, t := range tickets {
+		if !seen[t] {
+			seen[t] = true
+			deduped = append(deduped, t)
+		}
+	}
+
+	return &WorkflowHint{
+		WorkflowID: id,
+		Tickets:    deduped,
+		Summary:    summary,
+	}
 }
 
 // --- Task intent ---
