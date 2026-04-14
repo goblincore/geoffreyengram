@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -967,6 +968,29 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 		}
 	}
 
+	// Workflow Hints — ticket-prefix lookup from active checkpoints
+	ticketPrefixes := extractTicketsFromCheckpoints(checkpoints)
+	if len(ticketPrefixes) > 0 {
+		workflowHints, _ := e.store.GetWorkflowHintsForTickets(userID, ticketPrefixes)
+		if len(workflowHints) > 0 {
+			var hintLines []string
+			for _, wh := range workflowHints {
+				ticketStr := ""
+				if len(wh.Tickets) > 0 {
+					ticketStr = " (" + strings.Join(wh.Tickets, ", ") + ")"
+				}
+				hintLines = append(hintLines, fmt.Sprintf(`📎 "%s"%s — search "workflow:%s"`, wh.Summary, ticketStr, wh.WorkflowID))
+			}
+			whText := "[Workflow Hints]\n" + strings.Join(hintLines, "\n")
+			whTokens := estimateTokens(whText)
+			if tokensUsed+whTokens <= tokenBudget {
+				parts = append(parts, whText)
+				sources = append(sources, SourceRef{Type: "workflow_hint", ID: "tickets"})
+				tokensUsed += whTokens
+			}
+		}
+	}
+
 	// --- File Context — file-centric annotation retrieval ---
 	// Collect relevant file paths from checkpoints and detail memories,
 	// then pull ALL annotations for those files (memories, knowledge docs, checkpoints).
@@ -1191,6 +1215,41 @@ func extractFileHints(checkpoints []Checkpoint, memories []DetailMemory) []strin
 		}
 	}
 	return hints
+}
+
+// extractTicketsFromCheckpoints scans checkpoint Task and Text fields for ticket prefixes.
+// Returns deduplicated ticket IDs like ["LC-1635", "LC-1729"].
+func extractTicketsFromCheckpoints(checkpoints []Checkpoint) []string {
+	re := regexp.MustCompile(`[A-Z]+-\d+`)
+	seen := make(map[string]bool)
+	var tickets []string
+
+	for _, cp := range checkpoints {
+		for _, m := range re.FindAllString(cp.Task, -1) {
+			if !seen[m] {
+				seen[m] = true
+				tickets = append(tickets, m)
+			}
+		}
+		for _, step := range cp.CompletedSteps {
+			for _, m := range re.FindAllString(step, -1) {
+				if !seen[m] {
+					seen[m] = true
+					tickets = append(tickets, m)
+				}
+			}
+		}
+		for _, step := range cp.RemainingSteps {
+			for _, m := range re.FindAllString(step, -1) {
+				if !seen[m] {
+					seen[m] = true
+					tickets = append(tickets, m)
+				}
+			}
+		}
+	}
+
+	return tickets
 }
 
 // AssembleContextIndex returns a compact index of available context items

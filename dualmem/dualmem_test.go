@@ -1870,3 +1870,70 @@ func TestGarbageCollect_SupersedesAllTypes(t *testing.T) {
 		t.Errorf("expected at most 1 decision after GC, got %d", len(decisionsAfter))
 	}
 }
+
+func TestAssembleContextWorkflowHints(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	if err := engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "[workflow:issue-credentials] Credential issuance flow for LC-1635 and LC-1729. Handles boost creation.",
+		Type:        "autopilot",
+		Salience:    0.9,
+		Files:       []string{"routes/inbox.ts"},
+	}, "user1"); err != nil {
+		t.Fatalf("AddWithOptions workflow: %v", err)
+	}
+
+	if err := engine.SaveCheckpoint(ctx, "user1", &Checkpoint{
+		Task:        "LC-1635 credential fixes",
+		Status:      "in_progress",
+		FilesActive: []string{"routes/inbox.ts"},
+	}); err != nil {
+		t.Fatalf("SaveCheckpoint: %v", err)
+	}
+
+	result, err := engine.AssembleContext(ctx, "user1", "fixing the issuance bug", 5000)
+	if err != nil {
+		t.Fatalf("AssembleContext: %v", err)
+	}
+
+	if !strings.Contains(result.Text, "[Workflow Hints]") {
+		t.Error("expected [Workflow Hints] section in context output")
+		t.Logf("Got: %s", result.Text)
+	}
+	if !strings.Contains(result.Text, "issue-credentials") {
+		t.Error("expected 'issue-credentials' workflow ID in hints")
+	}
+}
+
+func TestAssembleContextNoWorkflowHintsWithoutTickets(t *testing.T) {
+	engine := newTestEngine(t)
+	ctx := context.Background()
+
+	if err := engine.AddWithOptions(ctx, MemoryInput{
+		UserMessage: "[workflow:issue-credentials] Credential issuance flow for LC-1635.",
+		Type:        "autopilot",
+		Salience:    0.9,
+		Files:       []string{"routes/inbox.ts"},
+	}, "user1"); err != nil {
+		t.Fatalf("AddWithOptions workflow: %v", err)
+	}
+
+	if err := engine.SaveCheckpoint(ctx, "user1", &Checkpoint{
+		Task:        "general refactoring",
+		Status:      "in_progress",
+		FilesActive: []string{"routes/inbox.ts"},
+	}); err != nil {
+		t.Fatalf("SaveCheckpoint: %v", err)
+	}
+
+	result, err := engine.AssembleContext(ctx, "user1", "general exploration", 5000)
+	if err != nil {
+		t.Fatalf("AssembleContext: %v", err)
+	}
+
+	if strings.Contains(result.Text, "[Workflow Hints]") {
+		t.Error("expected no [Workflow Hints] section without ticket prefixes")
+		t.Logf("Got: %s", result.Text)
+	}
+}
