@@ -493,7 +493,7 @@ func (e *Engine) Autopilot(ctx context.Context, namespace string, opts Autopilot
 		}
 		memErr := e.AddWithOptions(ctx, MemoryInput{
 			UserMessage: memText,
-			Type:        "investigation",
+			Type:        "autopilot",
 			Files:       area.Files,
 			Salience:    0.85,
 		}, namespace)

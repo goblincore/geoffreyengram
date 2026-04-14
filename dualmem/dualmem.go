@@ -2127,6 +2127,8 @@ func typeIcon(memType string) string {
 		return "🏗"
 	case "investigation":
 		return "🔎"
+	case "autopilot":
+		return "🤖"
 	case "requirement":
 		return "📋"
 	case "test-strategy":
@@ -3073,7 +3075,7 @@ func typePriority(t string) int {
 	switch t {
 	case "warning", "anticipation":
 		return 2
-	case "decision", "continuity", "trace", "architecture", "investigation", "requirement", "test-strategy":
+	case "decision", "continuity", "trace", "architecture", "investigation", "requirement", "test-strategy", "autopilot":
 		return 1
 	default:
 		return 0
@@ -3095,6 +3097,8 @@ func formatTypeLabel(memType, sector string, importance float64) string {
 		return fmt.Sprintf("[🏗 Architecture — %s (importance: %.2f)]", sector, importance)
 	case "investigation":
 		return fmt.Sprintf("[🔎 Investigation — %s (importance: %.2f)]", sector, importance)
+	case "autopilot":
+		return fmt.Sprintf("[🤖 Autopilot — %s (importance: %.2f)]", sector, importance)
 	case "requirement":
 		return fmt.Sprintf("[📋 Requirement — %s (importance: %.2f)]", sector, importance)
 	case "test-strategy":
