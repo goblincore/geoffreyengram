@@ -550,6 +550,40 @@ func (s *SQLiteStore) GetMemoryCountByFiles(userID string, files []string) (int,
 	return count, err
 }
 
+// GetAutopilotMemoryCountByFiles returns the count of autopilot-generated investigation
+// memories (those with text starting with "[autopilot]") associated with any of the given files.
+func (s *SQLiteStore) GetAutopilotMemoryCountByFiles(userID string, files []string) (int, error) {
+	if len(files) == 0 {
+		return 0, nil
+	}
+	conditions := make([]string, len(files))
+	args := make([]interface{}, 0, len(files)+2)
+	args = append(args, userID, "[autopilot]%")
+	for i, f := range files {
+		conditions[i] = "files_json LIKE ?"
+		args = append(args, "%"+f+"%")
+	}
+	query := fmt.Sprintf(`
+		SELECT COUNT(*) FROM detail_memories
+		WHERE user_id = ? AND text LIKE ? AND (%s)
+	`, strings.Join(conditions, " OR "))
+	var count int
+	err := s.db.QueryRow(query, args...).Scan(&count)
+	return count, err
+}
+
+// GetAutopilotMemoryCountByArea returns the count of autopilot-generated memories
+// for a specific area (those with text starting with "[autopilot:areaKey]").
+func (s *SQLiteStore) GetAutopilotMemoryCountByArea(userID, areaKey string) (int, error) {
+	prefix := "[autopilot:" + areaKey + "]%"
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM detail_memories
+		WHERE user_id = ? AND text LIKE ?
+	`, userID, prefix).Scan(&count)
+	return count, err
+}
+
 func (s *SQLiteStore) GetFilesWithMemories(userID string, types []string) ([]string, error) {
 	if len(types) == 0 {
 		return nil, nil

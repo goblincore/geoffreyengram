@@ -214,7 +214,7 @@ func newEngine(cfg CLIConfig) (*dualmem.Engine, error) {
 		SynthesisGenerator:    synthesisGen,
 		ExplorerGenerator:     explorerGen,
 		Sectors:               sectors,
-		MaxDetailPerUser:      100,
+		MaxDetailPerUser:      200,
 		ImportanceTheta:       0.65,
 		EpisodeBatchInterval:  episodeInterval,
 		ArcBuildInterval:      arcInterval,
@@ -1587,22 +1587,34 @@ func cmdAutopilot(cfg CLIConfig) {
 		return
 	}
 
-	// Override explorer generator if model flag provided
+	// Override explorer generator if model flag provided.
 	if *model != "" {
-		apiKeyEnv := cfg.Providers.ExplorerAPIKeyEnv
-		if apiKeyEnv == "" {
-			apiKeyEnv = cfg.Providers.SynthesisAPIKeyEnv
-		}
-		apiKey := os.Getenv(apiKeyEnv)
-		url := *baseURL
-		if url == "" {
-			url = cfg.Providers.ExplorerBaseURL
-			if url == "" {
-				url = cfg.Providers.SynthesisBaseURL
+		if strings.HasPrefix(*model, "gemini") {
+			// Gemini models use GEMINI_API_KEY or GOOGLE_API_KEY.
+			geminiKey := os.Getenv("GEMINI_API_KEY")
+			if geminiKey == "" {
+				geminiKey = os.Getenv("GOOGLE_API_KEY")
 			}
-		}
-		if apiKey != "" {
-			engine.SetExplorerGenerator(dualmem.NewAnthropicSummarizer(apiKey, url, *model))
+			if geminiKey != "" {
+				engine.SetExplorerGenerator(dualmem.NewGeminiSummarizer(geminiKey, *model))
+			}
+		} else {
+			// Anthropic-compatible models (claude-*, glm-*).
+			apiKeyEnv := cfg.Providers.ExplorerAPIKeyEnv
+			if apiKeyEnv == "" {
+				apiKeyEnv = cfg.Providers.SynthesisAPIKeyEnv
+			}
+			apiKey := os.Getenv(apiKeyEnv)
+			url := *baseURL
+			if url == "" {
+				url = cfg.Providers.ExplorerBaseURL
+				if url == "" {
+					url = cfg.Providers.SynthesisBaseURL
+				}
+			}
+			if apiKey != "" {
+				engine.SetExplorerGenerator(dualmem.NewAnthropicSummarizer(apiKey, url, *model))
+			}
 		}
 	}
 
@@ -1626,41 +1638,46 @@ func cmdAutopilot(cfg CLIConfig) {
 	}
 
 	if *dryRun {
-		fmt.Printf("Dry run: %d modules scored\n\n", len(result.Targets))
+		fmt.Printf("Dry run: %d areas found (%d source files)\n\n", result.Areas, countFiles(result.Targets))
 		for i, t := range result.Targets {
-			if i >= 20 {
-				fmt.Printf("... and %d more\n", len(result.Targets)-20)
+			if i >= 30 {
+				fmt.Printf("... and %d more\n", len(result.Targets)-30)
 				break
 			}
-			fmt.Printf("  %.3f  %s\n", t.Score, t.ModulePath)
+			fmt.Printf("  %.3f  %-50s (%d files)\n", t.Score, t.ModulePath, len(t.Files))
 		}
 		return
 	}
 
-	fmt.Printf("Autopilot: explored %d modules, created %d memories, used %d tokens (skipped %d)\n",
-		result.Explored, result.MemoriesAdded, result.TokensUsed, result.Skipped)
+	fmt.Printf("Autopilot: explored %d/%d areas, created %d memories, used %d tokens (skipped %d)\n",
+		result.Explored, result.Areas, result.MemoriesAdded, result.TokensUsed, result.Skipped)
+	if result.Error != "" {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", result.Error)
+	}
+}
+
+func countFiles(targets []dualmem.CuriosityTarget) int {
+	n := 0
+	for _, t := range targets {
+		n += len(t.Files)
+	}
+	return n
 }
 
 func printAutopilotStats(ctx context.Context, engine *dualmem.Engine, namespace string) {
-	// For stats, just do a dry run and count coverage
-	result, err := engine.Autopilot(ctx, namespace, dualmem.AutopilotOpts{Budget: 100000, DryRun: true})
+	result, err := engine.Autopilot(ctx, namespace, dualmem.AutopilotOpts{Budget: 1, DryRun: true})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return
 	}
-	total := len(result.Targets)
+	total := result.Areas
 	covered := 0
-	stale := 0
 	for _, t := range result.Targets {
-		if t.Signals["memory_gap"] < 1.0 {
+		if engine.HasAutopilotCoverage(ctx, namespace, t.Files) {
 			covered++
 		}
-		if t.Signals["staleness"] > 0 {
-			stale++
-		}
 	}
-	fmt.Printf("Coverage: %d/%d modules (%.0f%%)\n", covered, total, float64(covered)/float64(max(total, 1))*100)
-	fmt.Printf("Stale: %d modules with outdated memories\n", stale)
+	fmt.Printf("Coverage: %d/%d areas (%.0f%%)\n", covered, total, float64(covered)/float64(max(total, 1))*100)
 }
 
 func cmdBenchmark(cfg CLIConfig) {

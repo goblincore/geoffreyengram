@@ -507,20 +507,23 @@ type ExploreResult struct {
 
 // AutopilotOpts configures an autopilot exploration run.
 type AutopilotOpts struct {
-	Budget    int    // Total token budget for this run
-	DryRun   bool   // Score modules but don't explore
-	Force    bool   // Re-explore even if recent memories exist
-	ModelName string // Override explorer model (empty = use config)
-	BaseURL   string // Override explorer base URL
+	Budget          int    // Total token budget for this run
+	DryRun          bool   // Score modules but don't explore
+	Force           bool   // Re-explore even if recent memories exist
+	CheckoutDefault bool   // Switch to default branch before scanning
+	ModelName       string // Override explorer model (empty = use config)
+	BaseURL         string // Override explorer base URL
 }
 
 // AutopilotResult describes what an autopilot run produced.
 type AutopilotResult struct {
 	Targets       []CuriosityTarget // All scored targets (sorted by score desc)
-	Explored      int               // How many targets were explored
+	Areas         int               // Total number of areas found
+	Explored      int               // How many areas were explored
 	MemoriesAdded int               // How many memories were saved
 	TokensUsed    int               // Total tokens consumed
-	Skipped       int               // How many skipped (novelty/freshness)
+	Skipped       int               // How many skipped (already covered)
+	Error         string            // Non-fatal error (e.g., rate limited)
 }
 
 // CuriosityTarget is a scored module for exploration.
@@ -529,6 +532,14 @@ type CuriosityTarget struct {
 	Score      float64            `json:"score"`
 	Signals    map[string]float64 `json:"signals"`
 	Files      []string           `json:"files"`
+}
+
+// Area groups directories sharing a common top-level path prefix for batch exploration.
+type Area struct {
+	Key   string   // e.g. "packages/learn-card-core"
+	Dirs  []string // directories within this area
+	Files []string // all source files (union across dirs)
+	Score float64  // max score of constituent dirs
 }
 
 // FormatSnippetsFirst renders the result in snippets-first format for context injection.

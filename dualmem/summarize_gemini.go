@@ -29,7 +29,7 @@ func NewGeminiSummarizer(apiKey, model string) *GeminiSummarizer {
 	return &GeminiSummarizer{
 		apiKey: apiKey,
 		model:  model,
-		client: &http.Client{Timeout: 30 * time.Second},
+		client: &http.Client{Timeout: 90 * time.Second},
 	}
 }
 
@@ -159,5 +159,16 @@ func (s *GeminiSummarizer) generate(ctx context.Context, prompt string, maxToken
 		return "", fmt.Errorf("dualmem: empty summarize response")
 	}
 
-	return strings.TrimSpace(geminiResp.Candidates[0].Content.Parts[0].Text), nil
+	// Concatenate all text parts (Gemini may split long responses).
+	var parts []string
+	for _, part := range geminiResp.Candidates[0].Content.Parts {
+		if part.Text != "" {
+			parts = append(parts, part.Text)
+		}
+	}
+	if len(parts) == 0 {
+		return "", fmt.Errorf("dualmem: no text in gemini response")
+	}
+
+	return strings.TrimSpace(strings.Join(parts, "")), nil
 }
