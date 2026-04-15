@@ -332,6 +332,15 @@ func parseWorkflowHint(text string) *WorkflowHint {
 	summary := ""
 	if closeBracket+2 < len(text) {
 		summary = strings.TrimSpace(text[closeBracket+1:])
+		// Strip optional ticket tag like "[LC-1729, LC-1731]"
+		if strings.HasPrefix(summary, "[") {
+			if end := strings.Index(summary, "]"); end >= 0 {
+				summary = strings.TrimSpace(summary[end+1:])
+			}
+		}
+		// Strip markdown header like "## WORKFLOW SUMMARY\n"
+		summary = strings.TrimPrefix(summary, "## WORKFLOW SUMMARY")
+		summary = strings.TrimSpace(summary)
 		if len(summary) > 150 {
 			summary = summary[:147] + "..."
 		}
