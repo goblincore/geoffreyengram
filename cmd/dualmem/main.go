@@ -2356,7 +2356,10 @@ func cmdFileContext(cfg CLIConfig) {
 		os.Exit(1)
 	}
 
-	if len(results) == 0 {
+	// Also fetch workflow hints for this file
+	workflowHints, _ := engine.GetWorkflowHintsForFile(ctx, namespace, filename)
+
+	if len(results) == 0 && len(workflowHints) == 0 {
 		return // Silent exit — no memories for this file
 	}
 
@@ -2377,7 +2380,8 @@ func cmdFileContext(cfg CLIConfig) {
 			relPath = filepath.Base(abs)
 		}
 
-		fmt.Printf("[File Memory] %s (%d cached observations, file ~%dtok)\n", relPath, len(results), tokEst)
+		totalObs := len(results) + len(workflowHints)
+		fmt.Printf("[File Memory] %s (%d cached observations, file ~%dtok)\n", relPath, totalObs, tokEst)
 		fmt.Println("Prior context for this file — the full read will follow, but these may already answer your question:")
 		fmt.Println()
 
@@ -2400,6 +2404,13 @@ func cmdFileContext(cfg CLIConfig) {
 			}
 			dateStr := r.CreatedAt.Format("2006-01-02")
 			fmt.Printf("%s [%s] %s (%s)\n", icon, r.Type, r.Text, dateStr)
+		}
+		for _, wh := range workflowHints {
+			ticketStr := ""
+			if len(wh.Tickets) > 0 {
+				ticketStr = " (" + strings.Join(wh.Tickets, ", ") + ")"
+			}
+			fmt.Printf("📎 [workflow] \"%s\"%s — search \"workflow:%s\" for full detail\n", wh.Summary, ticketStr, wh.WorkflowID)
 		}
 		return
 	}

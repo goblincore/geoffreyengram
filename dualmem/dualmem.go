@@ -393,6 +393,11 @@ func (e *Engine) FileContext(ctx context.Context, userID string, filename string
 	return result, nil
 }
 
+// GetWorkflowHintsForFile returns workflow hints for a single file.
+func (e *Engine) GetWorkflowHintsForFile(ctx context.Context, userID string, filename string) ([]WorkflowHint, error) {
+	return e.store.GetWorkflowHintsForFiles(userID, []string{filename})
+}
+
 // FileIndex returns all basenames that have associated high-signal memories.
 // Used to generate the file index for the Read hook fast-path.
 func (e *Engine) FileIndex(ctx context.Context, userID string) ([]string, error) {
