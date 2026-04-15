@@ -2390,6 +2390,7 @@ func cmdFileContext(cfg CLIConfig) {
 			"map":        "🗺",
 			"trace":      "🔍",
 			"seed":       "🌱",
+			"workflow":   "📎",
 		}
 
 		for _, r := range results {
