@@ -576,8 +576,12 @@ func (e *Engine) AutopilotWorkflows(ctx context.Context, namespace string, opts 
 		summary = strings.TrimSpace(summary)
 		tokensUsed += len(summary) / 4
 
-		// Save as workflow memory.
-		memText := fmt.Sprintf("[workflow:%s] %s", cluster.ID, summary)
+		// Save as workflow memory. Include ticket IDs so ticket-prefix hints can match.
+		ticketTag := ""
+		if len(cluster.Tickets) > 0 {
+			ticketTag = " [" + strings.Join(cluster.Tickets, ", ") + "]"
+		}
+		memText := fmt.Sprintf("[workflow:%s]%s %s", cluster.ID, ticketTag, summary)
 		if debug {
 			log.Printf("[workflow] summary_len=%d memText_len=%d", len(summary), len(memText))
 		}
