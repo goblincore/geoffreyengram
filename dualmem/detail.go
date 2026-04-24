@@ -216,6 +216,19 @@ func (dp *DetailPath) Search(ctx context.Context, queryEmbedding []float32, user
 		}
 	}
 
+	// Apply type-priority + salience boost. Implements the documented
+	// CLAUDE.md contract — warning > decision/continuity/investigation/etc. >
+	// general — at retrieval time, so high-priority memories make it into the
+	// top-N candidate pool instead of being silently truncated below long
+	// checkpoint blobs that share broad domain vocabulary with the query.
+	// Boost magnitude: at most 0.20 (priority 2) + 0.05 (salience 1.0) = 0.25,
+	// large enough to overcome typical cosine deltas between vocab-overlapping
+	// candidates (~0.1-0.2 in normalized [0,1] space) but small enough that
+	// genuinely irrelevant memories cannot float to the top on type alone.
+	for i := range results {
+		results[i].hybridScore += typeAndSalienceBoost(results[i].Type, results[i].Salience)
+	}
+
 	// Sort by hybrid score descending
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].hybridScore > results[j].hybridScore
@@ -290,4 +303,24 @@ func (dp *DetailPath) Search(ctx context.Context, queryEmbedding []float32, user
 	}
 
 	return topM, nil
+}
+
+// typeAndSalienceBoost returns the additive hybrid-score boost a memory
+// receives based on its type priority and salience. Mirrors the priority
+// ordering used by detailSortScore in the AssembleContext post-sort, but
+// applied earlier (at the search candidate-ranking stage) so high-priority
+// memories aren't truncated below the limit by raw cosine before they ever
+// reach the post-sort. Per-priority boost is 0.10; salience above 0.5 adds
+// up to a further 0.05, giving a max boost of 0.25 for a warning at
+// salience 1.0.
+func typeAndSalienceBoost(memType string, salience float64) float64 {
+	boost := float64(typePriority(memType)) * 0.10
+	if salience > 0.5 {
+		extra := (salience - 0.5) * 0.10
+		if extra > 0.05 {
+			extra = 0.05
+		}
+		boost += extra
+	}
+	return boost
 }
