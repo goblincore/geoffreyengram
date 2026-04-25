@@ -140,11 +140,18 @@ func resolveNamespace(flagNS string, cfg CLIConfig) string {
 	// subdirectories, worktrees, or the root directory.
 	cwd, _ := os.Getwd()
 
-	// Try git toplevel first (handles subdirectories and worktrees)
-	if out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output(); err == nil {
-		gitRoot := strings.TrimSpace(string(out))
-		if gitRoot != "" && gitRoot != "/" {
-			return "claude:" + filepath.Base(gitRoot)
+	// Resolve via git common dir so worktrees share their main repo's
+	// namespace. `--show-toplevel` returns the worktree path itself
+	// (basename = worktree name), but `--git-common-dir` always points to
+	// the main repo's .git, whose parent dir is the main worktree — that's
+	// the project name we want regardless of which worktree we're in.
+	if out, err := exec.Command("git", "rev-parse", "--path-format=absolute", "--git-common-dir").Output(); err == nil {
+		commonDir := strings.TrimSpace(string(out))
+		if commonDir != "" {
+			mainRoot := filepath.Dir(commonDir)
+			if mainRoot != "" && mainRoot != "/" {
+				return "claude:" + filepath.Base(mainRoot)
+			}
 		}
 	}
 
