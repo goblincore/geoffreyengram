@@ -11,8 +11,8 @@ import (
 // Plan represents a dispatch plan file with frontmatter and body.
 type Plan struct {
 	// Metadata set by the CLI or user
-	Name   string
-	Path   string
+	Name string
+	Path string
 
 	// Frontmatter fields
 	Title         string
@@ -28,6 +28,8 @@ type Plan struct {
 	DependsOn     []string
 	AllowedTools  string
 	Harness       string // "claude" (default) or "opencode"
+	Setup         string // per-task provisioning command run in the worktree before the agent; "none"/"skip" disables; empty falls back to DEFAULT_SETUP_CMD
+	SetupTimeout  string // max duration for the setup command (e.g. "5m"); empty falls back to DEFAULT_SETUP_TIMEOUT
 	StartedAt     string
 	FinishedAt    string
 	ExitCode      int
@@ -111,6 +113,10 @@ func parsePlanFile(path string) (*Plan, error) {
 			plan.AllowedTools = v
 		case "harness":
 			plan.Harness = v
+		case "setup":
+			plan.Setup = v
+		case "setup_timeout":
+			plan.SetupTimeout = v
 		case "started_at":
 			plan.StartedAt = v
 		case "finished_at":
