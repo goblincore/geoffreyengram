@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -294,6 +295,94 @@ func parseMaxRuntime(s string) time.Duration {
 	return 0
 }
 
+// defaultSetupTimeout bounds a worktree setup command when none is configured.
+const defaultSetupTimeout = 5 * time.Minute
+
+// resolveSetupCommand returns the provisioning command to run in a fresh
+// worktree before the agent starts. The per-task "setup:" field takes
+// precedence over the project-wide DEFAULT_SETUP_CMD. An empty result means
+// "no setup": either nothing is configured, or it is explicitly disabled with
+// "none"/"skip" (case-insensitive) so a task can opt out of an inherited default.
+func resolveSetupCommand(plan *Plan, cfg *DispatchConfig) string {
+	cmd := strings.TrimSpace(plan.Setup)
+	if cmd == "" {
+		cmd = strings.TrimSpace(cfg.DefaultSetupCmd)
+	}
+	if cmd == "" || strings.EqualFold(cmd, "none") || strings.EqualFold(cmd, "skip") {
+		return ""
+	}
+	return cmd
+}
+
+// resolveSetupTimeout returns the max duration for the setup command, applying
+// the per-task override, then the project default, then a built-in fallback.
+func resolveSetupTimeout(plan *Plan, cfg *DispatchConfig) time.Duration {
+	for _, candidate := range []string{plan.SetupTimeout, cfg.DefaultSetupTimeout} {
+		if d := parseMaxRuntime(candidate); d > 0 {
+			return d
+		}
+	}
+	return defaultSetupTimeout
+}
+
+// runSetup executes the worktree provisioning command via "sh -c", streaming
+// combined stdout/stderr into the task's LogBuffer (and report, if non-nil)
+// with a "[dispatch][setup]" prefix. It returns the command's exit code (124
+// on timeout, -1 if the process could not run) and a non-nil error on failure.
+func (e *Engine) runSetup(ctx context.Context, setupCmd, workDir string, env []string, timeout time.Duration, lb *LogBuffer, report io.Writer) (int, error) {
+	sctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(sctx, "sh", "-c", setupCmd)
+	cmd.Dir = workDir
+	cmd.Env = env
+	cmd.WaitDelay = 1 * time.Second
+
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return -1, err
+	}
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+
+	if err := cmd.Start(); err != nil {
+		pw.Close()
+		pr.Close()
+		return -1, err
+	}
+	// Close the parent's write end so the scanner sees EOF when the child exits.
+	pw.Close()
+
+	scanDone := make(chan struct{})
+	go func() {
+		defer close(scanDone)
+		scanner := bufio.NewScanner(pr)
+		scanner.Buffer(make([]byte, 256*1024), 256*1024)
+		for scanner.Scan() {
+			line := "[dispatch][setup] " + scanner.Text()
+			lb.Append(line)
+			if report != nil {
+				fmt.Fprintln(report, line)
+			}
+		}
+	}()
+
+	waitErr := cmd.Wait()
+	<-scanDone
+	pr.Close()
+
+	if waitErr != nil {
+		if sctx.Err() == context.DeadlineExceeded {
+			return 124, fmt.Errorf("setup command timed out after %s", timeout)
+		}
+		if exitErr, ok := waitErr.(*exec.ExitError); ok {
+			return exitErr.ExitCode(), fmt.Errorf("setup command exited %d", exitErr.ExitCode())
+		}
+		return -1, waitErr
+	}
+	return 0, nil
+}
+
 // ExecutePlan runs the claude CLI for the given plan, streams output to the
 // plan's LogBuffer and a report file, then updates the plan frontmatter.
 func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
@@ -392,6 +481,7 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 
 	// 7. Create a git worktree for isolation
 	workDir := plan.Project // fallback: run in project dir
+	setupRan := false       // whether worktree provisioning (setup cmd) ran successfully
 	branch := plan.Branch
 	if branch == "" {
 		branch = "dispatch/" + plan.Name
@@ -457,6 +547,26 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 		if _, err := os.Stat(claudeDir); err == nil {
 			os.Symlink(claudeDir, filepath.Join(worktreePath, ".claude"))
 		}
+
+		// Provision the worktree before the agent runs (e.g. install deps). A fresh
+		// worktree has no gitignored artifacts like node_modules, so without this the
+		// agent wastes a turn discovering a bare checkout and reinstalls on every task.
+		if setupCmd := resolveSetupCommand(plan, e.Config); setupCmd != "" {
+			timeout := resolveSetupTimeout(plan, e.Config)
+			lb.Append(fmt.Sprintf("[dispatch] running setup (timeout %s): %s", timeout, setupCmd))
+			if code, serr := e.runSetup(execCtx, setupCmd, workDir, envPairs, timeout, lb, nil); serr != nil {
+				// Provisioning failed: the worktree can't pass verification anyway, so
+				// fail fast before spending agent tokens. Preserve it for inspection.
+				finishedAt := time.Now().UTC().Format(time.RFC3339)
+				lb.Append(fmt.Sprintf("[dispatch] setup failed (exit %d): %v — aborting before agent run; worktree preserved at %s", code, serr, workDir))
+				_ = setFrontmatterField(plan.Path, "status", "failed")
+				_ = setFrontmatterField(plan.Path, "finished_at", finishedAt)
+				_ = setFrontmatterField(plan.Path, "exit_code", strconv.Itoa(code))
+				return fmt.Errorf("setup command failed for plan %s: %w", plan.Name, serr)
+			}
+			lb.Append("[dispatch] setup complete")
+			setupRan = true
+		}
 	}
 
 	// 8. Build command
@@ -480,6 +590,9 @@ You are running in an isolated git worktree, NOT the main repository.
 All files you read/edit are in the worktree. Use absolute paths based on the worktree path above.
 The worktree is a full copy of the repo — your edits will not affect the main repo.
 `, workDir, plan.Project, branch)
+		if setupRan {
+			worktreeNote += "Dependencies were already provisioned for this worktree by the dispatch setup step — do NOT reinstall them.\n"
+		}
 		prompt = worktreeNote + "\n" + prompt
 	}
 	// Inject dualmem context + CLI instructions for harnesses without MCP support (Pi).
@@ -737,4 +850,3 @@ Save memories when you:
 
 	return nil
 }
-

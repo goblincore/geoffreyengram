@@ -9,24 +9,26 @@ import (
 
 // DispatchConfig holds the parsed configuration from dispatch.conf and .env.
 type DispatchConfig struct {
-	PlansDir            string
-	ReportsDir          string
-	LogFile             string
-	DefaultModel        string
-	DefaultAuthTokenEnv string
-	DefaultBaseURL      string
-	DefaultMaxRuntime   string
-	ClaudeBin           string
-	OpenCodeBin         string
-	PiBin               string
-	ExtraPath           string // Additional PATH entries for subprocess tools (e.g., node for Pi)
+	PlansDir             string
+	ReportsDir           string
+	LogFile              string
+	DefaultModel         string
+	DefaultAuthTokenEnv  string
+	DefaultBaseURL       string
+	DefaultMaxRuntime    string
+	ClaudeBin            string
+	OpenCodeBin          string
+	PiBin                string
+	ExtraPath            string // Additional PATH entries for subprocess tools (e.g., node for Pi)
+	DefaultSetupCmd      string // Provisioning command run in each fresh worktree before the agent (e.g. "pnpm install"); per-task "setup:" overrides
+	DefaultSetupTimeout  string // Max duration for the setup command (e.g. "5m"); per-task "setup_timeout:" overrides
 	Preamble             string // Prepended to every plan body before dispatching
 	ListenAddr           string
 	PlanningModel        string
 	PlanningAPIKeyEnv    string
 	PlanningBaseURL      string
-	MaxConcurrent        int    // max parallel tasks (default 2)
-	AutoCleanupWorktrees bool   // remove worktrees on success (default true)
+	MaxConcurrent        int               // max parallel tasks (default 2)
+	AutoCleanupWorktrees bool              // remove worktrees on success (default true)
 	EnvVars              map[string]string // from .env
 }
 
@@ -67,6 +69,10 @@ func loadDispatchConfig(confPath, envPath string) (*DispatchConfig, error) {
 			cfg.PiBin = v
 		case "EXTRA_PATH":
 			cfg.ExtraPath = v
+		case "DEFAULT_SETUP_CMD":
+			cfg.DefaultSetupCmd = v
+		case "DEFAULT_SETUP_TIMEOUT":
+			cfg.DefaultSetupTimeout = v
 		case "PREAMBLE":
 			cfg.Preamble = v
 		case "LISTEN_ADDR":

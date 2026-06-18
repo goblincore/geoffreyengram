@@ -43,6 +43,8 @@ harness: claude          # "claude" (default), "pi", or "opencode"
 priority: 2
 max_runtime: 25m
 allowed_tools: Edit,Write,Bash,Read,Glob,Grep
+setup: "pnpm install --frozen-lockfile --prefer-offline"  # optional: provisioning run in the worktree before the agent; "none"/"skip" to opt out; falls back to DEFAULT_SETUP_CMD
+setup_timeout: 5m        # optional: max duration for the setup command (default 5m); falls back to DEFAULT_SETUP_TIMEOUT
 ---
 
 ## Context
@@ -67,7 +69,21 @@ CLAUDE_BIN="$HOME/.local/bin/claude"
 DEFAULT_MODEL="glm-5.1"
 LISTEN_ADDR="127.0.0.1:8090"
 PLANNING_MODEL="claude-opus-4-6"
+DEFAULT_SETUP_CMD="pnpm install --frozen-lockfile --prefer-offline"  # run in each fresh worktree before the agent
+DEFAULT_SETUP_TIMEOUT="5m"                                           # bound for the setup command
 ```
+
+### Worktree setup hook
+
+Each task runs in a fresh `git worktree`, which starts without gitignored
+build artifacts like `node_modules`. Set `DEFAULT_SETUP_CMD` (project-wide) or a
+per-task `setup:` field to provision the worktree once, before the agent starts —
+so the agent doesn't waste a turn discovering a bare checkout and reinstalling on
+every task. The command runs via `sh -c` in the worktree root with the task's
+environment; its output streams to the task log prefixed `[dispatch][setup]`. A
+non-zero exit (or a timeout) fails the task fast — before any agent tokens are
+spent — and preserves the worktree for inspection. Set `setup: none` (or `skip`)
+on a task to opt out of an inherited default.
 
 API keys go in `~/.claude/dispatch/.env`:
 
