@@ -45,3 +45,4 @@ vexp.toml
 
 # Misc logs
 firebase-debug.log
+.claude/
