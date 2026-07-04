@@ -955,7 +955,15 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 				useBoostOnly := intent == IntentContinue && len(boostPaths) > 0
 				mapText := codeMap.RenderAtBudgetWithCoChange(mapBudget, codemapQuery, moduleEmbs, boostPaths, cochangeNeighbors, useBoostOnly)
 				mapTokens := estimateTokens(mapText)
-				parts = append(parts, "[Codebase Map]\n"+mapText)
+				header := "[Codebase Map]"
+				if codeMap.Stale {
+					if codeMap.CommitsBehind > 0 {
+						header = fmt.Sprintf("[Codebase Map — %d commits behind, run `dualmem index` to refresh]", codeMap.CommitsBehind)
+					} else {
+						header = "[Codebase Map — stale, run `dualmem index` to refresh]"
+					}
+				}
+				parts = append(parts, header+"\n"+mapText)
 				sources = append(sources, SourceRef{Type: "codemap", ID: userID})
 				tokensUsed += mapTokens
 			}
@@ -2255,10 +2263,11 @@ func sanitizeID(s string) string {
 	return b.String()
 }
 
-// getOrGenerateCodeMap loads a stored code map or generates one on the fly.
-// Returns the code map and per-module embeddings (for query-aware ranking).
 // GetCodeMap returns the cached code map and hybrid CodeIndex for a namespace.
-// Regenerates if the git commit has changed. Encoding is deterministic (no API calls).
+// Stale-while-revalidate: if a stored map exists it is served immediately even
+// when the git commit has moved (marked with Stale/CommitsBehind) — it never
+// blocks on a rescan. A full scan only runs inline when no map exists at all
+// (true first run). Use RefreshCodeMap to force regeneration.
 func (e *Engine) GetCodeMap(ctx context.Context, namespace string) (*CodeMap, *CodeIndex) {
 	return e.getOrGenerateCodeMap(ctx, namespace)
 }
@@ -2268,8 +2277,9 @@ func (e *Engine) getOrGenerateCodeMap(ctx context.Context, namespace string) (*C
 
 	stored, _ := e.store.GetCodeMap(namespace)
 
-	// Use cache if git commit matches
-	if stored != nil && stored.GitCommit == currentCommit && currentCommit != "" {
+	// Serve any stored map immediately — fresh or stale. Never block context
+	// assembly on a codebase rescan (large monorepos can take minutes).
+	if stored != nil {
 		cm := &CodeMap{
 			Namespace:   stored.Namespace,
 			RootDir:     stored.RootDir,
@@ -2278,13 +2288,37 @@ func (e *Engine) getOrGenerateCodeMap(ctx context.Context, namespace string) (*C
 			GeneratedAt: stored.GeneratedAt,
 			GitCommit:   stored.GitCommit,
 		}
+		if currentCommit != "" && stored.GitCommit != currentCommit {
+			cm.Stale = true
+			cm.CommitsBehind = countCommitsBetween(e.cfg.RootDir, stored.GitCommit, currentCommit)
+		}
 		return cm, BuildCodeIndex(cm)
 	}
 
-	// Regenerate (unified scan: code map + structural edges in one pass)
-	result, err := ScanCodebase(e.cfg.RootDir, e.OnScanProgress)
+	// True first run: no stored map. Generate inline.
+	cm, idx, err := e.RefreshCodeMap(ctx, namespace)
 	if err != nil {
 		return nil, nil
+	}
+	return cm, idx
+}
+
+// RefreshCodeMap rescans the codebase and persists the result. When a stored
+// map exists and git can enumerate what changed since it was built, only the
+// affected directories are re-parsed (incremental); otherwise it falls back to
+// a full filesystem walk. Called by the CLI `map` command, on true first run,
+// and by background refresh workers.
+func (e *Engine) RefreshCodeMap(ctx context.Context, namespace string) (*CodeMap, *CodeIndex, error) {
+	_, currentCommit := GetGitState(e.cfg.RootDir)
+
+	if cm, idx := e.tryIncrementalRefresh(namespace, currentCommit); cm != nil {
+		return cm, idx, nil
+	}
+
+	// Unified scan: code map + structural edges in one pass
+	result, err := ScanCodebase(e.cfg.RootDir, e.OnScanProgress)
+	if err != nil {
+		return nil, nil, err
 	}
 	cm := result.CodeMap
 	cm.Namespace = namespace
@@ -2298,6 +2332,111 @@ func (e *Engine) getOrGenerateCodeMap(ctx context.Context, namespace string) (*C
 		}
 		e.store.InsertStructuralEdges(namespace, result.Edges)
 	}
+
+	return cm, BuildCodeIndex(cm), nil
+}
+
+// Incremental refresh guards: above these thresholds a full walk is likely
+// cheaper (and certainly simpler) than many targeted rescans.
+const (
+	maxIncrementalFiles = 500
+	maxIncrementalDirs  = 100
+)
+
+// tryIncrementalRefresh re-parses only the directories touched since the
+// stored map's commit, merging the results into the stored map. Returns
+// (nil, nil) when incremental refresh isn't possible — no stored map, no git
+// state, unresolvable diff, or too many changes — and the caller falls back
+// to a full scan.
+func (e *Engine) tryIncrementalRefresh(namespace, currentCommit string) (*CodeMap, *CodeIndex) {
+	if currentCommit == "" {
+		return nil, nil
+	}
+	stored, err := e.store.GetCodeMap(namespace)
+	if err != nil || stored == nil || stored.GitCommit == "" {
+		return nil, nil
+	}
+
+	changed, ok := ChangedFilesSince(e.cfg.RootDir, stored.GitCommit)
+	if !ok || len(changed) > maxIncrementalFiles {
+		return nil, nil
+	}
+
+	// Group changed files by directory (git emits slash-separated paths).
+	dirSet := make(map[string]bool)
+	for _, f := range changed {
+		dir := "."
+		if i := strings.LastIndex(f, "/"); i >= 0 {
+			dir = f[:i]
+		}
+		dirSet[dir] = true
+	}
+	if len(dirSet) > maxIncrementalDirs {
+		return nil, nil
+	}
+
+	oldModules := UnmarshalZoom2(stored.Zoom2JSON)
+
+	if len(dirSet) == 0 {
+		// Nothing changed on disk — the map content is still valid, just
+		// re-stamp the commit so staleness checks stop firing.
+		cm := &CodeMap{
+			Namespace:   namespace,
+			RootDir:     stored.RootDir,
+			Zoom1:       stored.Zoom1,
+			Zoom2:       oldModules,
+			GitCommit:   currentCommit,
+			GeneratedAt: time.Now(),
+		}
+		if err := e.store.UpsertCodeMap(namespace, e.cfg.RootDir, cm.Zoom1, cm.MarshalZoom2(), currentCommit); err != nil {
+			return nil, nil
+		}
+		return cm, BuildCodeIndex(cm)
+	}
+
+	dirs := make([]string, 0, len(dirSet))
+	for d := range dirSet {
+		dirs = append(dirs, d)
+	}
+	sort.Strings(dirs)
+
+	if e.OnScanProgress != nil {
+		e.OnScanProgress(ScanProgress{Phase: "incremental", DirsFound: len(dirs), FileCount: len(changed)})
+	}
+
+	newMods, newEdges, err := ScanDirs(e.cfg.RootDir, dirs)
+	if err != nil {
+		return nil, nil
+	}
+
+	// Merge: drop modules owned by rescanned dirs, add their replacements.
+	merged := make([]ModuleMap, 0, len(oldModules)+len(newMods))
+	for _, m := range oldModules {
+		if !dirSet[moduleOwnerDir(m.Path)] {
+			merged = append(merged, m)
+		}
+	}
+	merged = append(merged, newMods...)
+	sort.Slice(merged, func(i, j int) bool {
+		return merged[i].Path < merged[j].Path
+	})
+
+	cm := &CodeMap{
+		Namespace:   namespace,
+		RootDir:     e.cfg.RootDir,
+		Zoom1:       synthesizeZoom1(merged, e.cfg.RootDir),
+		Zoom2:       merged,
+		GitCommit:   currentCommit,
+		GeneratedAt: time.Now(),
+	}
+	if err := e.store.UpsertCodeMap(namespace, e.cfg.RootDir, cm.Zoom1, cm.MarshalZoom2(), currentCommit); err != nil {
+		return nil, nil
+	}
+
+	for i := range newEdges {
+		newEdges[i].Namespace = namespace
+	}
+	e.store.ReplaceStructuralEdgesForDirs(namespace, dirs, newEdges)
 
 	return cm, BuildCodeIndex(cm)
 }

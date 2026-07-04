@@ -1929,6 +1929,60 @@ func (s *SQLiteStore) InsertStructuralEdges(namespace string, edges []Structural
 	return tx.Commit()
 }
 
+// likeEscaper escapes SQLite LIKE wildcards so directory names containing
+// underscores (common) or percent signs don't match unrelated paths.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+// ReplaceStructuralEdgesForDirs deletes edges whose source file lives directly
+// in one of relDirs (non-recursive) and inserts the freshly extracted
+// replacements. Used by incremental rescans; InsertStructuralEdges remains the
+// full-rebuild path.
+func (s *SQLiteStore) ReplaceStructuralEdgesForDirs(namespace string, relDirs []string, edges []StructuralEdge) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("replace structural edges: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	for _, dir := range relDirs {
+		if dir == "." || dir == "" {
+			// Root-level sources have no path separator.
+			if _, err := tx.Exec(
+				`DELETE FROM structural_edges WHERE namespace = ? AND source_path NOT LIKE '%/%'`,
+				namespace,
+			); err != nil {
+				return fmt.Errorf("replace structural edges: clear root: %w", err)
+			}
+			continue
+		}
+		// Direct children only: dir/x matches, dir/sub/x does not.
+		esc := likeEscaper.Replace(dir)
+		if _, err := tx.Exec(
+			`DELETE FROM structural_edges WHERE namespace = ? AND source_path LIKE ? ESCAPE '\' AND source_path NOT LIKE ? ESCAPE '\'`,
+			namespace, esc+"/%", esc+"/%/%",
+		); err != nil {
+			return fmt.Errorf("replace structural edges: clear %s: %w", dir, err)
+		}
+	}
+
+	stmt, err := tx.Prepare(
+		`INSERT INTO structural_edges (source_path, target_path, edge_type, weight, line_number, enclosing_function, callee_name, namespace)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+	)
+	if err != nil {
+		return fmt.Errorf("replace structural edges: prepare: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, e := range edges {
+		if _, err := stmt.Exec(e.SourcePath, e.TargetPath, e.EdgeType, e.Weight, e.LineNumber, e.EnclosingFunction, e.CalleeName, namespace); err != nil {
+			return fmt.Errorf("replace structural edge %s->%s: %w", e.SourcePath, e.TargetPath, err)
+		}
+	}
+
+	return tx.Commit()
+}
+
 func (s *SQLiteStore) GetStructuralNeighbors(namespace, path string, edgeTypes []string, limit int) ([]StructuralEdge, error) {
 	if limit <= 0 {
 		limit = 50

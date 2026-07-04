@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -130,6 +131,66 @@ func GetGitState(rootDir string) (branch, commit string) {
 		return "", ""
 	}
 	return gitCurrentBranch(rootDir), gitCurrentCommit(rootDir)
+}
+
+// countCommitsBetween returns the number of commits reachable from `to` but
+// not from `from` (i.e. how far behind a stored code map is). Returns 0 when
+// the range can't be resolved (shallow clone, rebased/GC'd commit, non-repo).
+func countCommitsBetween(rootDir, from, to string) int {
+	if from == "" || to == "" || from == to || !isGitRepo(rootDir) {
+		return 0
+	}
+	cmd := exec.Command("git", "rev-list", "--count", from+".."+to)
+	cmd.Dir = rootDir
+	out, err := cmd.Output()
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// ChangedFilesSince returns repo-relative (slash-separated) paths that differ
+// between fromCommit and the current working tree — committed, staged, and
+// unstaged changes — plus untracked files. ok=false when the diff cannot be
+// computed (non-repo, rebased/GC'd commit, shallow clone), in which case
+// callers should fall back to a full rescan.
+func ChangedFilesSince(rootDir, fromCommit string) (files []string, ok bool) {
+	if fromCommit == "" || !isGitRepo(rootDir) {
+		return nil, false
+	}
+
+	cmd := exec.Command("git", "diff", "--name-only", fromCommit)
+	cmd.Dir = rootDir
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, false
+	}
+
+	seen := make(map[string]bool)
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" && !seen[line] {
+			seen[line] = true
+			files = append(files, line)
+		}
+	}
+
+	// Untracked files are invisible to `git diff` but belong in the map.
+	cmd = exec.Command("git", "ls-files", "--others", "--exclude-standard")
+	cmd.Dir = rootDir
+	if out, err := cmd.Output(); err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			if line = strings.TrimSpace(line); line != "" && !seen[line] {
+				seen[line] = true
+				files = append(files, line)
+			}
+		}
+	}
+
+	return files, true
 }
 
 // --- Git operations (via os/exec) ---

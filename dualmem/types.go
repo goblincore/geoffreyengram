@@ -963,6 +963,7 @@ type Store interface {
 
 	// Structural graph
 	InsertStructuralEdges(namespace string, edges []StructuralEdge) error
+	ReplaceStructuralEdgesForDirs(namespace string, relDirs []string, edges []StructuralEdge) error
 	GetStructuralNeighbors(namespace, path string, edgeTypes []string, limit int) ([]StructuralEdge, error)
 	GetStructuralEdgesForPath(namespace, path string, limit int) ([]StructuralEdge, error)
 
