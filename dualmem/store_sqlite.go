@@ -2554,6 +2554,57 @@ func (s *SQLiteStore) IncrementFactHits(id string) error {
 	return err
 }
 
+// ListAllFacts returns facts across every namespace, optionally including
+// superseded entries. Used by the markdown export, which must render the whole
+// live store regardless of namespace.
+func (s *SQLiteStore) ListAllFacts(includeSuperseded bool) ([]*Fact, error) {
+	where := ""
+	if !includeSuperseded {
+		where = " WHERE superseded_by IS NULL"
+	}
+	q := `
+		SELECT id, namespace, kind, text, files_json, source, git_commit, session_id, created_at, superseded_by, embedding, hits, last_hit_at
+		FROM facts` + where + " ORDER BY kind, namespace, created_at DESC"
+	rows, err := s.db.Query(q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Fact
+	for rows.Next() {
+		f, err := scanFact(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// RetireFact marks id as superseded by itself. A self-reference is the sentinel
+// for "retired with no successor": it is excluded from live queries
+// (superseded_by IS NULL) while remaining auditable. There is no hard delete.
+// Idempotent on already-retired facts. Returns an error if id does not exist.
+func (s *SQLiteStore) RetireFact(id string) error {
+	res, err := s.db.Exec(`UPDATE facts SET superseded_by = ? WHERE id = ? AND superseded_by IS NULL`, id, id)
+	if err != nil {
+		return fmt.Errorf("retire fact: update: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Either missing or already superseded. Distinguish for callers.
+		var existing string
+		err := s.db.QueryRow(`SELECT COALESCE(superseded_by, '') FROM facts WHERE id = ?`, id).Scan(&existing)
+		if err != nil {
+			return fmt.Errorf("retire fact: %q not found", id)
+		}
+		if existing != "" {
+			// Already superseded (including already-retired). Treat as success.
+			return nil
+		}
+	}
+	return nil
+}
+
 // --- Helpers ---
 
 func generateID() string {

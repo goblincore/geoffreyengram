@@ -976,7 +976,9 @@ type Store interface {
 	GetFact(id string) (*Fact, error)
 	ListFacts(namespace, kind string, includeSuperseded bool) ([]*Fact, error)
 	GetFactsByNamespaces(namespaces []string, kind string, includeSuperseded bool) ([]*Fact, error)
+	ListAllFacts(includeSuperseded bool) ([]*Fact, error)
 	SupersedeFact(oldID, newID string) error
+	RetireFact(id string) error
 	IncrementFactHits(id string) error
 
 	// Context snapshots & ratings
