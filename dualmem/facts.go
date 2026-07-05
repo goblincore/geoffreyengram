@@ -3,6 +3,7 @@ package dualmem
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -140,12 +141,27 @@ func (e *Engine) SupersedeFact(ctx context.Context, oldID string, newFact Fact) 
 // facts too, so a repo query can surface cross-repo preferences. Superseded
 // facts are never returned. Each returned fact has Similarity and FileMatch set.
 func (e *Engine) SearchFacts(ctx context.Context, query, namespace, kind string, limit int) ([]*Fact, error) {
+	var kinds []string
+	if kind != "" {
+		kinds = []string{kind}
+	}
+	return e.SearchFactsMulti(ctx, query, namespace, kinds, limit)
+}
+
+// SearchFactsMulti is the multi-kind variant of SearchFacts. kinds is an OR
+// filter: an empty slice means "any kind". It embeds the query once and scores
+// candidates from the namespace plus the user-global ("") namespace. Use this
+// for sugar tools like precedent (decision|deadend) so the query is embedded
+// exactly once.
+func (e *Engine) SearchFactsMulti(ctx context.Context, query, namespace string, kinds []string, limit int) ([]*Fact, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil, fmt.Errorf("dualmem: empty search query")
 	}
-	if kind != "" && !ValidFactKinds[kind] {
-		return nil, fmt.Errorf("dualmem: invalid fact kind %q", kind)
+	for _, k := range kinds {
+		if !ValidFactKinds[k] {
+			return nil, fmt.Errorf("dualmem: invalid fact kind %q", k)
+		}
 	}
 	if limit <= 0 {
 		limit = 10
@@ -163,12 +179,19 @@ func (e *Engine) SearchFacts(ctx context.Context, query, namespace, kind string,
 	}
 
 	e.mu.RLock()
-	candidates, err := e.store.GetFactsByNamespaces(namespaces, kind, false)
+	candidates, err := e.store.GetFactsByNamespacesKinds(namespaces, kinds, false)
 	e.mu.RUnlock()
 	if err != nil {
 		return nil, fmt.Errorf("dualmem: load facts for search: %w", err)
 	}
 
+	return rankFacts(candidates, qEmb, query, limit), nil
+}
+
+// rankFacts scores candidates by embedding similarity blended with file-path
+// match, then sorts (blend score, then LastHitAt, then CreatedAt) and trims to
+// limit. Pure function shared by SearchFacts/SearchFactsMulti.
+func rankFacts(candidates []*Fact, qEmb []float32, query string, limit int) []*Fact {
 	for _, f := range candidates {
 		f.Similarity = CosineSimilarity(qEmb, f.Vector)
 		f.FileMatch = factFileMatchScore(query, f.Files)
@@ -189,7 +212,7 @@ func (e *Engine) SearchFacts(ctx context.Context, query, namespace, kind string,
 	if len(candidates) > limit {
 		candidates = candidates[:limit]
 	}
-	return candidates, nil
+	return candidates
 }
 
 // factBlendScore combines embedding similarity with file-path match.
@@ -234,4 +257,52 @@ func validateFactInput(f *Fact) error {
 		return fmt.Errorf("dualmem: fact text must be non-empty")
 	}
 	return nil
+}
+
+// FactsForFile returns non-superseded facts in the namespace (plus user-global
+// "") whose files cite the given path. The path is matched literally and as a
+// basename, so callers may pass either a repo-relative path
+// ("dualmem/facts.go") or a bare filename ("facts.go"). Used by the reworked
+// file_context pull tool. No embedding is needed — this is a path lookup.
+func (e *Engine) FactsForFile(namespace, path string, limit int) ([]*Fact, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, fmt.Errorf("dualmem: empty file path")
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+
+	namespaces := []string{namespace, ""}
+	if namespace == "" {
+		namespaces = []string{""}
+	}
+	basename := filepath.Base(path)
+
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	facts, err := e.store.GetFactsByFile(namespaces, path, basename, limit)
+	if err != nil {
+		return nil, fmt.Errorf("dualmem: facts for file: %w", err)
+	}
+	return facts, nil
+}
+
+// RecordServed logs that the given facts were surfaced to a session via a pull
+// tool (surface names the call site, e.g. "recall", "precedent",
+// "file_context", or "pinned").
+//
+// STUB: this is the instrumentation seam required by task 6 of the dualmem v2
+// plan. Task 7 wires it to a served_facts log and the file-touch hit counter
+// (a fact earns a "hit" when the session later reads/edits a file it cites).
+// For now it is a validated no-op so every pull tool can record uniformly and
+// task 7 only has to fill in the body. Empty IDs are dropped; an empty
+// sessionID or empty slice is a silent no-op.
+func (e *Engine) RecordServed(sessionID string, factIDs []string, surface string) {
+	if sessionID == "" || len(factIDs) == 0 {
+		return
+	}
+	// Task 7 will persist (sessionID, factID, surface, timestamp) and wire the
+	// file-touch → hits++ signal from distill transcripts / hook logs.
+	_ = surface
 }

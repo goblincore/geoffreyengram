@@ -2554,6 +2554,114 @@ func (s *SQLiteStore) IncrementFactHits(id string) error {
 	return err
 }
 
+// GetFactsByNamespacesKinds is like GetFactsByNamespaces but matches any of
+// the given kinds (logical OR). An empty kinds slice means "any kind" (no kind
+// filter), matching the single-kind "" convention. Used by precedent
+// (decision|deadend) and other multi-kind pull tools.
+func (s *SQLiteStore) GetFactsByNamespacesKinds(namespaces, kinds []string, includeSuperseded bool) ([]*Fact, error) {
+	if len(namespaces) == 0 {
+		return nil, nil
+	}
+	deduped := dedupStrings(namespaces)
+	q, args := buildFactsQueryKinds(deduped, kinds, includeSuperseded)
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Fact
+	for rows.Next() {
+		f, err := scanFact(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// GetFactsByFile returns non-superseded facts in the given namespaces whose
+// files_json array cites path or its basename. path is matched literally and as
+// a basename so callers can pass either a repo-relative path ("dualmem/facts.go")
+// or a bare filename ("facts.go"). limit <= 0 means no limit.
+func (s *SQLiteStore) GetFactsByFile(namespaces []string, path, basename string, limit int) ([]*Fact, error) {
+	if len(namespaces) == 0 || (path == "" && basename == "") {
+		return nil, nil
+	}
+	deduped := dedupStrings(namespaces)
+
+	nsPh := make([]string, len(deduped))
+	args := make([]any, 0, len(deduped)+3)
+	for i, ns := range deduped {
+		nsPh[i] = "?"
+		args = append(args, ns)
+	}
+	where := fmt.Sprintf("namespace IN (%s)", strings.Join(nsPh, ","))
+	where += " AND superseded_by IS NULL"
+	where += " AND EXISTS (SELECT 1 FROM json_each(files_json) WHERE json_each.value IN (?, ?))"
+	args = append(args, path, basename)
+
+	q := `SELECT id, namespace, kind, text, files_json, source, git_commit, session_id, created_at, superseded_by, embedding, hits, last_hit_at
+		FROM facts WHERE ` + where + " ORDER BY created_at DESC"
+	if limit > 0 {
+		q += " LIMIT ?"
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Fact
+	for rows.Next() {
+		f, err := scanFact(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// buildFactsQueryKinds is the multi-kind generalization of buildFactsQuery. An
+// empty kinds slice applies no kind filter (any kind).
+func buildFactsQueryKinds(namespaces, kinds []string, includeSuperseded bool) (string, []any) {
+	nsPh := make([]string, len(namespaces))
+	args := make([]any, 0, len(namespaces)+len(kinds)+1)
+	for i, ns := range namespaces {
+		nsPh[i] = "?"
+		args = append(args, ns)
+	}
+	where := fmt.Sprintf("namespace IN (%s)", strings.Join(nsPh, ","))
+	if len(kinds) > 0 {
+		kindPh := make([]string, len(kinds))
+		for i, k := range kinds {
+			kindPh[i] = "?"
+			args = append(args, k)
+		}
+		where += fmt.Sprintf(" AND kind IN (%s)", strings.Join(kindPh, ","))
+	}
+	if !includeSuperseded {
+		where += " AND superseded_by IS NULL"
+	}
+	return `SELECT id, namespace, kind, text, files_json, source, git_commit, session_id, created_at, superseded_by, embedding, hits, last_hit_at
+		FROM facts WHERE ` + where + " ORDER BY created_at DESC", args
+}
+
+// dedupStrings returns ns with duplicates removed, preserving order.
+func dedupStrings(ns []string) []string {
+	seen := make(map[string]bool, len(ns))
+	out := ns[:0]
+	for _, s := range ns {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // --- Helpers ---
 
 func generateID() string {

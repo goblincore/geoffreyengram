@@ -24,6 +24,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -100,7 +101,7 @@ func main() {
 
 WHEN TO USE: Call this at the start of every session to load cross-session context. Pass a description of what you're about to work on as the query — this ranks memories by relevance to your task.
 
-The result includes a snapshot_id — save it and pass to rate_context at session end to improve future ranking.`,
+The result includes a snapshot_id for instrumentation.`,
 	}, getContextHandler(engine, namespace))
 
 	// --- Tool: search_codebase ---
@@ -133,13 +134,13 @@ WHEN TO USE: When you learn something non-obvious that would help a fresh sessio
 		Description: `Get the structural code map of the project. Returns system overview and per-module details (types, entry points, imports). Useful for understanding project architecture at a glance.`,
 	}, getCodemapHandler(engine, namespace))
 
-	// --- Tool: file_context ---
+	// --- Tool: file_context (dualmem v2 rework) ---
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "file_context",
-		Description: `Get memories associated with a specific file. Returns warnings, decisions, and context notes that previous sessions recorded about this file.
+		Description: `Pull everything the memory system knows about a file path: durable facts citing it (with provenance), existing file annotations (warnings, decisions, checkpoints, knowledge docs, workflow hints), and git co-change neighbors (files that change together with this one, derived from history).
 
-WHEN TO USE: Before modifying a file — check if there are warnings or constraints. Pay special attention to ⚠ Warning entries, which flag code that should NOT be changed.`,
-	}, fileContextHandler(engine, namespace))
+WHEN TO USE: Before modifying a file — check for warnings/constraints and find related context. Pay special attention to ⚠ Warning entries, which flag code that should NOT be changed.`,
+	}, fileContextHandler(engine, namespace, rootDir, sessionID))
 
 	// --- Tool: file_index ---
 	mcp.AddTool(server, &mcp.Tool{
@@ -169,13 +170,21 @@ WHEN TO USE: At session end (wrap-up). Summarize what you learned, decided, or d
 		Description: `Show what changed in the codebase since the last session. Returns added, modified, and deleted files based on git history. Useful at session start to understand recent changes.`,
 	}, getDiffHandler(engine, namespace, rootDir))
 
-	// --- Tool: rate_context ---
+	// --- Tool: recall (dualmem v2 pull tool) ---
 	mcp.AddTool(server, &mcp.Tool{
-		Name: "rate_context",
-		Description: `Rate the quality of context items from get_context. Pass the snapshot_id from get_context and rate individual items: 0=irrelevant, 1=helpful, 2=critical. This trains the re-ranker to improve future context assembly.
+		Name: "recall",
+		Description: `Recall durable facts (decisions, dead-ends, gotchas, preferences) by semantic similarity to a query. Returns self-contained facts with provenance: source (verified/inferred/doc/migrated), short commit SHA, date, and the files they cite.
 
-WHEN TO USE: At session end, rate which memories were actually useful during the session.`,
-	}, rateContextHandler(engine, namespace))
+WHEN TO USE: At a decision point or before exploring a feature — pull precise context instead of relying on the pinned session block. Pass the concept, approach, or file you're reasoning about. Optional kind narrows to one of: decision, deadend, gotcha, preference, reference.`,
+	}, recallHandler(engine, namespace, sessionID))
+
+	// --- Tool: precedent (dualmem v2 pull tool) ---
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "precedent",
+		Description: `Did we already try, decide, or reject this approach? Sugar over recall restricted to decision + deadend facts — surfaces prior decisions and the dead-ends we already hit so you don't re-litigate or re-explore.
+
+WHEN TO USE: Before committing to an approach. If this returns a match, read it first — it may already settle the question or warn you off a path that failed.`,
+	}, precedentHandler(engine, namespace, sessionID))
 
 	// --- Tool: get_status ---
 	mcp.AddTool(server, &mcp.Tool{
@@ -227,8 +236,7 @@ WHEN TO USE: At session end, rate which memories were actually useful during the
 						Text: `End of session. Please:
 1. Summarize what you learned, decided, or discovered this session
 2. Call distill_session with that summary to extract and persist memories
-3. If there's in-progress work, call checkpoint with action="save" to hand off to the next session
-4. If you have the snapshot_id from get_context, call rate_context to rate which memories were useful`,
+3. If there's in-progress work, call checkpoint with action="save" to hand off to the next session`,
 					},
 				},
 			},
@@ -272,9 +280,20 @@ type saveMemoryInput struct {
 	Salience float64 `json:"salience,omitempty" jsonschema:"Importance score 0.0-1.0 (default 0.7)"`
 }
 
+type recallInput struct {
+	Query string `json:"query" jsonschema:"Concept, approach, or file you are reasoning about"`
+	Kind  string `json:"kind,omitempty" jsonschema:"Optional fact kind filter: decision, deadend, gotcha, preference, reference"`
+	Limit int    `json:"limit,omitempty" jsonschema:"Max facts to return (default 5)"`
+}
+
+type precedentInput struct {
+	Approach string `json:"approach" jsonschema:"The approach or decision you are considering — did we already try/decide/reject this?"`
+	Limit    int    `json:"limit,omitempty" jsonschema:"Max facts to return (default 5)"`
+}
+
 type fileContextInput struct {
-	Filename string `json:"filename" jsonschema:"File name or path to look up memories for"`
-	Limit    int    `json:"limit,omitempty" jsonschema:"Max memories to return (default 5)"`
+	Path  string `json:"path" jsonschema:"File name or path to look up context for (basename or repo-relative path)"`
+	Limit int    `json:"limit,omitempty" jsonschema:"Max facts/annotations to return per section (default 5)"`
 }
 
 type fileIndexInput struct{}
@@ -296,11 +315,6 @@ type distillSessionInput struct {
 }
 
 type getDiffInput struct{}
-
-type rateContextInput struct {
-	SnapshotID string         `json:"snapshot_id" jsonschema:"Snapshot ID from get_context response"`
-	Ratings    map[string]int `json:"ratings" jsonschema:"Map of memory_id to rating (0=irrelevant, 1=helpful, 2=critical)"`
-}
 
 type getStatusInput struct{}
 
@@ -482,45 +496,123 @@ func saveMemoryHandler(engine *dualmem.Engine, ns string) func(context.Context, 
 	}
 }
 
-func fileContextHandler(engine *dualmem.Engine, ns string) func(context.Context, *mcp.CallToolRequest, fileContextInput) (*mcp.CallToolResult, any, error) {
+func fileContextHandler(engine *dualmem.Engine, ns, rootDir, sessionID string) func(context.Context, *mcp.CallToolRequest, fileContextInput) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, input fileContextInput) (*mcp.CallToolResult, any, error) {
-		if input.Filename == "" {
-			return nil, nil, fmt.Errorf("filename is required")
+		if input.Path == "" {
+			return nil, nil, fmt.Errorf("path is required")
 		}
 		limit := input.Limit
 		if limit <= 0 {
 			limit = 5
 		}
 
-		// Use basename for lookup (matches how memories are stored)
-		basename := filepath.Base(input.Filename)
-		memories, err := engine.FileContext(ctx, ns, basename, limit)
+		// git co-change neighbors are derived purely from history (git_cochange.go),
+		// never from the memory-based cochange layer slated for deletion. Best-effort:
+		// any error or empty graph just omits the section.
+		neighbors := gitCoChangeNeighbors(rootDir, input.Path, 5)
+
+		// Existing file annotations: detail memories, knowledge docs, checkpoints,
+		// workflow hints. None of these touch the entity graph or memory cochange.
+		annotations := engine.FileAnnotations(ctx, ns, []string{input.Path}, limit)
+
+		// Durable facts citing this path (v2 primary store).
+		facts, err := engine.FactsForFile(ns, input.Path, limit)
 		if err != nil {
-			return nil, nil, fmt.Errorf("file context lookup failed: %w", err)
+			return nil, nil, fmt.Errorf("file facts lookup failed: %w", err)
 		}
 
-		if len(memories) == 0 {
-			return textResult(fmt.Sprintf("No memories associated with %s.", basename)), nil, nil
+		// Record served fact IDs for task 7 instrumentation. Only facts are facts —
+		// annotations and co-change neighbors are not durable-fact IDs.
+		engine.RecordServed(sessionID, servedFactIDs(facts), "file_context")
+
+		if len(facts) == 0 && len(annotations) == 0 && len(neighbors) == 0 {
+			return textResult(fmt.Sprintf("No context for %s.", input.Path)), nil, nil
 		}
 
-		var lines []string
-		for _, m := range memories {
-			icon := ""
-			switch m.Type {
-			case "warning":
-				icon = "⚠ "
-			case "decision":
-				icon = "★ "
-			case "continuity":
-				icon = "↻ "
-			}
-			line := fmt.Sprintf("%s%s", icon, m.Text)
-			if len(m.Files) > 0 {
-				line += fmt.Sprintf("\n  Files: %s", strings.Join(m.Files, ", "))
-			}
-			lines = append(lines, line)
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("Context for %s:\n", input.Path))
+
+		if len(facts) > 0 {
+			sb.WriteString("\nFacts:\n")
+			sb.WriteString(formatFacts(facts))
 		}
-		return textResult(fmt.Sprintf("Memories for %s:\n\n%s", basename, strings.Join(lines, "\n\n"))), nil, nil
+
+		if len(annotations) > 0 {
+			sb.WriteString("\nAnnotations:\n")
+			var lines []string
+			for _, a := range annotations {
+				icon := annotationIcon(a.Type)
+				lines = append(lines, fmt.Sprintf("%s[%s] %s", icon, a.Type, a.Text))
+			}
+			sb.WriteString(strings.Join(lines, "\n"))
+		}
+
+		if len(neighbors) > 0 {
+			sb.WriteString("\nCo-change neighbors (git-derived):\n")
+			// Stable ordering by descending weight.
+			type kv struct {
+				path   string
+				weight float64
+			}
+			sorted := make([]kv, 0, len(neighbors))
+			for p, w := range neighbors {
+				sorted = append(sorted, kv{p, w})
+			}
+			sort.Slice(sorted, func(i, j int) bool { return sorted[i].weight > sorted[j].weight })
+			for _, n := range sorted {
+				sb.WriteString(fmt.Sprintf("  %s (co-change %.2f)\n", n.path, n.weight))
+			}
+		}
+
+		return textResult(strings.TrimRight(sb.String(), "\n")), nil, nil
+	}
+}
+
+func recallHandler(engine *dualmem.Engine, ns, sessionID string) func(context.Context, *mcp.CallToolRequest, recallInput) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input recallInput) (*mcp.CallToolResult, any, error) {
+		if input.Query == "" {
+			return nil, nil, fmt.Errorf("query is required")
+		}
+		limit := input.Limit
+		if limit <= 0 {
+			limit = 5
+		}
+
+		facts, err := engine.SearchFacts(ctx, input.Query, ns, input.Kind, limit)
+		if err != nil {
+			return nil, nil, fmt.Errorf("recall failed: %w", err)
+		}
+
+		engine.RecordServed(sessionID, servedFactIDs(facts), "recall")
+
+		if len(facts) == 0 {
+			return textResult("No matching facts found."), nil, nil
+		}
+		return textResult(fmt.Sprintf("Recalled %d fact(s):\n\n%s", len(facts), formatFacts(facts))), nil, nil
+	}
+}
+
+func precedentHandler(engine *dualmem.Engine, ns, sessionID string) func(context.Context, *mcp.CallToolRequest, precedentInput) (*mcp.CallToolResult, any, error) {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input precedentInput) (*mcp.CallToolResult, any, error) {
+		if input.Approach == "" {
+			return nil, nil, fmt.Errorf("approach is required")
+		}
+		limit := input.Limit
+		if limit <= 0 {
+			limit = 5
+		}
+
+		facts, err := engine.SearchFactsMulti(ctx, input.Approach, ns, []string{dualmem.FactKindDecision, dualmem.FactKindDeadEnd}, limit)
+		if err != nil {
+			return nil, nil, fmt.Errorf("precedent search failed: %w", err)
+		}
+
+		engine.RecordServed(sessionID, servedFactIDs(facts), "precedent")
+
+		if len(facts) == 0 {
+			return textResult("No prior decision or dead-end found for this approach."), nil, nil
+		}
+		return textResult(fmt.Sprintf("%d prior decision(s)/dead-end(s):\n\n%s", len(facts), formatFacts(facts))), nil, nil
 	}
 }
 
@@ -658,23 +750,6 @@ func getDiffHandler(engine *dualmem.Engine, ns, rootDir string) func(context.Con
 	}
 }
 
-func rateContextHandler(engine *dualmem.Engine, ns string) func(context.Context, *mcp.CallToolRequest, rateContextInput) (*mcp.CallToolResult, any, error) {
-	return func(ctx context.Context, req *mcp.CallToolRequest, input rateContextInput) (*mcp.CallToolResult, any, error) {
-		if input.SnapshotID == "" {
-			return nil, nil, fmt.Errorf("snapshot_id is required")
-		}
-		if len(input.Ratings) == 0 {
-			return nil, nil, fmt.Errorf("ratings map is required")
-		}
-
-		if err := engine.SubmitRatings(ns, input.SnapshotID, "late", input.Ratings); err != nil {
-			return nil, nil, fmt.Errorf("submit ratings: %w", err)
-		}
-
-		return textResult(fmt.Sprintf("Rated %d items. Thank you — this improves future context ranking.", len(input.Ratings))), nil, nil
-	}
-}
-
 func getStatusHandler(engine *dualmem.Engine, ns string) func(context.Context, *mcp.CallToolRequest, getStatusInput) (*mcp.CallToolResult, any, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, input getStatusInput) (*mcp.CallToolResult, any, error) {
 		store := engine.GetStore()
@@ -761,4 +836,91 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// formatFacts renders durable facts for an MCP tool result. Each fact shows its
+// kind, text, provenance (source, short commit SHA, date), and a truncated file
+// list. Long file lists are capped ("+N more") to match the existing handler
+// truncation convention.
+func formatFacts(facts []*dualmem.Fact) string {
+	var lines []string
+	for _, f := range facts {
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("[%s] %s", f.Kind, f.Text))
+
+		// Provenance line: source, short sha, date.
+		dateStr := ""
+		if !f.CreatedAt.IsZero() {
+			dateStr = f.CreatedAt.Format("2006-01-02")
+		}
+		short := f.GitCommit
+		if len(short) > 7 {
+			short = short[:7]
+		}
+		prov := fmt.Sprintf("source=%s", f.Source)
+		if short != "" {
+			prov += " · commit=" + short
+		}
+		if dateStr != "" {
+			prov += " · " + dateStr
+		}
+		sb.WriteString("\n  " + prov)
+
+		if len(f.Files) > 0 {
+			sb.WriteString("\n  Files: " + formatFileList(f.Files, 5))
+		}
+		lines = append(lines, sb.String())
+	}
+	return strings.Join(lines, "\n\n")
+}
+
+// formatFileList joins files with commas, capping the count and appending a
+// "+N more" suffix when truncated. Mirrors the CLI/MCP file-display cap.
+func formatFileList(files []string, cap int) string {
+	if len(files) <= cap {
+		return strings.Join(files, ", ")
+	}
+	return strings.Join(files[:cap], ", ") + fmt.Sprintf(" (+%d more)", len(files)-cap)
+}
+
+// servedFactIDs collects the IDs of a fact slice for RecordServed.
+func servedFactIDs(facts []*dualmem.Fact) []string {
+	ids := make([]string, 0, len(facts))
+	for _, f := range facts {
+		if f != nil && f.ID != "" {
+			ids = append(ids, f.ID)
+		}
+	}
+	return ids
+}
+
+// annotationIcon maps an annotation type to its display icon.
+func annotationIcon(t string) string {
+	switch t {
+	case "warning":
+		return "⚠ "
+	case "decision":
+		return "★ "
+	case "continuity", "checkpoint":
+		return "↻ "
+	case "knowledge":
+		return "📖 "
+	case "workflow":
+		return "📎 "
+	}
+	return ""
+}
+
+// gitCoChangeNeighbors returns the top-N files that git-history-co-change with
+// the given path, derived purely from git_cochange.go (never the memory-based
+// cochange layer). Best-effort: any error or empty graph returns nil.
+func gitCoChangeNeighbors(rootDir, path string, topN int) map[string]float64 {
+	if rootDir == "" || path == "" {
+		return nil
+	}
+	edges, err := dualmem.BuildGitCoChangeGraph(rootDir, 3, 50)
+	if err != nil || len(edges) == 0 {
+		return nil
+	}
+	return dualmem.CoChangeNeighbors(edges, []string{path}, topN)
 }
