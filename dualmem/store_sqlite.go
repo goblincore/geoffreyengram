@@ -358,6 +358,35 @@ func (s *SQLiteStore) migrate() error {
 		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (11)`)
 	}
 
+	if version < 12 {
+		// dualmem v2 durable facts. Pure addition: does not touch any v1 table.
+		// See docs/superpowers/plans/2026-07-04-dualmem-v2.md (P2).
+		if _, err := s.db.Exec(`
+			CREATE TABLE IF NOT EXISTS facts (
+				id             TEXT PRIMARY KEY,
+				namespace      TEXT NOT NULL,
+				kind           TEXT NOT NULL,
+				text           TEXT NOT NULL,
+				files_json     TEXT NOT NULL DEFAULT '[]',
+				source         TEXT NOT NULL,
+				git_commit     TEXT NOT NULL DEFAULT '',
+				session_id     TEXT NOT NULL DEFAULT '',
+				created_at     INTEGER NOT NULL,
+				superseded_by TEXT REFERENCES facts(id),
+				embedding      BLOB,
+				hits           INTEGER NOT NULL DEFAULT 0,
+				last_hit_at    INTEGER
+			);
+			CREATE INDEX IF NOT EXISTS idx_facts_ns_kind ON facts(namespace, kind);
+			CREATE INDEX IF NOT EXISTS idx_facts_ns ON facts(namespace);
+			CREATE INDEX IF NOT EXISTS idx_facts_kind ON facts(kind);
+			CREATE INDEX IF NOT EXISTS idx_facts_superseded ON facts(superseded_by);
+		`); err != nil {
+			return fmt.Errorf("migrate v12 (facts): %w", err)
+		}
+		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (12)`)
+	}
+
 	return nil
 }
 
@@ -2355,6 +2384,225 @@ func (s *SQLiteStore) GetSketchRawCount(userID string) (int, error) {
 	var count int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM sketch_raw WHERE user_id = ?`, userID).Scan(&count)
 	return count, err
+}
+
+// --- Facts (v2 durable facts) ---
+
+// scanFact decodes one facts row into a *Fact, including its embedding BLOB.
+func scanFact(row interface{ Scan(dest ...any) error }) (*Fact, error) {
+	var (
+		f                Fact
+		filesJSON        string
+		embBlob          []byte
+		createdAt        int64
+		supersededBy     sql.NullString
+		lastHitAt        sql.NullInt64
+	)
+	if err := row.Scan(
+		&f.ID, &f.Namespace, &f.Kind, &f.Text, &filesJSON,
+		&f.Source, &f.GitCommit, &f.SessionID, &createdAt,
+		&supersededBy, &embBlob, &f.Hits, &lastHitAt,
+	); err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal([]byte(filesJSON), &f.Files)
+	if f.Files == nil {
+		f.Files = []string{}
+	}
+	f.CreatedAt = time.Unix(0, createdAt).UTC()
+	if supersededBy.Valid {
+		f.SupersededBy = supersededBy.String
+	}
+	if lastHitAt.Valid {
+		f.LastHitAt = time.Unix(0, lastHitAt.Int64).UTC()
+	}
+	if len(embBlob) > 0 {
+		f.Vector = decodeVector(embBlob)
+	}
+	return &f, nil
+}
+
+func (s *SQLiteStore) InsertFact(f *Fact, embedding []float32) error {
+	filesJSON, err := json.Marshal(f.Files)
+	if err != nil {
+		filesJSON = []byte("[]")
+	}
+	_, err = s.db.Exec(`
+		INSERT INTO facts (id, namespace, kind, text, files_json, source, git_commit, session_id, created_at, superseded_by, embedding, hits, last_hit_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 0, NULL)`,
+		f.ID, f.Namespace, f.Kind, f.Text, string(filesJSON),
+		f.Source, f.GitCommit, f.SessionID, f.CreatedAt.UnixNano(),
+		encodeVector(embedding),
+	)
+	return err
+}
+
+func (s *SQLiteStore) GetFact(id string) (*Fact, error) {
+	row := s.db.QueryRow(`
+		SELECT id, namespace, kind, text, files_json, source, git_commit, session_id, created_at, superseded_by, embedding, hits, last_hit_at
+		FROM facts WHERE id = ?`, id)
+	f, err := scanFact(row)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// buildFactsQuery constructs the SELECT + WHERE clause for fact queries.
+// namespaces is a non-empty list; kind is optional ("" = any). When
+// includeSuperseded is false, only facts with NULL superseded_by are returned.
+func buildFactsQuery(namespaces []string, kind string, includeSuperseded bool) (string, []any) {
+	var (
+		placeholders []string
+		args         []any
+	)
+	for _, ns := range namespaces {
+		placeholders = append(placeholders, "?")
+		args = append(args, ns)
+	}
+	where := fmt.Sprintf("namespace IN (%s)", strings.Join(placeholders, ","))
+	if kind != "" {
+		where += " AND kind = ?"
+		args = append(args, kind)
+	}
+	if !includeSuperseded {
+		where += " AND superseded_by IS NULL"
+	}
+	return `
+		SELECT id, namespace, kind, text, files_json, source, git_commit, session_id, created_at, superseded_by, embedding, hits, last_hit_at
+		FROM facts WHERE ` + where + " ORDER BY created_at DESC", args
+}
+
+func (s *SQLiteStore) ListFacts(namespace, kind string, includeSuperseded bool) ([]*Fact, error) {
+	q, args := buildFactsQuery([]string{namespace}, kind, includeSuperseded)
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Fact
+	for rows.Next() {
+		f, err := scanFact(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) GetFactsByNamespaces(namespaces []string, kind string, includeSuperseded bool) ([]*Fact, error) {
+	if len(namespaces) == 0 {
+		return nil, nil
+	}
+	// Dedup namespaces while preserving order.
+	seen := make(map[string]bool, len(namespaces))
+	deduped := namespaces[:0]
+	for _, ns := range namespaces {
+		if !seen[ns] {
+			seen[ns] = true
+			deduped = append(deduped, ns)
+		}
+	}
+	q, args := buildFactsQuery(deduped, kind, includeSuperseded)
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Fact
+	for rows.Next() {
+		f, err := scanFact(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// SupersedeFact marks oldID as superseded by newID in a single transaction.
+// This keeps any existing revision chain walkable: nodes that pointed to oldID
+// still reach oldID, and oldID now reaches newID.
+func (s *SQLiteStore) SupersedeFact(oldID, newID string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("supersede fact: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE facts SET superseded_by = ? WHERE id = ? AND superseded_by IS NULL`, newID, oldID)
+	if err != nil {
+		return fmt.Errorf("supersede fact: update: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Either oldID doesn't exist or it's already superseded. Distinguish for callers.
+		var existing string
+		err := tx.QueryRow(`SELECT COALESCE(superseded_by, '') FROM facts WHERE id = ?`, oldID).Scan(&existing)
+		if err != nil {
+			return fmt.Errorf("supersede fact: %q not found", oldID)
+		}
+		if existing != "" {
+			return fmt.Errorf("supersede fact: %q already superseded by %q", oldID, existing)
+		}
+	}
+	return tx.Commit()
+}
+
+// IncrementFactHits bumps the passive usefulness counter for a served fact.
+func (s *SQLiteStore) IncrementFactHits(id string) error {
+	_, err := s.db.Exec(`UPDATE facts SET hits = hits + 1, last_hit_at = ? WHERE id = ?`, time.Now().UnixNano(), id)
+	return err
+}
+
+// ListAllFacts returns facts across every namespace, optionally including
+// superseded entries. Used by the markdown export, which must render the whole
+// live store regardless of namespace.
+func (s *SQLiteStore) ListAllFacts(includeSuperseded bool) ([]*Fact, error) {
+	where := ""
+	if !includeSuperseded {
+		where = " WHERE superseded_by IS NULL"
+	}
+	q := `
+		SELECT id, namespace, kind, text, files_json, source, git_commit, session_id, created_at, superseded_by, embedding, hits, last_hit_at
+		FROM facts` + where + " ORDER BY kind, namespace, created_at DESC"
+	rows, err := s.db.Query(q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Fact
+	for rows.Next() {
+		f, err := scanFact(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// RetireFact marks id as superseded by itself. A self-reference is the sentinel
+// for "retired with no successor": it is excluded from live queries
+// (superseded_by IS NULL) while remaining auditable. There is no hard delete.
+// Idempotent on already-retired facts. Returns an error if id does not exist.
+func (s *SQLiteStore) RetireFact(id string) error {
+	res, err := s.db.Exec(`UPDATE facts SET superseded_by = ? WHERE id = ? AND superseded_by IS NULL`, id, id)
+	if err != nil {
+		return fmt.Errorf("retire fact: update: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Either missing or already superseded. Distinguish for callers.
+		var existing string
+		err := s.db.QueryRow(`SELECT COALESCE(superseded_by, '') FROM facts WHERE id = ?`, id).Scan(&existing)
+		if err != nil {
+			return fmt.Errorf("retire fact: %q not found", id)
+		}
+		if existing != "" {
+			// Already superseded (including already-retired). Treat as success.
+			return nil
+		}
+	}
+	return nil
 }
 
 // --- Helpers ---

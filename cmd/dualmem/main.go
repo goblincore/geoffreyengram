@@ -277,6 +277,8 @@ func main() {
 		cmdCoChange(cfg)
 	case "entities":
 		cmdEntities(cfg)
+	case "facts":
+		cmdFacts(cfg)
 	case "file-context":
 		cmdFileContext(cfg)
 	case "file-index":
@@ -335,6 +337,7 @@ Commands:
   distill     Extract memories from a session transcript
   cochange    Query the file co-change graph (which files change together)
   entities    Query the entity graph (stats, search, show, top)
+  facts       Export/import durable facts as editable markdown (audit + correction mirror)
   docs        List/show/delete/export knowledge docs
   file-context  Get memories associated with a specific file (warnings, decisions, maps)
   file-index    Generate file index for Read hook fast-path filtering
@@ -2268,6 +2271,138 @@ func cmdEntities(cfg CLIConfig) {
 		os.Exit(1)
 	}
 }
+
+// cmdFacts implements `dualmem facts export` and `dualmem facts import`, the
+// markdown mirror for durable facts (dualmem v2, principle 5). Export renders
+// live facts grouped by kind then namespace with provenance + ID anchors;
+// import reconciles an edited file back into the store (dry-run by default,
+// --commit applies).
+func cmdFacts(cfg CLIConfig) {
+	subArgs := os.Args[2:]
+	subCmd := ""
+	if len(subArgs) > 0 && subArgs[0] != "-" && !strings.HasPrefix(subArgs[0], "--") {
+		subCmd = subArgs[0]
+		subArgs = subArgs[1:]
+	}
+
+	switch subCmd {
+	case "export":
+		fs := flag.NewFlagSet("facts export", flag.ExitOnError)
+		out := fs.String("out", "", "Write to <path> instead of stdout")
+		fs.Parse(subArgs)
+
+		engine, err := newEngine(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		defer engine.Close()
+
+		md, err := engine.ExportFacts()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if *out != "" {
+			if err := os.WriteFile(*out, []byte(md), 0o644); err != nil {
+				fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", *out, err)
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "Exported facts to %s\n", *out)
+		} else {
+			fmt.Print(md)
+		}
+
+	case "import":
+		fs := flag.NewFlagSet("facts import", flag.ExitOnError)
+		commit := fs.Bool("commit", false, "Apply changes (default is dry-run)")
+		fs.Parse(subArgs)
+
+		if fs.NArg() < 1 {
+			fmt.Fprintln(os.Stderr, "Usage: dualmem facts import <path> [--commit]")
+			os.Exit(1)
+		}
+		path := fs.Arg(0)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", path, err)
+			os.Exit(1)
+		}
+
+		engine, err := newEngine(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		defer engine.Close()
+
+		res, err := engine.ImportFacts(context.Background(), string(data), *commit)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		mode := "dry-run"
+		if *commit {
+			mode = "committed"
+		}
+		fmt.Printf("Facts import (%s): %s\n", mode, res.Summary())
+		if len(res.Edited) > 0 {
+			fmt.Println("  edited:")
+			for _, it := range res.Edited {
+				fmt.Printf("    [%s] %s\n", it.ID, truncate(it.Text, 80))
+			}
+		}
+		if len(res.Retired) > 0 {
+			fmt.Println("  retired:")
+			for _, it := range res.Retired {
+				fmt.Printf("    [%s] %s\n", it.ID, truncate(it.Text, 80))
+			}
+		}
+		if len(res.Added) > 0 {
+			fmt.Println("  added:")
+			for _, it := range res.Added {
+				id := it.ID
+				if id == "" {
+					id = "(pending)"
+				}
+				fmt.Printf("    [%s] %s\n", id, truncate(it.Text, 80))
+			}
+		}
+		if len(res.Unchanged) > 0 {
+			fmt.Printf("  unchanged: %d\n", len(res.Unchanged))
+		}
+		if !*commit && (len(res.Edited) > 0 || len(res.Retired) > 0 || len(res.Added) > 0) {
+			fmt.Println("  (dry-run; pass --commit to apply)")
+		}
+
+	case "", "help", "-h", "--help":
+		fmt.Fprint(os.Stderr, `dualmem facts — markdown mirror of durable facts
+
+Usage:
+  dualmem facts export [--out <path>]     Render live facts as grouped markdown
+  dualmem facts import <path> [--commit]  Reconcile an edited mirror (dry-run by default)
+
+Export groups facts by kind, then namespace. Each bullet has a provenance
+suffix (source, git short-sha, YYYY-MM-DD) and a stable ID anchor:
+  - Chose SQLite. <!-- fact:ID --> (verified, abc1234, 2026-07-04)
+
+Import reconciles edits: unchanged bullets are no-ops; edited text supersedes
+the old fact (source preserved); removed bullets retire a fact (superseded,
+no successor); new bullets (no ID comment) insert as source=verified.
+`)
+		if subCmd == "" {
+			os.Exit(1)
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown facts subcommand: %s\nUsage: dualmem facts [export|import]\n", subCmd)
+		os.Exit(1)
+	}
+}
+
+// truncate clips s to n runes with an ellipsis, for compact CLI summaries.
+// (Defined earlier in this file; re-declared here would conflict.)
 
 func cmdCoChange(cfg CLIConfig) {
 	fs := flag.NewFlagSet("cochange", flag.ExitOnError)

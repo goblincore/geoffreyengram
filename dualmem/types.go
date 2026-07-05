@@ -971,6 +971,16 @@ type Store interface {
 	GetWorkflowHintsForFiles(userID string, filenames []string) ([]WorkflowHint, error)
 	GetWorkflowHintsForTickets(userID string, tickets []string) ([]WorkflowHint, error)
 
+	// Facts (v2 durable facts). Pure addition; see docs/superpowers/plans/2026-07-04-dualmem-v2.md (P2).
+	InsertFact(f *Fact, embedding []float32) error
+	GetFact(id string) (*Fact, error)
+	ListFacts(namespace, kind string, includeSuperseded bool) ([]*Fact, error)
+	GetFactsByNamespaces(namespaces []string, kind string, includeSuperseded bool) ([]*Fact, error)
+	ListAllFacts(includeSuperseded bool) ([]*Fact, error)
+	SupersedeFact(oldID, newID string) error
+	RetireFact(id string) error
+	IncrementFactHits(id string) error
+
 	// Context snapshots & ratings
 	InsertSnapshot(id, namespace, query string, queryEmbedding []byte, sourceIDsJSON string, tokensUsed int) error
 	GetSnapshot(id string) (*storedSnapshot, error)
@@ -1032,6 +1042,68 @@ type detailWithVector struct {
 	DetailMemory
 	Vector []float32
 	UserID string
+}
+
+// FactKind enumerates the durable-fact taxonomy (dualmem v2).
+const (
+	FactKindDecision  = "decision"
+	FactKindDeadEnd   = "deadend"
+	FactKindGotcha    = "gotcha"
+	FactKindPreference = "preference"
+	FactKindReference = "reference"
+)
+
+// ValidFactKinds is the complete set of accepted Fact.Kind values.
+var ValidFactKinds = map[string]bool{
+	FactKindDecision:  true,
+	FactKindDeadEnd:   true,
+	FactKindGotcha:    true,
+	FactKindPreference: true,
+	FactKindReference: true,
+}
+
+// FactSource labels how a fact's claim was established.
+const (
+	FactSourceVerified = "verified" // earned by doing (task work, dead ends, confirmed decisions)
+	FactSourceInferred = "inferred" // synthesized from scanning/code/docs
+	FactSourceDoc      = "doc"      // ingested from a written source (AGENTS.md, README)
+	FactSourceMigrated = "migrated" // carried over from the v1 store by migrate-v2
+)
+
+// ValidFactSources is the complete set of accepted Fact.Source values.
+var ValidFactSources = map[string]bool{
+	FactSourceVerified: true,
+	FactSourceInferred: true,
+	FactSourceDoc:      true,
+	FactSourceMigrated: true,
+}
+
+// Fact is a durable, provenance-stamped piece of knowledge — the primary write
+// target of dualmem v2. See docs/superpowers/plans/2026-07-04-dualmem-v2.md (P2).
+//
+// Lifecycle is supersede-only: a stale/wrong fact is marked superseded_by a
+// newer fact rather than decayed or deleted, so the chain of revision stays
+// auditable.
+type Fact struct {
+	ID           string
+	Namespace    string // repo scope; "" = user-global (preferences)
+	Kind         string // decision | deadend | gotcha | preference | reference
+	Text         string
+	Files        []string
+	Source       string // verified | inferred | doc | migrated
+	GitCommit    string
+	SessionID    string
+	CreatedAt    time.Time
+	SupersededBy string
+	Hits         int
+	LastHitAt    time.Time
+
+	// Populated on read/search. Vector is the single v2 embedding for the fact;
+	// not part of the human-readable markdown mirror. Similarity/FileMatch are
+	// filled in by SearchFacts for ranking.
+	Vector     []float32
+	Similarity float64
+	FileMatch  float64
 }
 
 type sketchRaw struct {
