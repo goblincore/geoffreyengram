@@ -290,8 +290,6 @@ func main() {
 		cmdPrecedent(cfg)
 	case "rate":
 		cmdRate(cfg)
-	case "facts":
-		cmdFacts(cfg)
 	case "train":
 		cmdTrain(cfg)
 	case "show":
@@ -2191,21 +2189,6 @@ func cmdDocs(cfg CLIConfig) {
 // cmdFacts is the durable-facts CLI (dualmem v2). Today it exposes `stats` —
 // the served/hit scorecard that replaces the dead rate_context loop. Future
 // subcommands (export/import from task 3) live in their own worktree branches.
-func cmdFacts(cfg CLIConfig) {
-	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: dualmem facts <stats> [flags]")
-		os.Exit(1)
-	}
-	sub := os.Args[2]
-	switch sub {
-	case "stats":
-		cmdFactsStats(cfg)
-	default:
-		fmt.Fprintf(os.Stderr, "unknown 'facts' subcommand: %s (try 'stats')\n", sub)
-		os.Exit(1)
-	}
-}
-
 // cmdFactsStats runs `dualmem facts stats`. Renders the served/hit scorecard:
 // per-kind counts, overall roll-up, dead facts (served often, never hit), and
 // staleness candidates (git_commit far behind HEAD).
@@ -2510,6 +2493,8 @@ func cmdFacts(cfg CLIConfig) {
 	}
 
 	switch subCmd {
+	case "stats":
+		cmdFactsStats(cfg)
 	case "export":
 		fs := flag.NewFlagSet("facts export", flag.ExitOnError)
 		out := fs.String("out", "", "Write to <path> instead of stdout")
@@ -2620,7 +2605,7 @@ no successor); new bullets (no ID comment) insert as source=verified.
 		}
 
 	default:
-		fmt.Fprintf(os.Stderr, "Unknown facts subcommand: %s\nUsage: dualmem facts [export|import]\n", subCmd)
+		fmt.Fprintf(os.Stderr, "Unknown facts subcommand: %s\nUsage: dualmem facts [export|import|stats]\n", subCmd)
 		os.Exit(1)
 	}
 }
