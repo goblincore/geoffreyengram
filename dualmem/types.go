@@ -241,6 +241,12 @@ type ContextBlock struct {
 	Sources    []SourceRef // For attribution/debugging
 	Intent     Intent      // Detected or explicit intent used for assembly
 	SnapshotID string      // ID of persisted context snapshot (for retrospective rating)
+
+	// ServedFactIDs records every durable fact (v2) whose ID was rendered into
+	// Text, in emit order. Instrumentation (file-touch / hit counters, task 7)
+	// reads this to log which facts a session started with. Empty for the v1
+	// legacy assembly path, which has no facts.
+	ServedFactIDs []string
 }
 
 // SourceRef traces a context fragment back to its source.

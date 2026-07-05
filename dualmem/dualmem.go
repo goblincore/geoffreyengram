@@ -844,6 +844,51 @@ type ContextOpts struct {
 	DisableGraphBoost bool    // If true, skip entity graph boost in search
 }
 
+// AssembleOptions selects between the v2 pinned-block assembly (default) and
+// the v1 legacy assembly, and tunes the v2 pinned block. See
+// docs/superpowers/plans/2026-07-04-dualmem-v2.md ("Assembly v2").
+//
+// The v2 pinned block is a tiny (<500 token), LLM-free, scan-free context
+// header: latest handoff, user-global preferences, facts touching changed
+// files, and a one-line codemap status. Deep retrieval moves to pull tools
+// (task 6). Set Legacy=true to opt back into the v1 token-budgeted block
+// (kept verbatim until task 9 deletes the v1 layer).
+type AssembleOptions struct {
+	// Legacy selects the v1 assembly path. False (zero value) = v2 pinned
+	// block, which is the production default.
+	Legacy bool
+
+	// PinnedBudget is the hard token cap for the v2 pinned block. Defaults to
+	// DefaultPinnedBudget when zero or negative.
+	PinnedBudget int
+
+	// ChangedFactCap limits how many changed-file facts item 3 may emit. Zero
+	// means DefaultChangedFactCap.
+	ChangedFactCap int
+}
+
+// DefaultPinnedBudget is the hard cap on the v2 pinned block. See plan §
+// "Assembly v2" — 500 tokens is a placeholder to be tuned after task 7
+// instrumentation lands.
+const DefaultPinnedBudget = 500
+
+// DefaultChangedFactCap bounds item 3 (facts touching changed files) so a
+// large diff can't crowd out the handoff and preferences.
+const DefaultChangedFactCap = 6
+
+// Assemble is the v2-default context assembly entry point. With the zero-value
+// AssembleOptions (Legacy=false) it emits the v2 pinned block; with Legacy=true
+// it delegates to the v1 token-budgeted block (AssembleContextWith).
+//
+// AssembleContext / AssembleContextWith remain as v1-only entry points so
+// existing callers and the SWR regression tests keep their exact behavior.
+func (e *Engine) Assemble(ctx context.Context, userID, query string, tokenBudget int, opts AssembleOptions) (*ContextBlock, error) {
+	if opts.Legacy {
+		return e.AssembleContextWith(ctx, userID, query, tokenBudget, nil)
+	}
+	return e.assemblePinnedV2(ctx, userID, query, opts)
+}
+
 func (e *Engine) AssembleContext(ctx context.Context, userID string, query string, tokenBudget int) (*ContextBlock, error) {
 	return e.AssembleContextWith(ctx, userID, query, tokenBudget, nil)
 }

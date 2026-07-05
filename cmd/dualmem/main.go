@@ -523,6 +523,8 @@ func cmdContext(cfg CLIConfig) {
 	noGraph := fs.Bool("no-graph", false, "Disable entity graph boosting")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	indexMode := fs.Bool("index", false, "Progressive disclosure: output compact index instead of full context")
+	legacyMode := fs.Bool("legacy", false, "Use the v1 token-budgeted assembly instead of the v2 pinned block")
+	pinnedBudget := fs.Int("pinned-budget", 0, "Token cap for the v2 pinned block (default 500); ignored with -legacy")
 	fs.Parse(os.Args[2:])
 
 	query := strings.Join(fs.Args(), " ")
@@ -630,7 +632,10 @@ func cmdContext(cfg CLIConfig) {
 		return
 	}
 
-	block, err := engine.AssembleContextWith(ctx, namespace, query, *budget, opts)
+	block, err := engine.Assemble(ctx, namespace, query, *budget, dualmem.AssembleOptions{
+		Legacy:       *legacyMode,
+		PinnedBudget: *pinnedBudget,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
