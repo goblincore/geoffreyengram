@@ -240,7 +240,6 @@ type ContextBlock struct {
 	TokenCount int         // Estimated tokens used (chars/4 heuristic)
 	Sources    []SourceRef // For attribution/debugging
 	Intent     Intent      // Detected or explicit intent used for assembly
-	SnapshotID string      // ID of persisted context snapshot (for retrospective rating)
 
 	// ServedFactIDs records every durable fact (v2) whose ID was rendered into
 	// Text, in emit order. Instrumentation (file-touch / hit counters, task 7)
@@ -273,7 +272,6 @@ type ContextIndex struct {
 	TotalTokens   int          `json:"total_tokens"` // Sum of all item token estimates
 	Intent        Intent       `json:"intent"`
 	AlsoAvailable string       `json:"also_available"` // Summary of structural items (codemap, diff, episodes)
-	SnapshotID    string       `json:"snapshot_id,omitempty"`
 }
 
 // --- Checkpoints ---
@@ -1004,15 +1002,6 @@ type Store interface {
 	GetFactStatsCounts(namespaces []string) ([]FactStatsRow, error)
 	GetDeadFacts(namespaces []string, minServes, limit int) ([]DeadFact, error)
 	GetStaleFactCandidates(namespaces []string, limit int) ([]StaleFact, error)
-
-	// Context snapshots & ratings
-	InsertSnapshot(id, namespace, query string, queryEmbedding []byte, sourceIDsJSON string, tokensUsed int) error
-	GetSnapshot(id string) (*storedSnapshot, error)
-	GetLatestSnapshot(namespace string) (*storedSnapshot, error)
-	InsertRating(r *ContextRating) error
-	GetAllRatings(namespace string) ([]ContextRating, error)
-	InsertSessionRating(sr *SessionRating) error
-	GetRatingStats(namespace string) (*RatingStats, error)
 
 	// Health check helpers
 	GetEmbeddingModelCounts(userID string) (map[string]int, error)

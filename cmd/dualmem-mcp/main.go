@@ -454,11 +454,7 @@ func getContextHandler(engine *dualmem.Engine, ns string) func(context.Context, 
 			return nil, nil, fmt.Errorf("context assembly failed: %w", err)
 		}
 
-		// Append snapshot_id for rating at session end
 		text := block.Text
-		if block.SnapshotID != "" {
-			text += fmt.Sprintf("\n\n[snapshot_id: %s]", block.SnapshotID)
-		}
 
 		return textResult(text), nil, nil
 	}

@@ -1239,15 +1239,6 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 		Sources:    sources,
 		Intent:     intent,
 	}
-
-	// Persist context snapshot for retrospective rating.
-	// Best-effort — snapshot failure must not break context assembly.
-	snapID := fmt.Sprintf("snap_%d", time.Now().UnixNano())
-	snapshot := BuildSnapshot(snapID, userID, query, block, results.DetailMemories, time.Now())
-	if err := e.SaveSnapshot(snapshot); err == nil {
-		block.SnapshotID = snapID
-	}
-
 	return block, nil
 }
 
@@ -1472,16 +1463,6 @@ func (e *Engine) AssembleContextIndex(ctx context.Context, userID string, query 
 		Intent:        intent,
 		AlsoAvailable: also,
 	}
-
-	// Persist a context snapshot for the rating pipeline.
-	// All index items are recorded as candidates — ShowItems will later
-	// mark which ones were actually fetched (implicit relevance signal).
-	snapID := fmt.Sprintf("snap_%d", time.Now().UnixNano())
-	snapshot := buildIndexSnapshot(snapID, userID, query, items, results.DetailMemories, now)
-	if err := e.SaveSnapshot(snapshot); err == nil {
-		idx.SnapshotID = snapID
-	}
-
 	return idx, nil
 }
 
@@ -2147,55 +2128,14 @@ func fileOverlap(a, b []string) float64 {
 	return float64(overlap) / float64(len(a))
 }
 
-// buildIndexSnapshot creates a ContextSnapshot from index items, enriching
-// detail memory items with their search features for re-ranker training.
-func buildIndexSnapshot(id, namespace, query string, items []IndexEntry, details []DetailMemory, now time.Time) *ContextSnapshot {
-	// Build lookup for detail memory features
-	detailMap := make(map[string]*DetailMemory, len(details))
-	for i := range details {
-		detailMap[details[i].ID] = &details[i]
-	}
-
-	var sources []SnapshotSource
-	for _, item := range items {
-		ss := SnapshotSource{
-			ID:         item.ID,
-			Type:       item.Type,
-			TextLength: item.TokenCount,
-		}
-		// Enrich with detail memory features if this is a detail memory
-		if dm, ok := detailMap[item.ID]; ok {
-			ss.CosineSim = dm.Similarity
-			ss.Importance = dm.ImportanceScore
-			ss.Salience = dm.Salience
-			ss.Sector = dm.Sector
-			ss.MemType = dm.Type
-			ss.AgeDays = now.Sub(dm.CreatedAt).Hours() / 24
-		}
-		sources = append(sources, ss)
-	}
-
-	totalTokens := 0
-	for _, item := range items {
-		totalTokens += item.TokenCount
-	}
-
-	return &ContextSnapshot{
-		ID:         id,
-		Namespace:  namespace,
-		Query:      query,
-		Sources:    sources,
-		TokensUsed: totalTokens,
-		CreatedAt:  now,
-	}
-}
 
 // ShowItems renders full text for specific memory items by ID.
 // Accepts mixed ID prefixes: raw IDs (detail memories), chk_* (checkpoints),
 // kdoc_* (knowledge docs), ep_* (episodes).
-// If snapshotID is non-empty, submits implicit ratings: fetched items get
-// rating=2 (relevant), all other items in the snapshot get rating=0 (skipped).
+// The snapshotID parameter is retained for caller compatibility but is now
+// unused (v2 dropped the implicit-rating feedback loop).
 func (e *Engine) ShowItems(ctx context.Context, namespace string, ids []string, snapshotID string) (string, error) {
+	_ = snapshotID
 	var parts []string
 
 	for _, id := range ids {
@@ -2252,11 +2192,6 @@ func (e *Engine) ShowItems(ctx context.Context, namespace string, ids []string, 
 			}
 		}
 		parts = append(parts, text)
-	}
-
-	// Record implicit ratings if a snapshot was provided
-	if snapshotID != "" {
-		_ = e.SubmitImplicitRatings(namespace, snapshotID, ids) // best-effort
 	}
 
 	return strings.Join(parts, "\n\n"), nil
