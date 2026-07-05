@@ -387,6 +387,31 @@ func (s *SQLiteStore) migrate() error {
 		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (12)`)
 	}
 
+	if version < 13 {
+		// dualmem v2 served-facts log (task 7 instrumentation). Pure addition:
+		// records every durable fact surfaced to a session (pinned block or a
+		// pull tool) and tracks the file-touch hit signal. Idempotent per
+		// (session_id, fact_id) so re-serving the same fact in one session is a
+		// no-op and a hit is credited at most once per session.
+		// See docs/superpowers/plans/2026-07-04-dualmem-v2.md ("Instrumentation from day one").
+		if _, err := s.db.Exec(`
+			CREATE TABLE IF NOT EXISTS served_facts (
+				session_id   TEXT NOT NULL,
+				fact_id      TEXT NOT NULL REFERENCES facts(id),
+				surface      TEXT NOT NULL,
+				served_at    INTEGER NOT NULL,
+				hit_credited INTEGER NOT NULL DEFAULT 0,
+				hit_at       INTEGER,
+				PRIMARY KEY (session_id, fact_id)
+			);
+			CREATE INDEX IF NOT EXISTS idx_served_facts_fact ON served_facts(fact_id);
+			CREATE INDEX IF NOT EXISTS idx_served_facts_credited ON served_facts(hit_credited);
+		`); err != nil {
+			return fmt.Errorf("migrate v13 (served_facts): %w", err)
+		}
+		s.db.Exec(`INSERT INTO dualmem_schema_version (version) VALUES (13)`)
+	}
+
 	return nil
 }
 
@@ -2391,12 +2416,12 @@ func (s *SQLiteStore) GetSketchRawCount(userID string) (int, error) {
 // scanFact decodes one facts row into a *Fact, including its embedding BLOB.
 func scanFact(row interface{ Scan(dest ...any) error }) (*Fact, error) {
 	var (
-		f                Fact
-		filesJSON        string
-		embBlob          []byte
-		createdAt        int64
-		supersededBy     sql.NullString
-		lastHitAt        sql.NullInt64
+		f            Fact
+		filesJSON    string
+		embBlob      []byte
+		createdAt    int64
+		supersededBy sql.NullString
+		lastHitAt    sql.NullInt64
 	)
 	if err := row.Scan(
 		&f.ID, &f.Namespace, &f.Kind, &f.Text, &filesJSON,
@@ -2660,6 +2685,239 @@ func dedupStrings(ns []string) []string {
 		}
 	}
 	return out
+}
+
+// --- Served facts (v2 instrumentation) ---
+//
+// served_facts logs every durable fact surfaced to a session (pinned block or
+// a pull tool) so the file-touch hit signal can later credit useful facts. The
+// (session_id, fact_id) primary key makes recording idempotent: re-serving the
+// same fact in one session is a no-op, and a hit is credited at most once per
+// session (guarded by hit_credited).
+
+// InsertServedFact records that factID was surfaced to sessionID via surface.
+// Idempotent on (session_id, fact_id): a repeated serve in the same session
+// leaves the original row (and its hit state) untouched. Empty factID is a
+// silent no-op (callers may pass partial slices).
+func (s *SQLiteStore) InsertServedFact(sessionID, factID, surface string) error {
+	if sessionID == "" || factID == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`INSERT OR IGNORE INTO served_facts (session_id, fact_id, surface, served_at, hit_credited, hit_at)
+		VALUES (?, ?, ?, ?, 0, NULL)`,
+		sessionID, factID, surface, time.Now().UnixNano())
+	return err
+}
+
+// GetServedFactsForSession returns every served_facts row for a session, in
+// serve order. Used by the file-touch correlator to decide which facts to
+// credit. Rows carry the fact's Files slice so the caller can intersect
+// against touched paths without a second lookup.
+func (s *SQLiteStore) GetServedFactsForSession(sessionID string) ([]ServedFact, error) {
+	if sessionID == "" {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`
+		SELECT sf.fact_id, sf.surface, sf.served_at, sf.hit_credited, sf.hit_at,
+		       f.files_json
+		FROM served_facts sf
+		JOIN facts f ON f.id = sf.fact_id
+		WHERE sf.session_id = ?
+		ORDER BY sf.served_at ASC`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ServedFact
+	for rows.Next() {
+		var (
+			sf        ServedFact
+			filesJSON string
+			servedAt  int64
+			hitAt     sql.NullInt64
+		)
+		if err := rows.Scan(&sf.FactID, &sf.Surface, &servedAt, &sf.HitCredited, &hitAt, &filesJSON); err != nil {
+			return nil, err
+		}
+		sf.SessionID = sessionID
+		sf.ServedAt = time.Unix(0, servedAt).UTC()
+		if hitAt.Valid {
+			sf.HitAt = time.Unix(0, hitAt.Int64).UTC()
+		}
+		_ = json.Unmarshal([]byte(filesJSON), &sf.Files)
+		if sf.Files == nil {
+			sf.Files = []string{}
+		}
+		out = append(out, sf)
+	}
+	return out, rows.Err()
+}
+
+// MarkServedFactHit credits one served fact: bumps the fact's hits counter and
+// last_hit_at, and marks the served_facts row hit_credited=1 with hit_at set.
+// It is a no-op if the row is already credited, so calling it twice for the
+// same (session, fact) only counts once. Returns whether a credit happened.
+func (s *SQLiteStore) MarkServedFactHit(sessionID, factID string) (bool, error) {
+	if sessionID == "" || factID == "" {
+		return false, nil
+	}
+	now := time.Now().UnixNano()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, fmt.Errorf("mark served hit: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE served_facts SET hit_credited = 1, hit_at = ?
+		WHERE session_id = ? AND fact_id = ? AND hit_credited = 0`,
+		now, sessionID, factID)
+	if err != nil {
+		return false, fmt.Errorf("mark served hit: update: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		// Already credited (or no such row). Nothing to credit.
+		return false, tx.Commit()
+	}
+	if _, err := tx.Exec(`UPDATE facts SET hits = hits + 1, last_hit_at = ? WHERE id = ?`,
+		now, factID); err != nil {
+		return false, fmt.Errorf("mark served hit: bump fact: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("mark served hit: commit: %w", err)
+	}
+	return true, nil
+}
+
+// FactStatsRow is one row of the per-kind aggregation computed by
+// GetFactStatsCounts: how many facts exist, how many were ever served, and how
+// many earned at least one hit. ServedCount and HitCount count distinct facts.
+type FactStatsRow struct {
+	Kind        string
+	FactsCount  int
+	ServedCount int
+	HitCount    int
+}
+
+// GetFactStatsCounts aggregates per-kind fact/served/hit counts across the
+// given namespaces. Superseded facts are excluded. A fact counts as "served"
+// if it has any served_facts row, and as "hit" if it has hits > 0. Empty
+// namespaces selects all.
+func (s *SQLiteStore) GetFactStatsCounts(namespaces []string) ([]FactStatsRow, error) {
+	q := `SELECT f.kind,
+			COUNT(*) AS facts,
+			SUM(CASE WHEN sf.fact_id IS NOT NULL THEN 1 ELSE 0 END) AS served,
+			SUM(CASE WHEN f.hits > 0 THEN 1 ELSE 0 END) AS hits
+		FROM facts f
+		LEFT JOIN (SELECT DISTINCT fact_id FROM served_facts) sf ON sf.fact_id = f.id
+		WHERE f.superseded_by IS NULL`
+	var args []any
+	if len(namespaces) > 0 {
+		ph := make([]string, len(namespaces))
+		for i, ns := range namespaces {
+			ph[i] = "?"
+			args = append(args, ns)
+		}
+		q += fmt.Sprintf(" AND f.namespace IN (%s)", strings.Join(ph, ","))
+	}
+	q += ` GROUP BY f.kind ORDER BY f.kind`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []FactStatsRow
+	for rows.Next() {
+		var r FactStatsRow
+		if err := rows.Scan(&r.Kind, &r.FactsCount, &r.ServedCount, &r.HitCount); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// GetDeadFacts returns non-superserved fact IDs that were served at least
+// minServes times (across all sessions) but have zero hits — candidates for
+// pruning or rewriting. Returns at most limit IDs (limit <= 0 = no cap).
+func (s *SQLiteStore) GetDeadFacts(namespaces []string, minServes, limit int) ([]DeadFact, error) {
+	if minServes < 1 {
+		minServes = 1
+	}
+	q := `SELECT f.id, f.kind, f.text, COUNT(sf.fact_id) AS serves
+		FROM facts f
+		JOIN served_facts sf ON sf.fact_id = f.id
+		WHERE f.superseded_by IS NULL AND f.hits = 0
+		GROUP BY f.id, f.kind, f.text
+		HAVING serves >= ?`
+	args := []any{minServes}
+	if len(namespaces) > 0 {
+		ph := make([]string, len(namespaces))
+		for i, ns := range namespaces {
+			ph[i] = "?"
+			args = append(args, ns)
+		}
+		q += fmt.Sprintf(" AND f.namespace IN (%s)", strings.Join(ph, ","))
+	}
+	q += ` ORDER BY serves DESC, f.id`
+	if limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DeadFact
+	for rows.Next() {
+		var d DeadFact
+		if err := rows.Scan(&d.ID, &d.Kind, &d.Text, &d.Serves); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// GetStaleFactCandidates returns non-superserved facts whose git_commit is
+// reachable from HEAD only through more than maxCommitsBehind commits, i.e.
+// the codebase has moved well past where the fact was written. A fact with an
+// empty git_commit or one that can't be resolved (rebased/GC'd, shallow clone)
+// is treated as non-stale (best-effort: we can't prove staleness, so we don't
+// flag it). Commit-distance is computed by the caller (engine) via git; this
+// method just loads the (id, kind, text, git_commit) rows for the engine to
+// score. Returns at most limit rows (limit <= 0 = no cap).
+func (s *SQLiteStore) GetStaleFactCandidates(namespaces []string, limit int) ([]StaleFact, error) {
+	q := `SELECT id, kind, text, git_commit FROM facts
+		WHERE superseded_by IS NULL AND git_commit != ''`
+	var args []any
+	if len(namespaces) > 0 {
+		ph := make([]string, len(namespaces))
+		for i, ns := range namespaces {
+			ph[i] = "?"
+			args = append(args, ns)
+		}
+		q += fmt.Sprintf(" AND namespace IN (%s)", strings.Join(ph, ","))
+	}
+	q += ` ORDER BY created_at DESC`
+	if limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []StaleFact
+	for rows.Next() {
+		var sf StaleFact
+		if err := rows.Scan(&sf.ID, &sf.Kind, &sf.Text, &sf.GitCommit); err != nil {
+			return nil, err
+		}
+		out = append(out, sf)
+	}
+	return out, rows.Err()
 }
 
 // --- Helpers ---

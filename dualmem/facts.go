@@ -289,20 +289,91 @@ func (e *Engine) FactsForFile(namespace, path string, limit int) ([]*Fact, error
 }
 
 // RecordServed logs that the given facts were surfaced to a session via a pull
-// tool (surface names the call site, e.g. "recall", "precedent",
-// "file_context", or "pinned").
+// tool or the pinned block. surface names the call site (see FactSurface*
+// constants, e.g. "recall", "precedent", "file_context", "pinned").
 //
-// STUB: this is the instrumentation seam required by task 6 of the dualmem v2
-// plan. Task 7 wires it to a served_facts log and the file-touch hit counter
-// (a fact earns a "hit" when the session later reads/edits a file it cites).
-// For now it is a validated no-op so every pull tool can record uniformly and
-// task 7 only has to fill in the body. Empty IDs are dropped; an empty
-// sessionID or empty slice is a silent no-op.
+// This is the file-touch instrumentation seam: every surfaced fact is logged
+// to served_facts so that a later distill pass can credit a "hit" when the
+// session reads/edits a file the fact cites. Empty IDs are dropped; an empty
+// sessionID or empty slice is a silent no-op. Recording is idempotent per
+// (session_id, fact_id) — re-serving the same fact in one session is a no-op.
+// Best-effort: a store error is swallowed rather than failing the tool call.
 func (e *Engine) RecordServed(sessionID string, factIDs []string, surface string) {
 	if sessionID == "" || len(factIDs) == 0 {
 		return
 	}
-	// Task 7 will persist (sessionID, factID, surface, timestamp) and wire the
-	// file-touch → hits++ signal from distill transcripts / hook logs.
-	_ = surface
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, id := range factIDs {
+		if id == "" {
+			continue
+		}
+		_ = e.store.InsertServedFact(sessionID, id, surface)
+	}
+}
+
+// RecordFileTouches credits the file-touch hit signal for a session. For each
+// fact the session was served, if any of its cited files intersects the
+// touched set, the fact's hits counter is bumped and the served_facts row is
+// marked credited — once per (session, fact). Idempotent: a second call with
+// the same session is a no-op for already-credited pairs. Returns the number
+// of newly-credited hits.
+//
+// This is the distill-time half of the instrumentation loop: it correlates
+// what was served against what the session actually touched (read/edited) and
+// rewards facts that proved relevant. Best-effort: store errors stop the loop
+// early but whatever was already credited stays.
+func (e *Engine) RecordFileTouches(sessionID string, touched []string) (int, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || len(touched) == 0 {
+		return 0, nil
+	}
+
+	touchedSet := make(map[string]bool, len(touched))
+	for _, p := range touched {
+		touchedSet[normalizePath(p)] = true
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	served, err := e.store.GetServedFactsForSession(sessionID)
+	if err != nil {
+		return 0, fmt.Errorf("dualmem: load served facts for session %q: %w", sessionID, err)
+	}
+
+	credits := 0
+	for _, sf := range served {
+		if sf.HitCredited != 0 {
+			continue
+		}
+		if !factFilesIntersect(sf.Files, touchedSet) {
+			continue
+		}
+		credited, err := e.store.MarkServedFactHit(sessionID, sf.FactID)
+		if err != nil {
+			return credits, fmt.Errorf("dualmem: credit hit for fact %q: %w", sf.FactID, err)
+		}
+		if credited {
+			credits++
+		}
+	}
+	return credits, nil
+}
+
+// factFilesIntersect reports whether any of the fact's cited paths is in the
+// touched set. Both sides are normalized via normalizePath so callers may pass
+// repo-relative paths, basenames, or slash-variant forms interchangeably. A
+// fact with no files never intersects (preferences are file-agnostic — they
+// are credited only if the caller explicitly touches a path they cite).
+func factFilesIntersect(files []string, touched map[string]bool) bool {
+	for _, f := range files {
+		if f == "" {
+			continue
+		}
+		if touched[normalizePath(f)] {
+			return true
+		}
+	}
+	return false
 }

@@ -39,14 +39,14 @@ type CLIConfig struct {
 		EmbeddingModel     string `yaml:"embedding_model"`
 		EmbeddingAPIKeyEnv string `yaml:"embedding_api_key_env"`
 		EmbeddingDimension int    `yaml:"embedding_dimension"`
-		SynthesisProvider  string `yaml:"synthesis_provider"`   // "anthropic" or "" (use main summarizer)
-		SynthesisModel     string `yaml:"synthesis_model"`      // e.g. "glm-5.1"
+		SynthesisProvider  string `yaml:"synthesis_provider"`    // "anthropic" or "" (use main summarizer)
+		SynthesisModel     string `yaml:"synthesis_model"`       // e.g. "glm-5.1"
 		SynthesisAPIKeyEnv string `yaml:"synthesis_api_key_env"` // e.g. "ZAI_API_KEY"
-		SynthesisBaseURL   string `yaml:"synthesis_base_url"`   // e.g. "https://api.z.ai/api/anthropic"
-		ExplorerProvider  string `yaml:"explorer_provider"`
-		ExplorerModel     string `yaml:"explorer_model"`
-		ExplorerAPIKeyEnv string `yaml:"explorer_api_key_env"`
-		ExplorerBaseURL   string `yaml:"explorer_base_url"`
+		SynthesisBaseURL   string `yaml:"synthesis_base_url"`    // e.g. "https://api.z.ai/api/anthropic"
+		ExplorerProvider   string `yaml:"explorer_provider"`
+		ExplorerModel      string `yaml:"explorer_model"`
+		ExplorerAPIKeyEnv  string `yaml:"explorer_api_key_env"`
+		ExplorerBaseURL    string `yaml:"explorer_base_url"`
 	} `yaml:"providers"`
 	Pipeline struct {
 		EpisodeInterval string `yaml:"episode_interval"`
@@ -287,6 +287,8 @@ func main() {
 		cmdPrecedent(cfg)
 	case "rate":
 		cmdRate(cfg)
+	case "facts":
+		cmdFacts(cfg)
 	case "train":
 		cmdTrain(cfg)
 	case "show":
@@ -342,6 +344,7 @@ Commands:
   file-index    Generate file index for Read hook fast-path filtering
   recall        Recall durable facts by semantic similarity (v2 pull tool)
   precedent     Recall prior decisions + dead-ends for an approach (v2 pull tool)
+  facts         Inspect durable facts (stats: served/hit scorecard, dead + stale candidates)
   rate        Submit context quality ratings (item-level or session-level)
   train       Train the re-ranker model from accumulated ratings
   stats       Show context quality statistics and re-ranker status
@@ -630,6 +633,7 @@ func cmdContext(cfg CLIConfig) {
 
 	block, err := engine.Assemble(ctx, namespace, query, *budget, dualmem.AssembleOptions{
 		Legacy:       *legacyMode,
+		SessionID:    cliSessionID(namespace),
 		PinnedBudget: *pinnedBudget,
 	})
 	if err != nil {
@@ -1367,7 +1371,7 @@ func cmdSearchCode(cfg CLIConfig) {
 
 	// Default: HDC+BM25 hybrid search (module-level, descriptive summaries)
 	engine, engErr := dualmem.NewForCodeSearch(dualmem.Config{
-		RootDir:   rootDir,
+		RootDir:    rootDir,
 		SQLitePath: cfg.Storage.SQLitePath,
 	})
 	if engErr != nil {
@@ -2034,6 +2038,127 @@ func cmdDocs(cfg CLIConfig) {
 	}
 }
 
+// cmdFacts is the durable-facts CLI (dualmem v2). Today it exposes `stats` —
+// the served/hit scorecard that replaces the dead rate_context loop. Future
+// subcommands (export/import from task 3) live in their own worktree branches.
+func cmdFacts(cfg CLIConfig) {
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "usage: dualmem facts <stats> [flags]")
+		os.Exit(1)
+	}
+	sub := os.Args[2]
+	switch sub {
+	case "stats":
+		cmdFactsStats(cfg)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown 'facts' subcommand: %s (try 'stats')\n", sub)
+		os.Exit(1)
+	}
+}
+
+// cmdFactsStats runs `dualmem facts stats`. Renders the served/hit scorecard:
+// per-kind counts, overall roll-up, dead facts (served often, never hit), and
+// staleness candidates (git_commit far behind HEAD).
+func cmdFactsStats(cfg CLIConfig) {
+	fs := flag.NewFlagSet("facts stats", flag.ExitOnError)
+	nsFlag := fs.String("ns", "", "Namespace (defaults to current repo). Use '' to scope to user-global facts only; repeat for multiple.")
+	allFlag := fs.Bool("all", false, "Score all namespaces (repo-scoped + user-global) instead of just the current repo.")
+	deadMin := fs.Int("dead-min-serves", 5, "A fact is 'dead' if served >= this many times with zero hits.")
+	staleCommits := fs.Int("stale-commits", 50, "A fact is 'stale' if its git_commit is more than this many commits behind HEAD.")
+	deadLimit := fs.Int("dead-limit", 20, "Max dead-fact rows to list.")
+	staleLimit := fs.Int("stale-limit", 20, "Max stale-fact rows to list.")
+	jsonFlag := fs.Bool("json", false, "Emit the scorecard as JSON.")
+	fs.Parse(os.Args[3:])
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	opts := dualmem.FactStatsOpts{
+		DeadMinServes:         *deadMin,
+		StaleMaxCommitsBehind: *staleCommits,
+		DeadLimit:             *deadLimit,
+		StaleLimit:            *staleLimit,
+	}
+	if *allFlag {
+		// Empty Namespaces = all.
+	} else if *nsFlag != "" {
+		opts.Namespaces = []string{*nsFlag}
+	} else {
+		opts.Namespaces = []string{resolveNamespace("", cfg)}
+	}
+
+	scorecard, err := engine.FactStats(opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonFlag {
+		json.NewEncoder(os.Stdout).Encode(scorecard)
+		return
+	}
+	renderFactScorecard(scorecard)
+}
+
+// renderFactScorecard prints the scorecard in a human-readable table.
+func renderFactScorecard(s *dualmem.FactScorecard) {
+	fmt.Println("Facts scorecard (served/hit signal)")
+	fmt.Printf("  thresholds: dead>= %d serves (0 hits) · stale > %d commits behind HEAD\n\n",
+		s.Opts.DeadMinServes, s.Opts.StaleMaxCommitsBehind)
+
+	fmt.Printf("%-14s %8s %8s %8s %10s\n", "kind", "facts", "served", "hits", "hit-rate")
+	for _, r := range s.ByKind {
+		fmt.Printf("%-14s %8d %8d %8d %9s\n", r.Kind, r.FactsCount, r.ServedCount, r.HitCount, hitRate(r.ServedCount, r.HitCount))
+	}
+	fmt.Printf("%-14s %8d %8d %8d %9s\n", "(overall)", s.Overall.FactsCount, s.Overall.ServedCount, s.Overall.HitCount, hitRate(s.Overall.ServedCount, s.Overall.HitCount))
+
+	fmt.Println()
+	if len(s.Dead) == 0 {
+		fmt.Println("Dead facts: none")
+	} else {
+		fmt.Printf("Dead facts (served >= %d, never hit): %d\n", s.Opts.DeadMinServes, len(s.Dead))
+		for _, d := range s.Dead {
+			fmt.Printf("  [%s] (%d serves) %s\n", d.Kind, d.Serves, truncateFactText(d.Text, 90))
+		}
+	}
+
+	fmt.Println()
+	if len(s.Stale) == 0 {
+		fmt.Println("Stale facts: none")
+	} else {
+		fmt.Printf("Stale candidates (> %d commits behind HEAD): %d\n", s.Opts.StaleMaxCommitsBehind, len(s.Stale))
+		for _, st := range s.Stale {
+			short := st.GitCommit
+			if len(short) > 7 {
+				short = short[:7]
+			}
+			fmt.Printf("  [%s] @%s %s\n", st.Kind, short, truncateFactText(st.Text, 90))
+		}
+	}
+}
+
+// hitRate formats the hits/served ratio as a percentage, or "-" when nothing
+// was served.
+func hitRate(served, hits int) string {
+	if served == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%.0f%%", 100.0*float64(hits)/float64(served))
+}
+
+// truncateFactText shortens a fact's text for one-line scorecard rows.
+func truncateFactText(text string, max int) string {
+	text = strings.TrimSpace(text)
+	if len(text) <= max {
+		return text
+	}
+	return text[:max-1] + "…"
+}
+
 func cmdDistill(cfg CLIConfig) {
 	distillFlags := flag.NewFlagSet("distill", flag.ExitOnError)
 	autoFlag := distillFlags.Bool("auto", false, "Auto-detect CC session, skip if already distilled")
@@ -2409,7 +2534,7 @@ func cmdFileContext(cfg CLIConfig) {
 			"decision":   "★",
 			"continuity": "↻",
 			"knowledge":  "📖",
-			"checkpoint":  "📋",
+			"checkpoint": "📋",
 			"map":        "🗺",
 			"trace":      "🔍",
 			"seed":       "🌱",
@@ -3233,4 +3358,3 @@ func cmdStats(cfg CLIConfig) {
 		fmt.Println()
 	}
 }
-

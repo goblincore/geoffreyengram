@@ -24,16 +24,16 @@ import (
 
 // Engine is the main DualMem implementation.
 type Engine struct {
-	mu            sync.RWMutex
-	store         Store
-	detail        *DetailPath
-	sketch        *SketchPath
-	pipeline      *Pipeline
-	projector     *Projector
-	embedder      EmbeddingProvider
-	classifier    SectorClassifier
-	extractor     EntityExtractor
-	cfg           *Config
+	mu             sync.RWMutex
+	store          Store
+	detail         *DetailPath
+	sketch         *SketchPath
+	pipeline       *Pipeline
+	projector      *Projector
+	embedder       EmbeddingProvider
+	classifier     SectorClassifier
+	extractor      EntityExtractor
+	cfg            *Config
 	OnScanProgress func(ScanProgress) // optional callback for scan progress reporting
 }
 
@@ -435,11 +435,11 @@ func (e *Engine) FileIndex(ctx context.Context, userID string) ([]string, error)
 // Edge-type multipliers for structure-aware graph boosting.
 // These weight how strongly an edge type should contribute to memory boost.
 var edgeTypeMultiplier = map[string]float64{
-	"depends_on":  1.0,
-	"implements":  0.9,
-	"modifies":    0.8,
-	"uses":        0.7,
-	"relates":     0.5,
+	"depends_on": 1.0,
+	"implements": 0.9,
+	"modifies":   0.8,
+	"uses":       0.7,
+	"relates":    0.5,
 }
 
 // computeGraphBoost extracts entity candidates from query text, expands them
@@ -673,9 +673,9 @@ func (e *Engine) GetStructuralNeighborPaths(namespace string, seedPaths []string
 // Annotation represents a piece of context associated with a file path.
 type Annotation struct {
 	FilePath string  `json:"file_path"`
-	Type     string  `json:"type"`      // "decision", "warning", "continuity", "knowledge", "checkpoint", "structure"
+	Type     string  `json:"type"` // "decision", "warning", "continuity", "knowledge", "checkpoint", "structure"
 	Text     string  `json:"text"`
-	Source   string  `json:"source"`    // "memory", "knowledge_doc", "checkpoint"
+	Source   string  `json:"source"` // "memory", "knowledge_doc", "checkpoint"
 	Salience float64 `json:"salience"`
 	MemoryID string  `json:"memory_id,omitempty"` // for dedup tracking
 }
@@ -857,6 +857,13 @@ type AssembleOptions struct {
 	// Legacy selects the v1 assembly path. False (zero value) = v2 pinned
 	// block, which is the production default.
 	Legacy bool
+
+	// SessionID, when set on the v2 path, attributes the pinned block's served
+	// facts for instrumentation (task 7): every fact emitted into the block is
+	// logged to served_facts so the distill-time file-touch correlator can
+	// credit hits. Empty = the block is still assembled, but its facts are not
+	// logged (use during one-off or test runs).
+	SessionID string
 
 	// PinnedBudget is the hard token cap for the v2 pinned block. Defaults to
 	// DefaultPinnedBudget when zero or negative.
@@ -1950,7 +1957,7 @@ func (e *Engine) ReadCodeEvidence(ctx context.Context, namespace, query string, 
 					Content:    content,
 					Relevance:  fr.Summary,
 					TokenCount: tokens,
-			})
+				})
 				evidence.TotalTokens += tokens
 			} else {
 				for _, ident := range matches {
@@ -3022,7 +3029,7 @@ func truncateGC(s string, max int) string {
 
 // HealthCheck is the result of a database health inspection.
 type HealthCheck struct {
-	Status  string        // "healthy", "warnings", "issues"
+	Status  string // "healthy", "warnings", "issues"
 	Checks  []HealthEntry
 	Summary HealthSummary
 }
