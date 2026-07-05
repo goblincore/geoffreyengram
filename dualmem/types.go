@@ -823,6 +823,13 @@ type Config struct {
 
 	// Codebase context (optional — enables code maps + structural diffs)
 	RootDir string // Project root directory (for code map scanning + git diffs)
+
+	// Distill (dualmem v2 — task 8). When nil (default), Distill ALSO writes the
+	// legacy v1 detail memories + entity graph + synthesis in addition to the
+	// new v2 fact candidates. Task 9 flips this default off in one line; later
+	// the field and all legacy-guarded code are deleted. See
+	// docs/superpowers/plans/2026-07-04-dualmem-v2.md (Phase 4).
+	LegacyDistill *bool
 }
 
 // ApplyDefaults fills zero-valued fields with sensible defaults.

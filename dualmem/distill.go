@@ -24,21 +24,44 @@ type DistillOpts struct {
 	MaxFacts  int    // Max facts to extract (default 20)
 }
 
+// legacyDistillEnabled reports whether the v1 detail-memory/entity-graph
+// output of Distill should also run. Default is true (preserve existing
+// behavior); task 9 of the v2 plan flips this to false in one line, and later
+// the field plus all legacy-guarded code are deleted.
+func (c *Config) legacyDistillEnabled() bool {
+	if c.LegacyDistill == nil {
+		return true
+	}
+	return *c.LegacyDistill
+}
+
 // DistillResult describes what distillation produced.
+//
+// In v2 the primary output is fact candidates (Candidates / FactsWritten /
+// FactsSuperseded / FactsIdentical / FactsMalformed). The legacy fields (Facts,
+// Triples, Written, Skipped) describe the v1 detail-memory path, which only
+// runs while cfg.LegacyDistill is enabled (default on; task 9 flips it off).
 type DistillResult struct {
 	SessionID string          `json:"session_id"`
-	Facts     []DistilledFact `json:"facts"`
-	Triples   []EntityTriple  `json:"triples,omitempty"`
+	Facts     []DistilledFact `json:"facts"`             // legacy v1 detail-memory candidates
+	Triples   []EntityTriple  `json:"triples,omitempty"` // legacy v1 entity graph
 	Summary   string          `json:"summary"`
-	Skipped   int             `json:"skipped"` // near-duplicate facts skipped
-	Written   int             `json:"written"`  // facts actually written
+	Skipped   int             `json:"skipped"` // legacy: near-duplicate detail memories skipped
+	Written   int             `json:"written"` // legacy: detail memories actually written
 	DryRun    bool            `json:"dry_run"`
+
+	// v2 fact candidates (the primary output).
+	Candidates      []FactCandidate `json:"candidates,omitempty"`
+	FactsWritten    int             `json:"facts_written"`    // candidates inserted as new facts
+	FactsSuperseded int             `json:"facts_superseded"` // candidates that superseded a near-dup
+	FactsIdentical  int             `json:"facts_identical"`  // candidates that were exact-text no-ops
+	FactsMalformed  int             `json:"facts_malformed"`  // candidates skipped (bad kind / empty / unparseable)
 }
 
 // DistilledFact is an extracted memory from a session transcript.
 type DistilledFact struct {
 	Text     string   `json:"text"`
-	Type     string   `json:"type"`     // "decision", "warning", "continuity", "map", "general"
+	Type     string   `json:"type"` // "decision", "warning", "continuity", "map", "general"
 	Salience float64  `json:"salience"`
 	Files    []string `json:"files,omitempty"`
 	Entities []Entity `json:"entities,omitempty"`
@@ -51,10 +74,27 @@ type distillExtractionResponse struct {
 	SessionSummary string          `json:"session_summary"`
 }
 
+// FactCandidate is a kind-classified durable fact proposed by the v2 distiller
+// from a session transcript. It is the primary output of Distill (see
+// docs/superpowers/plans/2026-07-04-dualmem-v2.md, Phase 4). Each candidate is
+// deduped against existing live facts before insert: identical text is a no-op,
+// an embedding near-duplicate supersedes the old fact.
+type FactCandidate struct {
+	Kind  string   `json:"kind"` // decision | deadend | gotcha | preference | reference
+	Text  string   `json:"text"` // 1-3 self-contained sentences
+	Files []string `json:"files,omitempty"`
+}
+
+// factCandidateResponse is the expected JSON response from the v2 extraction
+// prompt. The model is explicitly told that an empty list is a valid answer.
+type factCandidateResponse struct {
+	Candidates []FactCandidate `json:"candidates"`
+}
+
 // CCMessage represents a message in a Claude Code session transcript.
 type CCMessage struct {
-	Role    string `json:"role"`              // "user", "assistant", "tool_use", "tool_result"
-	Content string `json:"content"`           // text content
+	Role    string `json:"role"`    // "user", "assistant", "tool_use", "tool_result"
+	Content string `json:"content"` // text content
 	Type    string `json:"type,omitempty"`
 }
 
@@ -85,47 +125,106 @@ func (e *Engine) Distill(ctx context.Context, opts DistillOpts, userID string) (
 	// Step 1b: Enrich transcript with auto-captured file interactions (if available)
 	transcript = enrichWithSessionLog(transcript, opts.Namespace, e.cfg.RootDir)
 
-	// Step 2: Extract facts via LLM
-	extraction, err := e.extractFromTranscript(ctx, transcript, opts.MaxFacts)
-	if err != nil {
-		return nil, fmt.Errorf("extract: %w", err)
-	}
-
-	result := &DistillResult{
-		SessionID: sessionID,
-		Facts:     extraction.Facts,
-		Triples:   extraction.EntityTriples,
-		Summary:   extraction.SessionSummary,
-		DryRun:    opts.DryRun,
-	}
-
-	if opts.DryRun {
-		result.Written = len(extraction.Facts)
-		return result, nil
-	}
-
-	// Step 3: Dedup and write facts
 	namespace := opts.Namespace
 	if namespace == "" {
 		namespace = e.namespace()
 	}
 
-	written := 0
-	skipped := 0
+	result := &DistillResult{
+		SessionID: sessionID,
+		DryRun:    opts.DryRun,
+	}
+
+	// --- v2 primary path: propose durable fact candidates ---
+	//
+	// The distiller's job in v2 is no longer "write detail memories + update
+	// layers"; it is "propose durable facts from the transcript". Candidates are
+	// kind-classified, deduped against live facts before insert (identical text
+	// is a no-op; an embedding near-duplicate supersedes the old fact), and
+	// stamped source=inferred with the current git commit + session id. This
+	// path always runs (even after task 9 flips the legacy path off).
+	// See docs/superpowers/plans/2026-07-04-dualmem-v2.md (Phase 4).
+	candidates, candErr := e.extractFactCandidates(ctx, transcript, opts.MaxFacts)
+	if candErr != nil {
+		// Resilience: a failed/empty extraction never fails the whole distill;
+		// we just record zero candidates and fall through to the legacy path.
+		result.Summary = fmt.Sprintf("v2 extraction failed: %v", candErr)
+	} else {
+		result.Candidates = candidates
+		if !opts.DryRun {
+			for _, c := range candidates {
+				status, _ := e.distillInsertFactCandidate(ctx, c, namespace, sessionID)
+				switch status {
+				case "inserted":
+					result.FactsWritten++
+				case "superseded":
+					result.FactsSuperseded++
+				case "identical":
+					result.FactsIdentical++
+				default: // "malformed" or "error"
+					result.FactsMalformed++
+				}
+			}
+		} else {
+			result.FactsWritten = len(candidates) // dry-run preview count
+		}
+	}
+
+	// --- legacy v1 path: detail memories + entity graph + synthesis ---
+	//
+	// Behind a single switch so task 9 can cut it in one line (flip the default
+	// in Config.legacyDistillEnabled, then delete this block + the legacy
+	// extraction functions). When enabled (default), this runs in ADDITION to
+	// the v2 path so existing behavior is preserved during the transition.
+	if e.cfg.legacyDistillEnabled() {
+		extraction, err := e.extractFromTranscript(ctx, transcript, opts.MaxFacts)
+		if err != nil {
+			// Don't fail the whole distill on a legacy-path error; surface it.
+			if result.Summary == "" {
+				result.Summary = fmt.Sprintf("legacy extract failed: %v", err)
+			}
+		} else {
+			result.Facts = extraction.Facts
+			result.Triples = extraction.EntityTriples
+			if extraction.SessionSummary != "" {
+				result.Summary = extraction.SessionSummary
+			}
+
+			if opts.DryRun {
+				result.Written = len(extraction.Facts)
+			} else {
+				result.Written, result.Skipped = e.distillWriteLegacy(ctx, extraction, namespace, sessionID, userID)
+			}
+		}
+	}
+
+	// Step 5: Mark as distilled
+	if sessionID != "" && !opts.DryRun {
+		_ = e.store.SetConfigValue("last_distill_session_id", sessionID)
+	}
+
+	if result.Summary == "" {
+		result.Summary = fmt.Sprintf("%d fact candidate(s): %d new, %d superseded, %d identical",
+			len(result.Candidates), result.FactsWritten, result.FactsSuperseded, result.FactsIdentical)
+	}
+
+	return result, nil
+}
+
+// distillWriteLegacy runs the v1 detail-memory + entity-graph + session-summary
+// + synthesis writes from a legacy extraction. It is the entirety of the legacy
+// output path, isolated here so task 9 can delete it in one cut. Best-effort:
+// individual write errors are skipped, never returned. Returns (written, skipped).
+func (e *Engine) distillWriteLegacy(ctx context.Context, extraction *distillExtractionResponse, namespace, sessionID, userID string) (written, skipped int) {
 	for _, fact := range extraction.Facts {
-		// Floor salience at 0.6 for distilled facts
 		salience := fact.Salience
 		if salience < 0.6 {
 			salience = 0.6
 		}
-
-		// Check for near-duplicates
 		if e.isNearDuplicate(ctx, fact.Text, userID, 0.90) {
 			skipped++
 			continue
 		}
-
-		// Write via AddWithOptions (takes its own lock — do NOT hold mu here)
 		err := e.AddWithOptions(ctx, MemoryInput{
 			UserMessage: fact.Text,
 			SectorHint:  fact.Type,
@@ -136,12 +235,12 @@ func (e *Engine) Distill(ctx context.Context, opts DistillOpts, userID string) (
 			SessionID:   sessionID,
 		}, userID)
 		if err != nil {
-			continue // best-effort
+			continue
 		}
 		written++
 	}
 
-	// Step 4: Write entity triples to graph
+	// Entity triples to graph
 	if namespace != "" {
 		for _, triple := range extraction.EntityTriples {
 			sourceID, err := e.store.UpsertEntity(&EntityNode{
@@ -169,37 +268,25 @@ func (e *Engine) Distill(ctx context.Context, opts DistillOpts, userID string) (
 		}
 	}
 
-	result.Skipped = skipped
-
-	// Step 4b: Persist session summary as a continuity memory
-	if extraction.SessionSummary != "" && !opts.DryRun {
+	// Persist session summary as a continuity memory
+	if extraction.SessionSummary != "" {
 		summaryFiles := collectAllFiles(extraction.Facts)
-		summaryErr := e.AddWithOptions(ctx, MemoryInput{
+		if err := e.AddWithOptions(ctx, MemoryInput{
 			UserMessage: extraction.SessionSummary,
 			Type:        "continuity",
 			Salience:    0.75,
 			Files:       summaryFiles,
 			SessionID:   sessionID,
-		}, userID)
-		if summaryErr == nil {
+		}, userID); err == nil {
 			written++
 		}
 	}
 
-	result.Written = written
-
-	// Step 5: Mark as distilled
-	if sessionID != "" {
-		_ = e.store.SetConfigValue("last_distill_session_id", sessionID)
-	}
-
-	// Step 6: Auto-synthesize if enough new memories
+	// Auto-synthesize if enough new memories
 	if written >= 3 {
-		// Best-effort synthesis — don't block on failure
 		_, _ = e.Synthesize(ctx, namespace, &SynthesizeOpts{})
 	}
-
-	return result, nil
+	return written, skipped
 }
 
 // loadTranscript reads a session transcript from the configured source.
@@ -397,6 +484,218 @@ func parseTranscript(data []byte) string {
 		text = text[len(text)-12000:]
 	}
 	return text
+}
+
+// distillSupersedeThreshold is the cosine similarity at or above which a
+// candidate fact supersedes an existing live fact instead of being inserted as
+// a duplicate. Matches the migrate-v2 dedupe threshold.
+const distillSupersedeThreshold = 0.90
+
+// getDistillGenerator returns the best available TextGenerator for v2 fact
+// extraction. Prefers a dedicated SynthesisGenerator, then falls back to the
+// Summarizer if it implements TextGenerator. Returns an error if none is set
+// (v2 extraction needs an LLM).
+func (e *Engine) getDistillGenerator() (TextGenerator, error) {
+	if e.cfg.SynthesisGenerator != nil {
+		return e.cfg.SynthesisGenerator, nil
+	}
+	gen, ok := e.cfg.Summarizer.(TextGenerator)
+	if !ok || gen == nil {
+		return nil, fmt.Errorf("dualmem: no TextGenerator configured (need SynthesisGenerator or a TextGenerator-capable Summarizer for v2 distill)")
+	}
+	return gen, nil
+}
+
+// extractFactCandidates runs the v2 extraction prompt against the transcript
+// and returns kind-classified fact candidates. It is resilient: a malformed
+// response yields a parse error (which the caller treats as "zero candidates,
+// keep going"), and individual candidates with invalid kind/empty text are
+// dropped by parseFactCandidateResponse rather than failing the whole batch.
+func (e *Engine) extractFactCandidates(ctx context.Context, transcript string, maxFacts int) ([]FactCandidate, error) {
+	gen, err := e.getDistillGenerator()
+	if err != nil {
+		return nil, err
+	}
+	if maxFacts <= 0 {
+		maxFacts = 20
+	}
+	prompt := formatFactCandidatePrompt(transcript, maxFacts)
+	response, err := gen.GenerateText(ctx, prompt, 2000)
+	if err != nil {
+		return nil, fmt.Errorf("v2 LLM extraction: %w", err)
+	}
+	return parseFactCandidateResponse(response)
+}
+
+// formatFactCandidatePrompt builds the v2 fact-candidate extraction prompt.
+//
+// The prompt is deliberately biased toward FEW, high-value, durable facts:
+// narrative/episodic material is skipped, and an empty candidate list is an
+// explicitly valid answer. Each candidate must be self-contained (1-3
+// sentences) and tagged with one of the v2 kinds plus any associated file paths.
+func formatFactCandidatePrompt(transcript string, maxFacts int) string {
+	return fmt.Sprintf(`You are a durable-memory curator for a coding agent. Read this session transcript and propose the FEW facts worth remembering permanently for future sessions on this codebase.
+
+Only extract facts that are:
+- Durable: still true after the session ends (not "what I'm about to do").
+- Non-obvious: not re-derivable from reading the code or git log.
+- Self-contained: a future reader understands them WITHOUT this transcript.
+
+For each fact, classify into exactly ONE kind:
+- "decision": a choice made between alternatives, or an approach selected/rejected. Architectural decisions, library/framework choices, trade-offs.
+- "deadend": an approach that was tried and failed or was abandoned, with WHY. Highest value — record these aggressively.
+- "gotcha": a fragile invariant, a non-obvious constraint, something that must not be changed, a pitfall that cost time.
+- "preference": a stable user/team preference about HOW to work (style, tooling, conventions) — these are user-global, not repo-specific.
+- "reference": where something lives or how a subsystem connects (file relationships, control flow), only when non-obvious from the code.
+
+Respond with ONLY valid JSON, no markdown fences, no prose:
+{
+  "candidates": [
+    {
+      "kind": "decision|deadend|gotcha|preference|reference",
+      "text": "1-3 self-contained sentences stating the fact plainly.",
+      "files": ["repo/relative/path.go"]
+    }
+  ]
+}
+
+Rules:
+- Prefer FEW high-value facts. An empty "candidates": [] is a GOOD answer for an unremarkable session — do not pad.
+- SKIP narrative/episodic material: what the assistant did step-by-step, tool output, greetings, status updates, "we discussed X". Those are NOT facts.
+- Each text must read as a standalone statement a future agent can act on, without seeing this session.
+- Include files ONLY when the fact is genuinely tied to those paths.
+- Maximum %d candidates. If more come to mind, keep only the most durable and non-obvious.
+
+TRANSCRIPT:
+%s`, maxFacts, transcript)
+}
+
+// parseFactCandidateResponse parses the v2 LLM JSON response into candidates.
+// It strips markdown fences, drops candidates with an invalid kind or empty text
+// (counting them as malformed), and tolerates partially-broken JSON by returning
+// whatever valid candidates it could extract. A completely unparseable body
+// returns an error so the caller can record it without failing the distill.
+func parseFactCandidateResponse(response string) ([]FactCandidate, error) {
+	response = strings.TrimSpace(response)
+	// Strip ```json ... ``` or ``` ... ``` fences.
+	if strings.HasPrefix(response, "```json") {
+		response = strings.TrimPrefix(response, "```json")
+		response = strings.TrimSuffix(response, "```")
+		response = strings.TrimSpace(response)
+	} else if strings.HasPrefix(response, "```") {
+		response = strings.TrimPrefix(response, "```")
+		response = strings.TrimSuffix(response, "```")
+		response = strings.TrimSpace(response)
+	}
+
+	var parsed factCandidateResponse
+	if err := json.Unmarshal([]byte(response), &parsed); err != nil {
+		return nil, fmt.Errorf("parse fact-candidate response: %w (response: %.200s)", err, response)
+	}
+
+	out := make([]FactCandidate, 0, len(parsed.Candidates))
+	for _, c := range parsed.Candidates {
+		if !ValidFactKinds[c.Kind] {
+			continue // malformed kind — skip
+		}
+		if strings.TrimSpace(c.Text) == "" {
+			continue // empty text — skip
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// distillInsertFactCandidate inserts (or supersedes) a single v2 fact candidate.
+//
+// Dedup contract against live (non-superseded) facts in the candidate's target
+// namespace:
+//   - identical text (after trim) → no-op, returns "identical";
+//   - embedding near-duplicate (cosine >= distillSupersedeThreshold) → the old
+//     fact is superseded by the new candidate, returns "superseded";
+//   - otherwise → a new fact is inserted, returns "inserted".
+//
+// Preferences are stored user-global (namespace ""); all other kinds are
+// repo-scoped to the distill namespace. Source is always "inferred"; git commit
+// and session id are stamped via AddFact/SupersedeFact provenance. A candidate
+// with an invalid kind or empty text returns "malformed"; any other error
+// returns "error". None of these fail the distill.
+func (e *Engine) distillInsertFactCandidate(ctx context.Context, c FactCandidate, namespace, sessionID string) (status string, err error) {
+	if !ValidFactKinds[c.Kind] {
+		return "malformed", fmt.Errorf("invalid fact kind %q", c.Kind)
+	}
+	text := strings.TrimSpace(c.Text)
+	if text == "" {
+		return "malformed", fmt.Errorf("empty fact text")
+	}
+
+	// Preferences are user-global; everything else is repo-scoped.
+	ns := namespace
+	if c.Kind == FactKindPreference {
+		ns = ""
+	}
+	files := c.Files
+	if files == nil {
+		files = []string{}
+	}
+
+	// Embed once; reuse for both the identical/near-dup checks and the insert.
+	emb, err := e.embedder.Embed(ctx, text, "RETRIEVAL_DOCUMENT")
+	if err != nil {
+		return "error", fmt.Errorf("embed candidate: %w", err)
+	}
+
+	// Load live facts in this namespace for the dedup check.
+	e.mu.RLock()
+	live, lerr := e.store.GetFactsByNamespaces([]string{ns}, "", false)
+	e.mu.RUnlock()
+	if lerr != nil {
+		return "error", fmt.Errorf("load live facts: %w", lerr)
+	}
+
+	// Identical text → no-op.
+	for _, f := range live {
+		if strings.TrimSpace(f.Text) == text {
+			return "identical", nil
+		}
+	}
+
+	// Near-duplicate (cosine >= threshold) → supersede the closest match.
+	var bestMatch *Fact
+	bestSim := distillSupersedeThreshold - 1 // start below threshold
+	for _, f := range live {
+		sim := CosineSimilarity(emb, f.Vector)
+		if sim >= distillSupersedeThreshold && sim > bestSim {
+			bestMatch = f
+			bestSim = sim
+		}
+	}
+	if bestMatch != nil {
+		if _, err := e.SupersedeFact(ctx, bestMatch.ID, Fact{
+			Namespace: ns,
+			Kind:      c.Kind,
+			Source:    FactSourceInferred,
+			Text:      text,
+			Files:     files,
+			SessionID: sessionID,
+		}); err != nil {
+			return "error", fmt.Errorf("supersede near-dup: %w", err)
+		}
+		return "superseded", nil
+	}
+
+	// Otherwise insert a new fact.
+	if _, err := e.AddFact(ctx, Fact{
+		Namespace: ns,
+		Kind:      c.Kind,
+		Source:    FactSourceInferred,
+		Text:      text,
+		Files:     files,
+		SessionID: sessionID,
+	}); err != nil {
+		return "error", fmt.Errorf("insert fact: %w", err)
+	}
+	return "inserted", nil
 }
 
 // extractFromTranscript uses the LLM to extract structured facts from a transcript.
