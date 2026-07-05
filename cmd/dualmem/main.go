@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -39,14 +40,14 @@ type CLIConfig struct {
 		EmbeddingModel     string `yaml:"embedding_model"`
 		EmbeddingAPIKeyEnv string `yaml:"embedding_api_key_env"`
 		EmbeddingDimension int    `yaml:"embedding_dimension"`
-		SynthesisProvider  string `yaml:"synthesis_provider"`   // "anthropic" or "" (use main summarizer)
-		SynthesisModel     string `yaml:"synthesis_model"`      // e.g. "glm-5.1"
+		SynthesisProvider  string `yaml:"synthesis_provider"`    // "anthropic" or "" (use main summarizer)
+		SynthesisModel     string `yaml:"synthesis_model"`       // e.g. "glm-5.1"
 		SynthesisAPIKeyEnv string `yaml:"synthesis_api_key_env"` // e.g. "ZAI_API_KEY"
-		SynthesisBaseURL   string `yaml:"synthesis_base_url"`   // e.g. "https://api.z.ai/api/anthropic"
-		ExplorerProvider  string `yaml:"explorer_provider"`
-		ExplorerModel     string `yaml:"explorer_model"`
-		ExplorerAPIKeyEnv string `yaml:"explorer_api_key_env"`
-		ExplorerBaseURL   string `yaml:"explorer_base_url"`
+		SynthesisBaseURL   string `yaml:"synthesis_base_url"`    // e.g. "https://api.z.ai/api/anthropic"
+		ExplorerProvider   string `yaml:"explorer_provider"`
+		ExplorerModel      string `yaml:"explorer_model"`
+		ExplorerAPIKeyEnv  string `yaml:"explorer_api_key_env"`
+		ExplorerBaseURL    string `yaml:"explorer_base_url"`
 	} `yaml:"providers"`
 	Pipeline struct {
 		EpisodeInterval string `yaml:"episode_interval"`
@@ -309,6 +310,8 @@ func main() {
 		cmdAnticipationStats(cfg)
 	case "archive-v1":
 		cmdArchiveV1(cfg)
+	case "migrate-v2":
+		cmdMigrateV2(cfg)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -354,6 +357,7 @@ Commands:
   benchmark   Compare cold-start vs warm context assembly quality
   anticipation-stats  Measure anticipatory pre-exploration hit rate
   archive-v1 Dump the entire v1 store to JSON (Phase 0 migration safety net)
+  migrate-v2 Curate v1 detail memories + knowledge docs into facts (one-time)
 
 Flags (all commands):
   --ns     Namespace (default: auto-detect from cwd or config)
@@ -1362,7 +1366,7 @@ func cmdSearchCode(cfg CLIConfig) {
 
 	// Default: HDC+BM25 hybrid search (module-level, descriptive summaries)
 	engine, engErr := dualmem.NewForCodeSearch(dualmem.Config{
-		RootDir:   rootDir,
+		RootDir:    rootDir,
 		SQLitePath: cfg.Storage.SQLitePath,
 	})
 	if engErr != nil {
@@ -1817,6 +1821,90 @@ func cmdAnticipationStats(cfg CLIConfig) {
 	}
 
 	fmt.Print(dualmem.FormatAnticipationStats(stats, namespace))
+}
+
+func cmdMigrateV2(cfg CLIConfig) {
+	fs := flag.NewFlagSet("migrate-v2", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace to migrate (default: auto-detect)")
+	archiveDir := fs.String("archive-dir", "", "Archive directory (default: ~/.dualmem-v1-archive)")
+	commit := fs.Bool("commit", false, "Insert facts (default is dry-run)")
+	out := fs.String("out", "", "Write the markdown mirror preview to <path> instead of stdout")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	namespace := resolveNamespace(*ns, cfg)
+	if namespace == "" {
+		fmt.Fprintln(os.Stderr, "Error: could not resolve namespace (pass --ns)")
+		os.Exit(1)
+	}
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	res, err := engine.MigrateV2(context.Background(), dualmem.MigrateV2Options{
+		Namespace:  namespace,
+		ArchiveDir: *archiveDir,
+		Commit:     *commit,
+	})
+	if err != nil {
+		var ame *dualmem.ArchiveMissingError
+		if errors.As(err, &ame) {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", ame)
+			fmt.Fprintf(os.Stderr, "Run this first, then re-run migrate-v2:\n  dualmem archive-v1 --ns %s\n", namespace)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(res)
+		return
+	}
+
+	mode := "DRY-RUN"
+	if *commit {
+		mode = "COMMITTED"
+	}
+	fmt.Printf("=== DualMem v2 Migration [%s] ===\n", mode)
+	fmt.Printf("Namespace: %s\n", res.Namespace)
+	fmt.Printf("Archive:   %s\n", res.Archive)
+	fmt.Printf("Sources:   %d (v1 detail memories + knowledge docs)\n", res.Sources)
+	fmt.Printf("%s\n", res.Summary())
+	if len(res.Errors) > 0 {
+		fmt.Printf("Errors:    %d (items skipped due to curation failures)\n", len(res.Errors))
+		for _, me := range res.Errors {
+			fmt.Printf("  [%s] %s\n", me.SourceID, me.Reason)
+		}
+	}
+	fmt.Println()
+
+	if *out != "" {
+		if err := os.WriteFile(*out, []byte(res.Markdown), 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", *out, err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Markdown mirror preview written to %s\n", *out)
+	} else {
+		fmt.Print(res.Markdown)
+	}
+
+	if !*commit && (res.Skipped > 0 || res.DedupeSkipped > 0 || sumMapValues(res.KeptByKind) > 0) {
+		fmt.Println("\n(dry-run; pass --commit to insert facts)")
+	}
+}
+
+// sumMapValues returns the sum of a map[string]int's values.
+func sumMapValues(m map[string]int) int {
+	var n int
+	for _, v := range m {
+		n += v
+	}
+	return n
 }
 
 func cmdArchiveV1(cfg CLIConfig) {
@@ -2592,7 +2680,7 @@ func cmdFileContext(cfg CLIConfig) {
 			"decision":   "★",
 			"continuity": "↻",
 			"knowledge":  "📖",
-			"checkpoint":  "📋",
+			"checkpoint": "📋",
 			"map":        "🗺",
 			"trace":      "🔍",
 			"seed":       "🌱",
@@ -3223,4 +3311,3 @@ func cmdStats(cfg CLIConfig) {
 		fmt.Println()
 	}
 }
-
