@@ -3,7 +3,6 @@ package dualmem
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 )
@@ -308,70 +307,6 @@ func (cp *Checkpoint) FormatForContext() string {
 		sb.WriteString("\n  Blocked on: " + cp.BlockedOn)
 	}
 	return sb.String()
-}
-
-// --- Workflow hints ---
-
-// WorkflowHint is a lightweight pointer to a full workflow memory.
-// Produced by store queries, rendered as one-liner hints in file-context and context assembly.
-type WorkflowHint struct {
-	WorkflowID  string   // e.g. "issue-credentials" — parsed from [workflow:ID] prefix
-	Tickets     []string // e.g. ["LC-1635", "LC-1729"] — extracted from memory text
-	Summary     string   // first ~150 chars of workflow text after the [workflow:ID] prefix
-	MatchedFile string   // which file triggered the match (file-context path only, empty for ticket path)
-}
-
-// parseWorkflowHint extracts a WorkflowHint from a raw autopilot memory text.
-// Input format: "[workflow:issue-credentials] Full summary text mentioning LC-1635..."
-// Returns nil if text doesn't match the [workflow:*] pattern.
-func parseWorkflowHint(text string) *WorkflowHint {
-	if !strings.HasPrefix(text, "[workflow:") {
-		return nil
-	}
-	closeBracket := strings.Index(text, "]")
-	if closeBracket < 0 {
-		return nil
-	}
-	id := text[len("[workflow:"):closeBracket]
-	summary := ""
-	if closeBracket+2 < len(text) {
-		summary = strings.TrimSpace(text[closeBracket+1:])
-		// Strip optional ticket tag like "[LC-1729, LC-1731]"
-		if strings.HasPrefix(summary, "[") {
-			if end := strings.Index(summary, "]"); end >= 0 {
-				summary = strings.TrimSpace(summary[end+1:])
-			}
-		}
-		// Strip markdown header like "## WORKFLOW SUMMARY\n"
-		summary = strings.TrimPrefix(summary, "## WORKFLOW SUMMARY")
-		summary = strings.TrimSpace(summary)
-		if len(summary) > 150 {
-			summary = summary[:147] + "..."
-		}
-	}
-
-	// Extract ticket prefixes from the full text
-	var tickets []string
-	// Use a simple regex inline — matches LC-1635, PROJ-42, etc.
-	re := regexp.MustCompile(`[A-Z]+-\d+`)
-	for _, m := range re.FindAllString(text, -1) {
-		tickets = append(tickets, m)
-	}
-	// Deduplicate
-	seen := make(map[string]bool)
-	deduped := tickets[:0]
-	for _, t := range tickets {
-		if !seen[t] {
-			seen[t] = true
-			deduped = append(deduped, t)
-		}
-	}
-
-	return &WorkflowHint{
-		WorkflowID: id,
-		Tickets:    deduped,
-		Summary:    summary,
-	}
 }
 
 // --- Task intent ---
@@ -977,10 +912,6 @@ type Store interface {
 	ReplaceStructuralEdgesForDirs(namespace string, relDirs []string, edges []StructuralEdge) error
 	GetStructuralNeighbors(namespace, path string, edgeTypes []string, limit int) ([]StructuralEdge, error)
 	GetStructuralEdgesForPath(namespace, path string, limit int) ([]StructuralEdge, error)
-
-	// Workflow hints
-	GetWorkflowHintsForFiles(userID string, filenames []string) ([]WorkflowHint, error)
-	GetWorkflowHintsForTickets(userID string, tickets []string) ([]WorkflowHint, error)
 
 	// Facts (v2 durable facts). Pure addition; see docs/superpowers/plans/2026-07-04-dualmem-v2.md (P2).
 	InsertFact(f *Fact, embedding []float32) error

@@ -1585,9 +1585,6 @@ func cmdAutopilot(cfg CLIConfig) {
 	model := fs.String("model", "", "Override explorer model name")
 	baseURL := fs.String("base-url", "", "Override explorer model base URL")
 	stats := fs.Bool("stats", false, "Show coverage statistics only")
-	workflows := fs.Bool("workflows", false, "Discover and analyze cross-cutting workflows from git history")
-	depthMonths := fs.Int("depth-months", 6, "How far back in git history for workflows")
-	minCommits := fs.Int("min-commits", 3, "Minimum commits per workflow cluster")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	fs.Parse(os.Args[2:])
 
@@ -1636,49 +1633,6 @@ func cmdAutopilot(cfg CLIConfig) {
 				engine.SetExplorerGenerator(dualmem.NewAnthropicSummarizer(apiKey, url, *model))
 			}
 		}
-	}
-
-	// Workflow mode: discover and analyze cross-cutting workflows from git history.
-	if *workflows {
-		wOpts := dualmem.WorkflowAutopilotOpts{
-			AutopilotOpts: dualmem.AutopilotOpts{
-				Budget:    *budget,
-				DryRun:    *dryRun,
-				Force:     *force,
-				ModelName: *model,
-				BaseURL:   *baseURL,
-			},
-			DepthMonths:  *depthMonths,
-			MinCommits:   *minCommits,
-			MaxWorkflows: 20,
-		}
-		wResult, wErr := engine.AutopilotWorkflows(ctx, namespace, wOpts)
-		if wErr != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", wErr)
-			os.Exit(1)
-		}
-		if *jsonOut {
-			json.NewEncoder(os.Stdout).Encode(wResult)
-			return
-		}
-		if *dryRun {
-			fmt.Printf("Workflow discovery: %d clusters found\n\n", len(wResult.Clusters))
-			for i, c := range wResult.Clusters {
-				if i >= 30 {
-					fmt.Printf("... and %d more\n", len(wResult.Clusters)-30)
-					break
-				}
-				fmt.Printf("  %.3f  %-40s [%s] (%d files, %d commits)\n",
-					c.Score, c.ID, strings.Join(c.Tickets, ","), len(c.Files), c.Commits)
-			}
-			return
-		}
-		fmt.Printf("Workflows: explored %d/%d, created %d memories, used %d tokens (skipped %d)\n",
-			wResult.Explored, len(wResult.Clusters), wResult.MemoriesAdded, wResult.TokensUsed, wResult.Skipped)
-		if wResult.Error != "" {
-			fmt.Fprintf(os.Stderr, "Warning: %s\n", wResult.Error)
-		}
-		return
 	}
 
 	opts := dualmem.AutopilotOpts{
@@ -2753,10 +2707,9 @@ func cmdFileContext(cfg CLIConfig) {
 		os.Exit(1)
 	}
 
-	// Also fetch workflow hints for this file
-	workflowHints, _ := engine.GetWorkflowHintsForFile(ctx, namespace, filename)
+	// Gate mode fetches file-context annotations.
 
-	if len(results) == 0 && len(workflowHints) == 0 {
+	if len(results) == 0 {
 		return // Silent exit — no memories for this file
 	}
 
@@ -2777,7 +2730,7 @@ func cmdFileContext(cfg CLIConfig) {
 			relPath = filepath.Base(abs)
 		}
 
-		totalObs := len(results) + len(workflowHints)
+		totalObs := len(results)
 		fmt.Printf("[File Memory] %s (%d cached observations, file ~%dtok)\n", relPath, totalObs, tokEst)
 		fmt.Println("Prior context for this file — the full read will follow, but these may already answer your question:")
 		fmt.Println()
@@ -2801,13 +2754,6 @@ func cmdFileContext(cfg CLIConfig) {
 			}
 			dateStr := r.CreatedAt.Format("2006-01-02")
 			fmt.Printf("%s [%s] %s (%s)\n", icon, r.Type, r.Text, dateStr)
-		}
-		for _, wh := range workflowHints {
-			ticketStr := ""
-			if len(wh.Tickets) > 0 {
-				ticketStr = " (" + strings.Join(wh.Tickets, ", ") + ")"
-			}
-			fmt.Printf("📎 [workflow] \"%s\"%s — search \"workflow:%s\" for full detail\n", wh.Summary, ticketStr, wh.WorkflowID)
 		}
 		return
 	}

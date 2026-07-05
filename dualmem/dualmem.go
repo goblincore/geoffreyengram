@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -391,11 +390,6 @@ func (e *Engine) FileContext(ctx context.Context, userID string, filename string
 		}
 	}
 	return result, nil
-}
-
-// GetWorkflowHintsForFile returns workflow hints for a single file.
-func (e *Engine) GetWorkflowHintsForFile(ctx context.Context, userID string, filename string) ([]WorkflowHint, error) {
-	return e.store.GetWorkflowHintsForFiles(userID, []string{filename})
 }
 
 // FileIndex returns all basenames that have associated high-signal memories.
@@ -794,32 +788,6 @@ func (e *Engine) FileAnnotations(ctx context.Context, namespace string, filePath
 		}
 	}
 
-	// 4. Workflow hints — lightweight pointers to autopilot workflow memories
-	workflowHints, _ := e.store.GetWorkflowHintsForFiles(namespace, filePaths)
-	for _, wh := range workflowHints {
-		whID := "wh_" + wh.WorkflowID
-		if seenIDs[whID] {
-			continue
-		}
-		seenIDs[whID] = true
-		ticketStr := ""
-		if len(wh.Tickets) > 0 {
-			ticketStr = " (" + strings.Join(wh.Tickets, ", ") + ")"
-		}
-		hintText := fmt.Sprintf(`"%s"%s — search "workflow:%s" for full detail`, wh.Summary, ticketStr, wh.WorkflowID)
-		if len(hintText) > 200 {
-			hintText = hintText[:197] + "..."
-		}
-		annotations = append(annotations, Annotation{
-			FilePath: wh.MatchedFile,
-			Type:     "workflow",
-			Text:     hintText,
-			Source:   "workflow_hint",
-			Salience: 0.85,
-			MemoryID: whID,
-		})
-	}
-
 	// Sort by salience descending
 	sort.Slice(annotations, func(i, j int) bool {
 		return annotations[i].Salience > annotations[j].Salience
@@ -1030,29 +998,6 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 			parts = append(parts, cpText)
 			sources = append(sources, SourceRef{Type: "checkpoint", ID: cp.Task})
 			tokensUsed += cpTokens
-		}
-	}
-
-	// Workflow Hints — ticket-prefix lookup from active checkpoints
-	ticketPrefixes := extractTicketsFromCheckpoints(checkpoints)
-	if len(ticketPrefixes) > 0 {
-		workflowHints, _ := e.store.GetWorkflowHintsForTickets(userID, ticketPrefixes)
-		if len(workflowHints) > 0 {
-			var hintLines []string
-			for _, wh := range workflowHints {
-				ticketStr := ""
-				if len(wh.Tickets) > 0 {
-					ticketStr = " (" + strings.Join(wh.Tickets, ", ") + ")"
-				}
-				hintLines = append(hintLines, fmt.Sprintf(`📎 "%s"%s — search "workflow:%s"`, wh.Summary, ticketStr, wh.WorkflowID))
-			}
-			whText := "[Workflow Hints]\n" + strings.Join(hintLines, "\n")
-			whTokens := estimateTokens(whText)
-			if tokensUsed+whTokens <= tokenBudget {
-				parts = append(parts, whText)
-				sources = append(sources, SourceRef{Type: "workflow_hint", ID: "tickets"})
-				tokensUsed += whTokens
-			}
 		}
 	}
 
@@ -1271,41 +1216,6 @@ func extractFileHints(checkpoints []Checkpoint, memories []DetailMemory) []strin
 		}
 	}
 	return hints
-}
-
-// extractTicketsFromCheckpoints scans checkpoint Task and Text fields for ticket prefixes.
-// Returns deduplicated ticket IDs like ["LC-1635", "LC-1729"].
-func extractTicketsFromCheckpoints(checkpoints []Checkpoint) []string {
-	re := regexp.MustCompile(`[A-Z]+-\d+`)
-	seen := make(map[string]bool)
-	var tickets []string
-
-	for _, cp := range checkpoints {
-		for _, m := range re.FindAllString(cp.Task, -1) {
-			if !seen[m] {
-				seen[m] = true
-				tickets = append(tickets, m)
-			}
-		}
-		for _, step := range cp.CompletedSteps {
-			for _, m := range re.FindAllString(step, -1) {
-				if !seen[m] {
-					seen[m] = true
-					tickets = append(tickets, m)
-				}
-			}
-		}
-		for _, step := range cp.RemainingSteps {
-			for _, m := range re.FindAllString(step, -1) {
-				if !seen[m] {
-					seen[m] = true
-					tickets = append(tickets, m)
-				}
-			}
-		}
-	}
-
-	return tickets
 }
 
 // AssembleContextIndex returns a compact index of available context items
