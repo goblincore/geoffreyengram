@@ -110,6 +110,13 @@ func (e *Engine) assemblePinnedV2(ctx context.Context, userID, query string, opt
 		e.recordSessionMarker(userID)
 	}
 
+	// Record served facts for instrumentation (task 7). Every fact emitted
+	// above is logged via served_facts so the distill-time file-touch
+	// correlator can credit hits. Best-effort and only when a session is named.
+	if opts.SessionID != "" {
+		e.RecordServed(opts.SessionID, servedFactIDs, FactSurfacePinned)
+	}
+
 	block := &ContextBlock{
 		Text:          strings.Join(parts, "\n\n"),
 		TokenCount:    tokensUsed,

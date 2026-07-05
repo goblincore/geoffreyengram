@@ -31,14 +31,14 @@ type DistillResult struct {
 	Triples   []EntityTriple  `json:"triples,omitempty"`
 	Summary   string          `json:"summary"`
 	Skipped   int             `json:"skipped"` // near-duplicate facts skipped
-	Written   int             `json:"written"`  // facts actually written
+	Written   int             `json:"written"` // facts actually written
 	DryRun    bool            `json:"dry_run"`
 }
 
 // DistilledFact is an extracted memory from a session transcript.
 type DistilledFact struct {
 	Text     string   `json:"text"`
-	Type     string   `json:"type"`     // "decision", "warning", "continuity", "map", "general"
+	Type     string   `json:"type"` // "decision", "warning", "continuity", "map", "general"
 	Salience float64  `json:"salience"`
 	Files    []string `json:"files,omitempty"`
 	Entities []Entity `json:"entities,omitempty"`
@@ -53,8 +53,8 @@ type distillExtractionResponse struct {
 
 // CCMessage represents a message in a Claude Code session transcript.
 type CCMessage struct {
-	Role    string `json:"role"`              // "user", "assistant", "tool_use", "tool_result"
-	Content string `json:"content"`           // text content
+	Role    string `json:"role"`    // "user", "assistant", "tool_use", "tool_result"
+	Content string `json:"content"` // text content
 	Type    string `json:"type,omitempty"`
 }
 
@@ -84,6 +84,12 @@ func (e *Engine) Distill(ctx context.Context, opts DistillOpts, userID string) (
 
 	// Step 1b: Enrich transcript with auto-captured file interactions (if available)
 	transcript = enrichWithSessionLog(transcript, opts.Namespace, e.cfg.RootDir)
+
+	// Step 1c: Collect files the session touched (reads + edits), from both the
+	// auto-capture hook log and the transcript itself, so the file-touch hit
+	// signal can credit served facts. Best-effort: an empty set just means no
+	// facts get credited this pass.
+	touched := collectTouchedFiles(opts.Namespace, e.cfg.RootDir, transcript)
 
 	// Step 2: Extract facts via LLM
 	extraction, err := e.extractFromTranscript(ctx, transcript, opts.MaxFacts)
@@ -191,6 +197,14 @@ func (e *Engine) Distill(ctx context.Context, opts DistillOpts, userID string) (
 	// Step 5: Mark as distilled
 	if sessionID != "" {
 		_ = e.store.SetConfigValue("last_distill_session_id", sessionID)
+	}
+
+	// Step 5b: Credit file-touch hits for any served facts whose cited files
+	// this session actually touched. The passive usefulness signal that the
+	// deleted rate_context loop was meant to provide. Best-effort: errors are
+	// swallowed so a stats failure never blocks distillation.
+	if sessionID != "" && len(touched) > 0 {
+		_, _ = e.RecordFileTouches(sessionID, touched)
 	}
 
 	// Step 6: Auto-synthesize if enough new memories
@@ -518,6 +532,132 @@ func collectAllFiles(facts []DistilledFact) []string {
 		}
 	}
 	return result
+}
+
+// collectTouchedFiles returns the set of repo-relative paths the session read
+// or edited. It is the input to the file-touch hit signal (RecordFileTouches).
+// Two sources are merged:
+//  1. The auto-capture hook log ($TMPDIR/dualmem-session-<nshash>-*.jsonl) —
+//     each line carries a `files` field naming the path the tool touched. This
+//     is the authoritative source where available (Claude Code only).
+//  2. A light scan of the transcript text for path-like tokens as a fallback
+//     for harnesses without the hook (best-effort, no false positives matter:
+//     the hit correlator only credits facts whose cited files match).
+func collectTouchedFiles(namespace, rootDir, transcript string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	add := func(p string) {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			return
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+
+	// Source 1: auto-capture hook log.
+	for _, p := range readSessionLogFiles(namespace, rootDir) {
+		add(p)
+	}
+
+	// Source 2: transcript path-token scan. We only accept tokens that look
+	// like repo-relative paths (contain a slash and a dotted extension) to keep
+	// false positives down — the correlator intersects against fact files, so a
+	// stray token only matters if it coincidentally matches a cited path.
+	if transcript != "" {
+		for _, tok := range scanPathTokens(transcript) {
+			add(tok)
+		}
+	}
+	return out
+}
+
+// readSessionLogFiles returns the deduplicated `files` values from the most
+// recent auto-capture hook log for this namespace. Returns nil when the hook
+// is unavailable (non-CC harness, cleared TMPDIR). The namespace-hash
+// convention must match md5Short (and the hook script).
+func readSessionLogFiles(namespace, rootDir string) []string {
+	nsBase := ""
+	if rootDir != "" {
+		nsBase = filepath.Base(rootDir)
+	} else if namespace != "" {
+		nsBase = strings.TrimPrefix(namespace, "claude:")
+	}
+	if nsBase == "" {
+		return nil
+	}
+	tmpDir := os.TempDir()
+	pattern := filepath.Join(tmpDir, fmt.Sprintf("dualmem-session-%s-*.jsonl", md5Short(nsBase)))
+	matches, err := filepath.Glob(pattern)
+	if err != nil || len(matches) == 0 {
+		return nil
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		fi, _ := os.Stat(matches[i])
+		fj, _ := os.Stat(matches[j])
+		if fi == nil || fj == nil {
+			return false
+		}
+		return fi.ModTime().After(fj.ModTime())
+	})
+	data, err := os.ReadFile(matches[0])
+	if err != nil {
+		return nil
+	}
+	type logEntry struct {
+		Files string `json:"files"`
+	}
+	var out []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var entry logEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if entry.Files != "" {
+			out = append(out, entry.Files)
+		}
+	}
+	return out
+}
+
+// pathTokenExtents lists file extensions whose path-like tokens we accept from
+// the transcript fallback scan. Kept conservative to limit false positives.
+var pathTokenExtents = map[string]bool{
+	".go": true, ".py": true, ".rs": true, ".ts": true, ".tsx": true,
+	".js": true, ".jsx": true, ".java": true, ".kt": true, ".rb": true,
+	".swift": true, ".c": true, ".h": true, ".cpp": true, ".cc": true,
+	".hpp": true, ".md": true, ".yaml": true, ".yml": true, ".json": true,
+	".toml": true, ".sh": true,
+}
+
+// scanPathTokens extracts repo-relative-looking path tokens from free text.
+// A token qualifies if it contains a slash and ends with a known source-file
+// extension. It's a coarse fallback for the hook log; the correlator's
+// intersection with cited files keeps false positives harmless.
+func scanPathTokens(text string) []string {
+	var out []string
+	fields := strings.Fields(text)
+	for _, f := range fields {
+		// Trim surrounding punctuation that tokenizers often leave attached.
+		f = strings.Trim(f, "\"'`()*,;:<>[](){}")
+		if !strings.Contains(f, "/") {
+			continue
+		}
+		dot := strings.LastIndex(f, ".")
+		if dot < 0 {
+			continue
+		}
+		ext := strings.ToLower(f[dot:])
+		if !pathTokenExtents[ext] {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
 }
 
 // enrichWithSessionLog appends a file-touch summary from the auto-capture hook

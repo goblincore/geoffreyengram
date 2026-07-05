@@ -284,8 +284,14 @@ func main() {
 		cmdFileContext(cfg)
 	case "file-index":
 		cmdFileIndex(cfg)
+	case "recall":
+		cmdRecall(cfg)
+	case "precedent":
+		cmdPrecedent(cfg)
 	case "rate":
 		cmdRate(cfg)
+	case "facts":
+		cmdFacts(cfg)
 	case "train":
 		cmdTrain(cfg)
 	case "show":
@@ -344,6 +350,9 @@ Commands:
   docs        List/show/delete/export knowledge docs
   file-context  Get memories associated with a specific file (warnings, decisions, maps)
   file-index    Generate file index for Read hook fast-path filtering
+  recall        Recall durable facts by semantic similarity (v2 pull tool)
+  precedent     Recall prior decisions + dead-ends for an approach (v2 pull tool)
+  facts         Inspect durable facts (stats: served/hit scorecard, dead + stale candidates)
   rate        Submit context quality ratings (item-level or session-level)
   train       Train the re-ranker model from accumulated ratings
   stats       Show context quality statistics and re-ranker status
@@ -634,6 +643,7 @@ func cmdContext(cfg CLIConfig) {
 
 	block, err := engine.Assemble(ctx, namespace, query, *budget, dualmem.AssembleOptions{
 		Legacy:       *legacyMode,
+		SessionID:    cliSessionID(namespace),
 		PinnedBudget: *pinnedBudget,
 	})
 	if err != nil {
@@ -2178,6 +2188,127 @@ func cmdDocs(cfg CLIConfig) {
 	}
 }
 
+// cmdFacts is the durable-facts CLI (dualmem v2). Today it exposes `stats` —
+// the served/hit scorecard that replaces the dead rate_context loop. Future
+// subcommands (export/import from task 3) live in their own worktree branches.
+func cmdFacts(cfg CLIConfig) {
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "usage: dualmem facts <stats> [flags]")
+		os.Exit(1)
+	}
+	sub := os.Args[2]
+	switch sub {
+	case "stats":
+		cmdFactsStats(cfg)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown 'facts' subcommand: %s (try 'stats')\n", sub)
+		os.Exit(1)
+	}
+}
+
+// cmdFactsStats runs `dualmem facts stats`. Renders the served/hit scorecard:
+// per-kind counts, overall roll-up, dead facts (served often, never hit), and
+// staleness candidates (git_commit far behind HEAD).
+func cmdFactsStats(cfg CLIConfig) {
+	fs := flag.NewFlagSet("facts stats", flag.ExitOnError)
+	nsFlag := fs.String("ns", "", "Namespace (defaults to current repo). Use '' to scope to user-global facts only; repeat for multiple.")
+	allFlag := fs.Bool("all", false, "Score all namespaces (repo-scoped + user-global) instead of just the current repo.")
+	deadMin := fs.Int("dead-min-serves", 5, "A fact is 'dead' if served >= this many times with zero hits.")
+	staleCommits := fs.Int("stale-commits", 50, "A fact is 'stale' if its git_commit is more than this many commits behind HEAD.")
+	deadLimit := fs.Int("dead-limit", 20, "Max dead-fact rows to list.")
+	staleLimit := fs.Int("stale-limit", 20, "Max stale-fact rows to list.")
+	jsonFlag := fs.Bool("json", false, "Emit the scorecard as JSON.")
+	fs.Parse(os.Args[3:])
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	opts := dualmem.FactStatsOpts{
+		DeadMinServes:         *deadMin,
+		StaleMaxCommitsBehind: *staleCommits,
+		DeadLimit:             *deadLimit,
+		StaleLimit:            *staleLimit,
+	}
+	if *allFlag {
+		// Empty Namespaces = all.
+	} else if *nsFlag != "" {
+		opts.Namespaces = []string{*nsFlag}
+	} else {
+		opts.Namespaces = []string{resolveNamespace("", cfg)}
+	}
+
+	scorecard, err := engine.FactStats(opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonFlag {
+		json.NewEncoder(os.Stdout).Encode(scorecard)
+		return
+	}
+	renderFactScorecard(scorecard)
+}
+
+// renderFactScorecard prints the scorecard in a human-readable table.
+func renderFactScorecard(s *dualmem.FactScorecard) {
+	fmt.Println("Facts scorecard (served/hit signal)")
+	fmt.Printf("  thresholds: dead>= %d serves (0 hits) · stale > %d commits behind HEAD\n\n",
+		s.Opts.DeadMinServes, s.Opts.StaleMaxCommitsBehind)
+
+	fmt.Printf("%-14s %8s %8s %8s %10s\n", "kind", "facts", "served", "hits", "hit-rate")
+	for _, r := range s.ByKind {
+		fmt.Printf("%-14s %8d %8d %8d %9s\n", r.Kind, r.FactsCount, r.ServedCount, r.HitCount, hitRate(r.ServedCount, r.HitCount))
+	}
+	fmt.Printf("%-14s %8d %8d %8d %9s\n", "(overall)", s.Overall.FactsCount, s.Overall.ServedCount, s.Overall.HitCount, hitRate(s.Overall.ServedCount, s.Overall.HitCount))
+
+	fmt.Println()
+	if len(s.Dead) == 0 {
+		fmt.Println("Dead facts: none")
+	} else {
+		fmt.Printf("Dead facts (served >= %d, never hit): %d\n", s.Opts.DeadMinServes, len(s.Dead))
+		for _, d := range s.Dead {
+			fmt.Printf("  [%s] (%d serves) %s\n", d.Kind, d.Serves, truncateFactText(d.Text, 90))
+		}
+	}
+
+	fmt.Println()
+	if len(s.Stale) == 0 {
+		fmt.Println("Stale facts: none")
+	} else {
+		fmt.Printf("Stale candidates (> %d commits behind HEAD): %d\n", s.Opts.StaleMaxCommitsBehind, len(s.Stale))
+		for _, st := range s.Stale {
+			short := st.GitCommit
+			if len(short) > 7 {
+				short = short[:7]
+			}
+			fmt.Printf("  [%s] @%s %s\n", st.Kind, short, truncateFactText(st.Text, 90))
+		}
+	}
+}
+
+// hitRate formats the hits/served ratio as a percentage, or "-" when nothing
+// was served.
+func hitRate(served, hits int) string {
+	if served == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%.0f%%", 100.0*float64(hits)/float64(served))
+}
+
+// truncateFactText shortens a fact's text for one-line scorecard rows.
+func truncateFactText(text string, max int) string {
+	text = strings.TrimSpace(text)
+	if len(text) <= max {
+		return text
+	}
+	return text[:max-1] + "…"
+}
+
 func cmdDistill(cfg CLIConfig) {
 	distillFlags := flag.NewFlagSet("distill", flag.ExitOnError)
 	autoFlag := distillFlags.Bool("auto", false, "Auto-detect CC session, skip if already distilled")
@@ -2718,6 +2849,25 @@ func cmdFileContext(cfg CLIConfig) {
 	for _, r := range results {
 		fmt.Printf("[%s] %s (%.2f, %s)\n", r.Type, r.Text, r.Salience, r.CreatedAt.Format("2006-01-02"))
 	}
+
+	// --- dualmem v2 additions (non-gate only): durable facts citing the file +
+	// git-derived co-change neighbors. Additive; the --gate hook path above is
+	// untouched so the PreToolUse hook output stays byte-stable. ---
+	facts, ferr := engine.FactsForFile(namespace, filename, queryLimit)
+	if ferr == nil && len(facts) > 0 {
+		fmt.Println("\nFacts:")
+		for _, f := range facts {
+			fmt.Println(formatFactCLI(f))
+		}
+		engine.RecordServed(cliSessionID(namespace), factIDs(facts), "file-context")
+	}
+	neighbors := cliGitCoChangeNeighbors(cfg, filename, 5)
+	if len(neighbors) > 0 {
+		fmt.Println("\nCo-change neighbors (git-derived):")
+		for _, n := range neighbors {
+			fmt.Printf("  %s\n", n)
+		}
+	}
 }
 
 func cmdFileIndex(cfg CLIConfig) {
@@ -2758,6 +2908,180 @@ func cmdFileIndex(cfg CLIConfig) {
 	} else {
 		fmt.Printf("File index: %s (%d files)\n", indexPath, len(files))
 	}
+}
+
+// --- Recall / Precedent (dualmem v2 pull tools) ---
+
+func cmdRecall(cfg CLIConfig) {
+	fs := flag.NewFlagSet("recall", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace")
+	kind := fs.String("kind", "", "Fact kind filter: decision, deadend, gotcha, preference, reference")
+	limit := fs.Int("limit", 5, "Max facts")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	query := strings.Join(fs.Args(), " ")
+	if query == "" {
+		fmt.Fprintln(os.Stderr, "usage: dualmem recall <query> [--ns <ns>] [--kind <kind>] [--limit 5] [--json]")
+		os.Exit(1)
+	}
+
+	namespace := resolveNamespace(*ns, cfg)
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+	facts, err := engine.SearchFacts(ctx, query, namespace, *kind, *limit)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	engine.RecordServed(cliSessionID(namespace), factIDs(facts), "recall")
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(facts)
+		return
+	}
+	if len(facts) == 0 {
+		fmt.Println("No matching facts found.")
+		return
+	}
+	fmt.Printf("Recalled %d fact(s):\n\n", len(facts))
+	for _, f := range facts {
+		fmt.Println(formatFactCLI(f))
+	}
+}
+
+func cmdPrecedent(cfg CLIConfig) {
+	fs := flag.NewFlagSet("precedent", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace")
+	limit := fs.Int("limit", 5, "Max facts")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	approach := strings.Join(fs.Args(), " ")
+	if approach == "" {
+		fmt.Fprintln(os.Stderr, "usage: dualmem precedent <approach> [--ns <ns>] [--limit 5] [--json]")
+		fmt.Fprintln(os.Stderr, "Did we already try/decide/reject this? Searches decision + deadend facts.")
+		os.Exit(1)
+	}
+
+	namespace := resolveNamespace(*ns, cfg)
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	ctx := context.Background()
+	facts, err := engine.SearchFactsMulti(ctx, approach, namespace, []string{dualmem.FactKindDecision, dualmem.FactKindDeadEnd}, *limit)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	engine.RecordServed(cliSessionID(namespace), factIDs(facts), "precedent")
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(facts)
+		return
+	}
+	if len(facts) == 0 {
+		fmt.Println("No prior decision or dead-end found for this approach.")
+		return
+	}
+	fmt.Printf("%d prior decision(s)/dead-end(s):\n\n", len(facts))
+	for _, f := range facts {
+		fmt.Println(formatFactCLI(f))
+	}
+}
+
+// factIDs collects the IDs of a fact slice (nil-safe).
+func factIDs(facts []*dualmem.Fact) []string {
+	ids := make([]string, 0, len(facts))
+	for _, f := range facts {
+		if f != nil && f.ID != "" {
+			ids = append(ids, f.ID)
+		}
+	}
+	return ids
+}
+
+// cliSessionID derives a per-invocation session tag for RecordServed. It is
+// stable within a single CLI run so the same command can attribute served facts.
+func cliSessionID(namespace string) string {
+	return "cli:" + fmt.Sprintf("%x", md5.Sum([]byte(namespace)))[:8]
+}
+
+// formatFactCLI renders one durable fact for terminal output: kind, text,
+// provenance (source · short sha · date), and a capped file list.
+func formatFactCLI(f *dualmem.Fact) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("[%s] %s", f.Kind, f.Text))
+	dateStr := ""
+	if !f.CreatedAt.IsZero() {
+		dateStr = f.CreatedAt.Format("2006-01-02")
+	}
+	short := f.GitCommit
+	if len(short) > 7 {
+		short = short[:7]
+	}
+	prov := fmt.Sprintf("source=%s", f.Source)
+	if short != "" {
+		prov += " · commit=" + short
+	}
+	if dateStr != "" {
+		prov += " · " + dateStr
+	}
+	sb.WriteString("\n  " + prov)
+	if len(f.Files) > 0 {
+		shown := f.Files
+		if len(shown) > 5 {
+			sb.WriteString(fmt.Sprintf("\n  Files: %s (+%d more)", strings.Join(shown[:5], ", "), len(shown)-5))
+		} else {
+			sb.WriteString("\n  Files: " + strings.Join(shown, ", "))
+		}
+	}
+	return sb.String()
+}
+
+// cliGitCoChangeNeighbors returns formatted "path (co-change W)" lines for the
+// files that git-history-co-change with the given path. Pure git-derived
+// (git_cochange.go); never the memory cochange layer. Best-effort: returns nil
+// on any error or empty graph.
+func cliGitCoChangeNeighbors(cfg CLIConfig, path string, topN int) []string {
+	if path == "" {
+		return nil
+	}
+	rootDir, _ := os.Getwd()
+	if out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output(); err == nil {
+		if t := strings.TrimSpace(string(out)); t != "" {
+			rootDir = t
+		}
+	}
+	edges, err := dualmem.BuildGitCoChangeGraph(rootDir, 3, 50)
+	if err != nil || len(edges) == 0 {
+		return nil
+	}
+	neighbors := dualmem.CoChangeNeighbors(edges, []string{path}, topN)
+	type kv struct {
+		path   string
+		weight float64
+	}
+	sorted := make([]kv, 0, len(neighbors))
+	for p, w := range neighbors {
+		sorted = append(sorted, kv{p, w})
+	}
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].weight > sorted[j].weight })
+	out := make([]string, 0, len(sorted))
+	for _, n := range sorted {
+		out = append(out, fmt.Sprintf("%s (co-change %.2f)", n.path, n.weight))
+	}
+	return out
 }
 
 // --- Rate command ---
