@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -304,6 +305,8 @@ func main() {
 		cmdBenchmark(cfg)
 	case "anticipation-stats":
 		cmdAnticipationStats(cfg)
+	case "archive-v1":
+		cmdArchiveV1(cfg)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -347,6 +350,7 @@ Commands:
   autopilot   Autonomously explore codebase and generate memories
   benchmark   Compare cold-start vs warm context assembly quality
   anticipation-stats  Measure anticipatory pre-exploration hit rate
+  archive-v1 Dump the entire v1 store to JSON (Phase 0 migration safety net)
 
 Flags (all commands):
   --ns     Namespace (default: auto-detect from cwd or config)
@@ -1810,6 +1814,62 @@ func cmdAnticipationStats(cfg CLIConfig) {
 	}
 
 	fmt.Print(dualmem.FormatAnticipationStats(stats, namespace))
+}
+
+func cmdArchiveV1(cfg CLIConfig) {
+	fs := flag.NewFlagSet("archive-v1", flag.ExitOnError)
+	out := fs.String("out", "", "Destination directory (default: ~/.dualmem-v1-archive)")
+	force := fs.Bool("force", false, "Overwrite an existing non-empty archive directory")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	res, err := dualmem.ArchiveV1(cfg.Storage.SQLitePath, dualmem.ArchiveV1Options{
+		OutDir: *out,
+		Force:  *force,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(res)
+		return
+	}
+
+	fmt.Printf("=== DualMem v1 Archive ===\n")
+	fmt.Printf("Source DB: %s\n", cfg.Storage.SQLitePath)
+	fmt.Printf("Out dir:   %s\n", res.OutDir)
+	fmt.Printf("Namespaces: %d, total rows: %d\n\n", len(res.Namespaces), res.TotalRows)
+
+	for _, ns := range res.Namespaces {
+		counts := res.PerNSCounts[ns]
+		fmt.Printf("[%s]\n", ns)
+		// Stable ordering: tables sorted by name, namespaced tables first then globals.
+		var names []string
+		for t := range counts {
+			names = append(names, t)
+		}
+		sort.Strings(names)
+		for _, t := range names {
+			fmt.Printf("  %-28s %d\n", t, counts[t])
+		}
+		fmt.Println()
+	}
+
+	if len(res.GlobalCounts) > 0 {
+		fmt.Println("[global tables]")
+		var names []string
+		for t := range res.GlobalCounts {
+			names = append(names, t)
+		}
+		sort.Strings(names)
+		for _, t := range names {
+			fmt.Printf("  %-28s %d\n", t, res.GlobalCounts[t])
+		}
+	}
+
+	fmt.Printf("\nDone. Archive written to %s\n", res.OutDir)
 }
 
 func cmdSynthesize(cfg CLIConfig) {
