@@ -3,7 +3,6 @@ package dualmem
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 )
@@ -106,13 +105,6 @@ type EntityEdge struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// EntityTriple is an extracted relationship for the entity graph (used during distillation).
-type EntityTriple struct {
-	Source   Entity `json:"source"`
-	Relation string `json:"relation"`
-	Target   Entity `json:"target"`
-}
-
 // GraphExpansionResult holds memory IDs found via entity graph traversal.
 type GraphExpansionResult struct {
 	MemoryIDs    []string     // memory IDs found via graph traversal
@@ -126,9 +118,9 @@ type CoChangeEdge struct {
 	TargetPath string    `json:"target_path"`
 	Namespace  string    `json:"namespace"`
 	Strength   float64   `json:"strength"`   // Weighted by frequency + recency
-	CoCount    int       `json:"co_count"`    // Raw count of co-occurrences
-	MemoryIDs  []string  `json:"memory_ids"`  // Memory IDs that evidenced this co-change
-	Concepts   []string  `json:"concepts"`    // Entity names that bind these files
+	CoCount    int       `json:"co_count"`   // Raw count of co-occurrences
+	MemoryIDs  []string  `json:"memory_ids"` // Memory IDs that evidenced this co-change
+	Concepts   []string  `json:"concepts"`   // Entity names that bind these files
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
 }
@@ -136,14 +128,14 @@ type CoChangeEdge struct {
 // StructuralEdge represents a typed relationship between code entities.
 // Extracted from AST analysis: function calls, imports, containment.
 type StructuralEdge struct {
-	SourcePath        string  `json:"source_path"`         // File path of the source (caller/importer)
-	TargetPath        string  `json:"target_path"`         // File path of the target (callee/imported)
-	EdgeType          string  `json:"edge_type"`           // "calls", "imports", or "contains"
-	Weight            float64 `json:"weight"`              // Edge weight: calls=1.0, imports=0.7, contains=0.5
-	LineNumber        int     `json:"line_number"`         // Line in source file where the relationship occurs
-	EnclosingFunction string  `json:"enclosing_function"`  // Function containing the call site (empty for imports)
-	CalleeName        string  `json:"callee_name"`         // Name of the called function or imported symbol
-	Namespace         string  `json:"namespace"`           // User/project namespace
+	SourcePath        string  `json:"source_path"`        // File path of the source (caller/importer)
+	TargetPath        string  `json:"target_path"`        // File path of the target (callee/imported)
+	EdgeType          string  `json:"edge_type"`          // "calls", "imports", or "contains"
+	Weight            float64 `json:"weight"`             // Edge weight: calls=1.0, imports=0.7, contains=0.5
+	LineNumber        int     `json:"line_number"`        // Line in source file where the relationship occurs
+	EnclosingFunction string  `json:"enclosing_function"` // Function containing the call site (empty for imports)
+	CalleeName        string  `json:"callee_name"`        // Name of the called function or imported symbol
+	Namespace         string  `json:"namespace"`          // User/project namespace
 }
 
 // ExpandedEntityEdge is a neighbor entity ID with the edge that connects it.
@@ -225,12 +217,12 @@ type Arc struct {
 
 // ProfileSketch is the Level 3 user gist.
 type ProfileSketch struct {
-	UserID            string   `json:"user_id"`
-	Interests         []string `json:"interests"`
-	PersonalityTraits []string `json:"personality_traits"`
-	RelationshipHist  string   `json:"relationship_history"`
-	KeyPreferences    []string `json:"key_preferences"`
-	CommStyle         string   `json:"communication_style"`
+	UserID            string    `json:"user_id"`
+	Interests         []string  `json:"interests"`
+	PersonalityTraits []string  `json:"personality_traits"`
+	RelationshipHist  string    `json:"relationship_history"`
+	KeyPreferences    []string  `json:"key_preferences"`
+	CommStyle         string    `json:"communication_style"`
 	UpdatedAt         time.Time `json:"updated_at"`
 }
 
@@ -240,7 +232,12 @@ type ContextBlock struct {
 	TokenCount int         // Estimated tokens used (chars/4 heuristic)
 	Sources    []SourceRef // For attribution/debugging
 	Intent     Intent      // Detected or explicit intent used for assembly
-	SnapshotID string      // ID of persisted context snapshot (for retrospective rating)
+
+	// ServedFactIDs records every durable fact (v2) whose ID was rendered into
+	// Text, in emit order. Instrumentation (file-touch / hit counters, task 7)
+	// reads this to log which facts a session started with. Empty for the v1
+	// legacy assembly path, which has no facts.
+	ServedFactIDs []string
 }
 
 // SourceRef traces a context fragment back to its source.
@@ -253,10 +250,10 @@ type SourceRef struct {
 // used in progressive disclosure to let the agent choose what to fetch.
 type IndexEntry struct {
 	ID         string   `json:"id"`
-	Type       string   `json:"type"`       // "warning", "decision", "continuity", "checkpoint", "knowledge", "episode", "arc", "memory", "seed"
-	TypeIcon   string   `json:"type_icon"`  // "⚠", "★", "↻", "📋", "📖", "📝", ""
-	Title      string   `json:"title"`      // First ~60 chars of content
-	TokenCount int      `json:"tokens"`     // Estimated tokens if fetched
+	Type       string   `json:"type"`      // "warning", "decision", "continuity", "checkpoint", "knowledge", "episode", "arc", "memory", "seed"
+	TypeIcon   string   `json:"type_icon"` // "⚠", "★", "↻", "📋", "📖", "📝", ""
+	Title      string   `json:"title"`     // First ~60 chars of content
+	TokenCount int      `json:"tokens"`    // Estimated tokens if fetched
 	Files      []string `json:"files,omitempty"`
 }
 
@@ -264,10 +261,9 @@ type IndexEntry struct {
 // It lists what's available without committing the full token budget.
 type ContextIndex struct {
 	Items         []IndexEntry `json:"items"`
-	TotalTokens   int          `json:"total_tokens"`    // Sum of all item token estimates
+	TotalTokens   int          `json:"total_tokens"` // Sum of all item token estimates
 	Intent        Intent       `json:"intent"`
-	AlsoAvailable string       `json:"also_available"`  // Summary of structural items (codemap, diff, episodes)
-	SnapshotID    string       `json:"snapshot_id,omitempty"`
+	AlsoAvailable string       `json:"also_available"` // Summary of structural items (codemap, diff, episodes)
 }
 
 // --- Checkpoints ---
@@ -306,70 +302,6 @@ func (cp *Checkpoint) FormatForContext() string {
 	return sb.String()
 }
 
-// --- Workflow hints ---
-
-// WorkflowHint is a lightweight pointer to a full workflow memory.
-// Produced by store queries, rendered as one-liner hints in file-context and context assembly.
-type WorkflowHint struct {
-	WorkflowID  string   // e.g. "issue-credentials" — parsed from [workflow:ID] prefix
-	Tickets     []string // e.g. ["LC-1635", "LC-1729"] — extracted from memory text
-	Summary     string   // first ~150 chars of workflow text after the [workflow:ID] prefix
-	MatchedFile string   // which file triggered the match (file-context path only, empty for ticket path)
-}
-
-// parseWorkflowHint extracts a WorkflowHint from a raw autopilot memory text.
-// Input format: "[workflow:issue-credentials] Full summary text mentioning LC-1635..."
-// Returns nil if text doesn't match the [workflow:*] pattern.
-func parseWorkflowHint(text string) *WorkflowHint {
-	if !strings.HasPrefix(text, "[workflow:") {
-		return nil
-	}
-	closeBracket := strings.Index(text, "]")
-	if closeBracket < 0 {
-		return nil
-	}
-	id := text[len("[workflow:"):closeBracket]
-	summary := ""
-	if closeBracket+2 < len(text) {
-		summary = strings.TrimSpace(text[closeBracket+1:])
-		// Strip optional ticket tag like "[LC-1729, LC-1731]"
-		if strings.HasPrefix(summary, "[") {
-			if end := strings.Index(summary, "]"); end >= 0 {
-				summary = strings.TrimSpace(summary[end+1:])
-			}
-		}
-		// Strip markdown header like "## WORKFLOW SUMMARY\n"
-		summary = strings.TrimPrefix(summary, "## WORKFLOW SUMMARY")
-		summary = strings.TrimSpace(summary)
-		if len(summary) > 150 {
-			summary = summary[:147] + "..."
-		}
-	}
-
-	// Extract ticket prefixes from the full text
-	var tickets []string
-	// Use a simple regex inline — matches LC-1635, PROJ-42, etc.
-	re := regexp.MustCompile(`[A-Z]+-\d+`)
-	for _, m := range re.FindAllString(text, -1) {
-		tickets = append(tickets, m)
-	}
-	// Deduplicate
-	seen := make(map[string]bool)
-	deduped := tickets[:0]
-	for _, t := range tickets {
-		if !seen[t] {
-			seen[t] = true
-			deduped = append(deduped, t)
-		}
-	}
-
-	return &WorkflowHint{
-		WorkflowID: id,
-		Tickets:    deduped,
-		Summary:    summary,
-	}
-}
-
 // --- Task intent ---
 
 // Intent represents the detected purpose of a query, used to adjust
@@ -388,11 +320,11 @@ const (
 // IntentProfile defines per-type weight multipliers for a given intent.
 // Values > 1.0 boost that type, < 1.0 suppress it.
 type IntentProfile struct {
-	Warning    float64
-	Decision   float64
-	Continuity float64
-	Map        float64
-	General    float64
+	Warning      float64
+	Decision     float64
+	Continuity   float64
+	Map          float64
+	General      float64
 	Seed         float64 // Auto-generated codebase context memories
 	Anticipation float64 // Predictive/curiosity-driven exploration memories
 }
@@ -475,11 +407,11 @@ func (ip IntentProfile) TypeMultiplier(memType string) float64 {
 type KnowledgeDoc struct {
 	ID         string    `json:"id"`
 	Namespace  string    `json:"namespace"`
-	Topic      string    `json:"topic"`       // short identifier: "hdc-encoder", "auth-middleware"
-	Content    string    `json:"content"`     // synthesized markdown prose
-	Files      []string  `json:"files"`       // associated file paths
-	SourceIDs  []string  `json:"source_ids"`  // detail memory IDs that were synthesized
-	Embedding  []float32 `json:"-"`           // 768-dim for relevance ranking
+	Topic      string    `json:"topic"`      // short identifier: "hdc-encoder", "auth-middleware"
+	Content    string    `json:"content"`    // synthesized markdown prose
+	Files      []string  `json:"files"`      // associated file paths
+	SourceIDs  []string  `json:"source_ids"` // detail memory IDs that were synthesized
+	Embedding  []float32 `json:"-"`          // 768-dim for relevance ranking
 	TokenCount int       `json:"token_count"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
@@ -522,7 +454,7 @@ type ConsultReport struct {
 	Query         string       `json:"query"`
 	Intent        Intent       `json:"intent"`
 	Confidence    float64      `json:"confidence"`
-	ConfLabel     string       `json:"conf_label"` // "high", "medium", "low"
+	ConfLabel     string       `json:"conf_label"`  // "high", "medium", "low"
 	Explanation   string       `json:"explanation"` // knowledge doc content
 	Evidence      string       `json:"evidence"`    // call graph + co-change text
 	RelevantFiles []RankedFile `json:"relevant_files"`
@@ -620,11 +552,11 @@ type WorkflowCluster struct {
 
 // WorkflowAutopilotOpts configures workflow discovery.
 type WorkflowAutopilotOpts struct {
-	AutopilotOpts              // Embed: Budget, DryRun, Force, etc.
-	DepthMonths   int          // How far back in git history (default 6)
-	MinCommits    int          // Minimum commits per workflow cluster (default 3)
-	MaxWorkflows  int          // Cap on workflows to explore (default 20)
-	TicketPattern string       // Regex for ticket prefix (default `\[([A-Z]+-\d+)\]`)
+	AutopilotOpts        // Embed: Budget, DryRun, Force, etc.
+	DepthMonths   int    // How far back in git history (default 6)
+	MinCommits    int    // Minimum commits per workflow cluster (default 3)
+	MaxWorkflows  int    // Cap on workflows to explore (default 20)
+	TicketPattern string // Regex for ticket prefix (default `\[([A-Z]+-\d+)\]`)
 }
 
 // WorkflowAutopilotResult describes what a workflow autopilot run produced.
@@ -726,12 +658,12 @@ type GCOptions struct {
 
 // GCReport summarizes what GarbageCollect did (or would do in dry-run mode).
 type GCReport struct {
-	ExpiredEpisodes     int // Episodes past retention, deleted
-	ExpiredArcs         int // Arcs past retention, deleted
-	StaleDetails        int // Git-stale details, demoted to sketch
-	SupersededMemories int // Duplicate memories (same type, high cosine similarity), demoted
-	AccessColdDetails   int // Unaccessed details below importance threshold, demoted
-	Entries             []GCEntry // Individual entries affected (populated when Verbose=true)
+	ExpiredEpisodes    int       // Episodes past retention, deleted
+	ExpiredArcs        int       // Arcs past retention, deleted
+	StaleDetails       int       // Git-stale details, demoted to sketch
+	SupersededMemories int       // Duplicate memories (same type, high cosine similarity), demoted
+	AccessColdDetails  int       // Unaccessed details below importance threshold, demoted
+	Entries            []GCEntry // Individual entries affected (populated when Verbose=true)
 }
 
 // GCEntry describes a single memory affected by GC.
@@ -794,9 +726,9 @@ type Config struct {
 	SQLitePath string // Path to SQLite database file
 
 	// Providers (reuses engram-compatible interfaces)
-	EmbeddingProvider EmbeddingProvider
-	Classifier        SectorClassifier
-	EntityExtractor   EntityExtractor
+	EmbeddingProvider  EmbeddingProvider
+	Classifier         SectorClassifier
+	EntityExtractor    EntityExtractor
 	Summarizer         SummarizerProvider // LLM for episode/arc/profile summarization
 	SynthesisGenerator TextGenerator      // Optional stronger model for Consult/Synthesize (falls back to Summarizer)
 	ExplorerGenerator  TextGenerator      // Optional dedicated model for autopilot/anticipatory
@@ -963,21 +895,30 @@ type Store interface {
 
 	// Structural graph
 	InsertStructuralEdges(namespace string, edges []StructuralEdge) error
+	ReplaceStructuralEdgesForDirs(namespace string, relDirs []string, edges []StructuralEdge) error
 	GetStructuralNeighbors(namespace, path string, edgeTypes []string, limit int) ([]StructuralEdge, error)
 	GetStructuralEdgesForPath(namespace, path string, limit int) ([]StructuralEdge, error)
 
-	// Workflow hints
-	GetWorkflowHintsForFiles(userID string, filenames []string) ([]WorkflowHint, error)
-	GetWorkflowHintsForTickets(userID string, tickets []string) ([]WorkflowHint, error)
+	// Facts (v2 durable facts). Pure addition; see docs/superpowers/plans/2026-07-04-dualmem-v2.md (P2).
+	InsertFact(f *Fact, embedding []float32) error
+	GetFact(id string) (*Fact, error)
+	ListFacts(namespace, kind string, includeSuperseded bool) ([]*Fact, error)
+	GetFactsByNamespaces(namespaces []string, kind string, includeSuperseded bool) ([]*Fact, error)
+	ListAllFacts(includeSuperseded bool) ([]*Fact, error)
+	GetFactsByNamespacesKinds(namespaces, kinds []string, includeSuperseded bool) ([]*Fact, error)
+	GetFactsByFile(namespaces []string, path, basename string, limit int) ([]*Fact, error)
+	SupersedeFact(oldID, newID string) error
+	RetireFact(id string) error
+	IncrementFactHits(id string) error
 
-	// Context snapshots & ratings
-	InsertSnapshot(id, namespace, query string, queryEmbedding []byte, sourceIDsJSON string, tokensUsed int) error
-	GetSnapshot(id string) (*storedSnapshot, error)
-	GetLatestSnapshot(namespace string) (*storedSnapshot, error)
-	InsertRating(r *ContextRating) error
-	GetAllRatings(namespace string) ([]ContextRating, error)
-	InsertSessionRating(sr *SessionRating) error
-	GetRatingStats(namespace string) (*RatingStats, error)
+	// Served facts (v2 instrumentation). Logs every surfaced fact and credits
+	// the file-touch hit signal. See docs/superpowers/plans/2026-07-04-dualmem-v2.md ("Instrumentation from day one").
+	InsertServedFact(sessionID, factID, surface string) error
+	GetServedFactsForSession(sessionID string) ([]ServedFact, error)
+	MarkServedFactHit(sessionID, factID string) (credited bool, err error)
+	GetFactStatsCounts(namespaces []string) ([]FactStatsRow, error)
+	GetDeadFacts(namespaces []string, minServes, limit int) ([]DeadFact, error)
+	GetStaleFactCandidates(namespaces []string, limit int) ([]StaleFact, error)
 
 	// Health check helpers
 	GetEmbeddingModelCounts(userID string) (map[string]int, error)
@@ -996,7 +937,7 @@ type Store interface {
 type Tag struct {
 	File    string `json:"file"`
 	Name    string `json:"name"`
-	Kind    string `json:"kind"`    // "def" or "ref"
+	Kind    string `json:"kind"`     // "def" or "ref"
 	SubKind string `json:"sub_kind"` // "function", "class", etc.
 	Line    int    `json:"line"`
 }
@@ -1031,6 +972,152 @@ type detailWithVector struct {
 	DetailMemory
 	Vector []float32
 	UserID string
+}
+
+// FactKind enumerates the durable-fact taxonomy (dualmem v2).
+const (
+	FactKindDecision   = "decision"
+	FactKindDeadEnd    = "deadend"
+	FactKindGotcha     = "gotcha"
+	FactKindPreference = "preference"
+	FactKindReference  = "reference"
+)
+
+// ValidFactKinds is the complete set of accepted Fact.Kind values.
+var ValidFactKinds = map[string]bool{
+	FactKindDecision:   true,
+	FactKindDeadEnd:    true,
+	FactKindGotcha:     true,
+	FactKindPreference: true,
+	FactKindReference:  true,
+}
+
+// FactSource labels how a fact's claim was established.
+const (
+	FactSourceVerified = "verified" // earned by doing (task work, dead ends, confirmed decisions)
+	FactSourceInferred = "inferred" // synthesized from scanning/code/docs
+	FactSourceDoc      = "doc"      // ingested from a written source (AGENTS.md, README)
+	FactSourceMigrated = "migrated" // carried over from the v1 store by migrate-v2
+)
+
+// ValidFactSources is the complete set of accepted Fact.Source values.
+var ValidFactSources = map[string]bool{
+	FactSourceVerified: true,
+	FactSourceInferred: true,
+	FactSourceDoc:      true,
+	FactSourceMigrated: true,
+}
+
+// Fact is a durable, provenance-stamped piece of knowledge — the primary write
+// target of dualmem v2. See docs/superpowers/plans/2026-07-04-dualmem-v2.md (P2).
+//
+// Lifecycle is supersede-only: a stale/wrong fact is marked superseded_by a
+// newer fact rather than decayed or deleted, so the chain of revision stays
+// auditable.
+type Fact struct {
+	ID           string
+	Namespace    string // repo scope; "" = user-global (preferences)
+	Kind         string // decision | deadend | gotcha | preference | reference
+	Text         string
+	Files        []string
+	Source       string // verified | inferred | doc | migrated
+	GitCommit    string
+	SessionID    string
+	CreatedAt    time.Time
+	SupersededBy string
+	Hits         int
+	LastHitAt    time.Time
+
+	// Populated on read/search. Vector is the single v2 embedding for the fact;
+	// not part of the human-readable markdown mirror. Similarity/FileMatch are
+	// filled in by SearchFacts for ranking.
+	Vector     []float32
+	Similarity float64
+	FileMatch  float64
+}
+
+// FactSurface names where a fact was surfaced to a session. The two broad
+// categories from the plan are "pinned" (the session-start block) and "pulled"
+// (a recall/precedent/file_context call); the recorded value keeps the finer
+// call-site name ("recall", "precedent", "file_context", "pinned") so stats
+// can break serves down by tool.
+const (
+	FactSurfacePinned      = "pinned"
+	FactSurfaceRecall      = "recall"
+	FactSurfacePrecedent   = "precedent"
+	FactSurfaceFileContext = "file_context"
+)
+
+// ServedFact is one served_facts row paired with the fact's Files (loaded via
+// a join) so the file-touch correlator can intersect against touched paths in
+// a single pass. HitCredited is 1 once a hit has been counted for this
+// (session, fact) pair.
+type ServedFact struct {
+	SessionID   string
+	FactID      string
+	Surface     string
+	ServedAt    time.Time
+	HitCredited int
+	HitAt       time.Time
+	Files       []string
+}
+
+// DeadFact is a served-but-never-hit fact — a pruning/rewriting candidate.
+// Serves is the total number of times the fact was surfaced across sessions.
+type DeadFact struct {
+	ID     string
+	Kind   string
+	Text   string
+	Serves int
+}
+
+// StaleFact is a fact whose git_commit may be far behind HEAD. The
+// engine-level scorer computes the actual commit distance via git and decides
+// which candidates cross the staleness threshold.
+type StaleFact struct {
+	ID        string
+	Kind      string
+	Text      string
+	GitCommit string
+}
+
+// FactStatsOpts configures Engine.FactStats. Zero values use the defaults
+// noted in the plan ("Instrumentation from day one").
+type FactStatsOpts struct {
+	// Namespaces scopes the scorecard. Empty = all facts (repo-scoped plus
+	// user-global preferences).
+	Namespaces []string
+
+	// DeadMinServes is the serve count above which a zero-hit fact is "dead".\t// Default 5.
+	DeadMinServes int
+
+	// StaleMaxCommitsBehind: facts whose git_commit is more than this many
+	// commits behind HEAD are staleness candidates. Default 50.
+	StaleMaxCommitsBehind int
+
+	// DeadLimit / StaleLimit cap the candidate lists in the scorecard (the
+	// scorecard only shows that many rows). Defaults: 20 each.
+	DeadLimit  int
+	StaleLimit int
+}
+
+// FactKindStats is one row of the per-kind scorecard.
+type FactKindStats struct {
+	Kind        string
+	FactsCount  int
+	ServedCount int // distinct facts ever served
+	HitCount    int // distinct facts with >=1 hit
+}
+
+// FactScorecard is the output of Engine.FactStats — the v2 "are my facts
+// useful?" scorecard. Per-kind rows roll up into an Overall row, and two
+// candidate lists (dead facts, stale facts) point at what to prune or verify.
+type FactScorecard struct {
+	ByKind  []FactKindStats
+	Overall FactKindStats
+	Dead    []DeadFact  // served >= DeadMinServes, zero hits
+	Stale   []StaleFact // git_commit > StaleMaxCommitsBehind behind HEAD
+	Opts    FactStatsOpts
 }
 
 type sketchRaw struct {

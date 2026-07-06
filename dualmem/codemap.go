@@ -27,6 +27,14 @@ type CodeMap struct {
 	Zoom2       []ModuleMap `json:"zoom2"`        // Per-module (~50-100 tokens each)
 	GeneratedAt time.Time   `json:"generated_at"`
 	GitCommit   string      `json:"git_commit"`
+
+	// Stale is true when the map was generated at an older git commit than
+	// HEAD. Stale maps are served immediately (stale-while-revalidate) rather
+	// than blocking on a rescan; refresh happens via Engine.RefreshCodeMap.
+	Stale bool `json:"stale,omitempty"`
+	// CommitsBehind counts commits between the map's commit and HEAD (0 if
+	// unknown or fresh).
+	CommitsBehind int `json:"commits_behind,omitempty"`
 }
 
 // ModuleMap is a zoom-2 entry: one package or meaningful directory.
@@ -82,6 +90,218 @@ var skipExactNames = map[string]bool{
 	"android": true, "ios": true,
 }
 
+// maxScanDepth is the deepest directory level (in path separators) the
+// codebase walk descends to. Shared by ScanCodebase and ScanDirs.
+const maxScanDepth = 12
+
+// dirInfo groups the source files of a single directory during a scan.
+type dirInfo struct {
+	relPath  string
+	goFiles  []string
+	tsFiles  []string
+	pyFiles  []string
+	rsFiles  []string
+	mdFiles  []string
+	allFiles []string
+}
+
+// classifyDirFile buckets a file into its directory's dirInfo by extension,
+// applying the same test-file filters as the full scan. Returns true when the
+// file counts toward the parsed-file total.
+func classifyDirFile(d *dirInfo, dir, name string) bool {
+	ext := filepath.Ext(name)
+	d.allFiles = append(d.allFiles, name)
+	switch ext {
+	case ".go":
+		d.goFiles = append(d.goFiles, filepath.Join(dir, name))
+		return true
+	case ".ts", ".tsx", ".js", ".jsx":
+		// Skip test files from deep parsing — they add bulk but low codemap signal
+		if !strings.HasSuffix(name, ".test.ts") && !strings.HasSuffix(name, ".test.tsx") &&
+			!strings.HasSuffix(name, ".spec.ts") && !strings.HasSuffix(name, ".spec.tsx") &&
+			!strings.HasSuffix(name, ".test.js") && !strings.HasSuffix(name, ".test.jsx") &&
+			!strings.HasSuffix(name, ".spec.js") && !strings.HasSuffix(name, ".spec.jsx") {
+			d.tsFiles = append(d.tsFiles, filepath.Join(dir, name))
+			return true
+		}
+	case ".py":
+		d.pyFiles = append(d.pyFiles, filepath.Join(dir, name))
+		return true
+	case ".rs":
+		d.rsFiles = append(d.rsFiles, filepath.Join(dir, name))
+		return true
+	case ".md":
+		d.mdFiles = append(d.mdFiles, filepath.Join(dir, name))
+	}
+	return false
+}
+
+// parseDirSource builds module maps and structural edges for one directory:
+// module split by primary language, edge extraction for every language present.
+func parseDirSource(d *dirInfo) ([]ModuleMap, []StructuralEdge) {
+	var mods []ModuleMap
+	var edges []StructuralEdge
+
+	// Module parsing — pick primary language
+	switch {
+	case len(d.goFiles) > 0:
+		mods = parseGoPackageSplit(d.relPath, d.goFiles)
+	case len(d.tsFiles) > 0:
+		mods = parseTSModuleSplit(d.relPath, d.tsFiles)
+	case len(d.pyFiles) > 0:
+		if mod := parsePythonModule(d.relPath, d.pyFiles); mod != nil {
+			mods = []ModuleMap{*mod}
+		}
+	case len(d.rsFiles) > 0:
+		if mod := parseRustModule(d.relPath, d.rsFiles); mod != nil {
+			mods = []ModuleMap{*mod}
+		}
+	default:
+		if isInterestingDir(d.relPath) {
+			mods = []ModuleMap{{
+				Path:      d.relPath + "/",
+				Language:  detectLanguage(d.allFiles),
+				FileCount: len(d.allFiles),
+				Summary:   fmt.Sprintf("%d files", len(d.allFiles)),
+			}}
+		}
+	}
+
+	// Edge extraction — for ALL languages present in this dir (separate from module switch)
+	if len(d.goFiles) > 0 {
+		edges = append(edges, extractGoCallEdges(d.relPath, d.goFiles)...)
+		edges = append(edges, extractImportEdges(d.relPath, d.goFiles, nil)...)
+	}
+	if len(d.tsFiles) > 0 {
+		edges = append(edges, extractTSCallEdges(d.relPath, d.tsFiles)...)
+		edges = append(edges, extractImportEdges(d.relPath, d.tsFiles, &tsLangConfig)...)
+	}
+	if len(d.pyFiles) > 0 {
+		edges = append(edges, extractPyCallEdges(d.relPath, d.pyFiles)...)
+		edges = append(edges, extractImportEdges(d.relPath, d.pyFiles, &pyConfig)...)
+	}
+	if len(d.rsFiles) > 0 {
+		edges = append(edges, extractRsCallEdges(d.relPath, d.rsFiles)...)
+		edges = append(edges, extractImportEdges(d.relPath, d.rsFiles, &rsConfig)...)
+	}
+
+	return mods, edges
+}
+
+// dirMarkdownModules parses the markdown files of a directory into modules.
+func dirMarkdownModules(d *dirInfo) []ModuleMap {
+	var mods []ModuleMap
+	for _, mdFile := range d.mdFiles {
+		relFile := filepath.Base(mdFile)
+		relPath := d.relPath
+		if relPath == "." {
+			relPath = relFile
+		} else {
+			relPath = relPath + "/" + relFile
+		}
+		if mod := parseMarkdownFile(relPath, mdFile); mod != nil {
+			mods = append(mods, *mod)
+		}
+	}
+	return mods
+}
+
+// moduleOwnerDir returns the directory (relative, slash-separated) that owns a
+// module path as emitted by the scanners: directory modules end in "/", split
+// file modules are "<dir>/<name>[.ext]", and root-level entries have no slash.
+func moduleOwnerDir(path string) string {
+	if path == "" {
+		return "."
+	}
+	if strings.HasSuffix(path, "/") {
+		d := strings.TrimSuffix(path, "/")
+		if d == "" || d == "." {
+			return "."
+		}
+		return d
+	}
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		return path[:i]
+	}
+	return "."
+}
+
+// skipScanDir reports whether a relative directory would have been skipped by
+// the full ScanCodebase walk (skip lists apply to every path segment).
+func skipScanDir(rel string) bool {
+	if rel == "." || rel == "" {
+		return false
+	}
+	rel = filepath.ToSlash(rel)
+	if strings.Count(rel, "/") > maxScanDepth {
+		return true
+	}
+	for _, seg := range strings.Split(rel, "/") {
+		if skipDirs[seg] || skipExactNames[seg] {
+			return true
+		}
+	}
+	return false
+}
+
+// ScanDirs rescans only the given directories (relative to rootDir,
+// non-recursive) and returns their modules and structural edges, using the
+// same classification and parsing rules as ScanCodebase. Directories that no
+// longer exist — or that the full scan would have skipped — yield nothing;
+// callers treat that as "modules removed".
+func ScanDirs(rootDir string, relDirs []string) ([]ModuleMap, []StructuralEdge, error) {
+	rootDir, err := filepath.Abs(rootDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("codemap: abs path: %w", err)
+	}
+	ensureLangs()
+
+	var modules []ModuleMap
+	var edges []StructuralEdge
+	for _, rel := range relDirs {
+		rel = filepath.ToSlash(filepath.Clean(rel))
+		if rel == "" {
+			rel = "."
+		}
+		if skipScanDir(rel) {
+			continue
+		}
+		abs := filepath.Join(rootDir, filepath.FromSlash(rel))
+		entries, err := os.ReadDir(abs)
+		if err != nil {
+			continue // directory deleted — its modules are dropped by the merge
+		}
+		generated := false
+		for _, marker := range generatedMarkers {
+			if _, err := os.Stat(filepath.Join(abs, marker)); err == nil {
+				generated = true
+				break
+			}
+		}
+		if generated {
+			continue
+		}
+
+		d := &dirInfo{relPath: rel}
+		for _, ent := range entries {
+			if ent.IsDir() {
+				continue
+			}
+			classifyDirFile(d, abs, ent.Name())
+		}
+
+		mods, dirEdges := parseDirSource(d)
+		modules = append(modules, mods...)
+		edges = append(edges, dirEdges...)
+		modules = append(modules, dirMarkdownModules(d)...)
+	}
+
+	sort.Slice(modules, func(i, j int) bool {
+		return modules[i].Path < modules[j].Path
+	})
+	return modules, edges, nil
+}
+
 // ScanCodebase walks a directory tree and builds a multi-resolution code map
 // alongside structural edges (call/import relationships) in a single pass.
 // Uses go/ast for Go, tree-sitter for TS/Python/Rust.
@@ -96,17 +316,8 @@ func ScanCodebase(rootDir string, onProgress func(ScanProgress)) (*CodemapScanRe
 	ensureLangs()
 
 	// Collect source directories
-	type dirInfo struct {
-		relPath  string
-		goFiles  []string
-		tsFiles  []string
-		pyFiles  []string
-		rsFiles  []string
-		mdFiles  []string
-		allFiles []string
-	}
 	dirs := make(map[string]*dirInfo)
-	maxDepth := 12
+	maxDepth := maxScanDepth
 	maxDirs := 5000
 	var totalFiles int
 
@@ -152,30 +363,8 @@ func ScanCodebase(rootDir string, onProgress func(ScanProgress)) (*CodemapScanRe
 			dirs[relDir] = d
 		}
 
-		ext := filepath.Ext(info.Name())
-		d.allFiles = append(d.allFiles, info.Name())
-		switch ext {
-		case ".go":
-			d.goFiles = append(d.goFiles, filepath.Join(dir, info.Name()))
+		if classifyDirFile(d, dir, info.Name()) {
 			totalFiles++
-		case ".ts", ".tsx", ".js", ".jsx":
-			// Skip test files from deep parsing — they add bulk but low codemap signal
-			name := info.Name()
-			if !strings.HasSuffix(name, ".test.ts") && !strings.HasSuffix(name, ".test.tsx") &&
-				!strings.HasSuffix(name, ".spec.ts") && !strings.HasSuffix(name, ".spec.tsx") &&
-				!strings.HasSuffix(name, ".test.js") && !strings.HasSuffix(name, ".test.jsx") &&
-				!strings.HasSuffix(name, ".spec.js") && !strings.HasSuffix(name, ".spec.jsx") {
-				d.tsFiles = append(d.tsFiles, filepath.Join(dir, name))
-				totalFiles++
-			}
-		case ".py":
-			d.pyFiles = append(d.pyFiles, filepath.Join(dir, info.Name()))
-			totalFiles++
-		case ".rs":
-			d.rsFiles = append(d.rsFiles, filepath.Join(dir, info.Name()))
-			totalFiles++
-		case ".md":
-			d.mdFiles = append(d.mdFiles, filepath.Join(dir, info.Name()))
 		}
 		return nil
 	})
@@ -211,49 +400,7 @@ func ScanCodebase(rootDir string, onProgress func(ScanProgress)) (*CodemapScanRe
 			defer func() { <-sem }()
 
 			var r moduleResult
-
-			// Module parsing — pick primary language (existing logic)
-			switch {
-			case len(d.goFiles) > 0:
-				r.mods = parseGoPackageSplit(d.relPath, d.goFiles)
-			case len(d.tsFiles) > 0:
-				r.mods = parseTSModuleSplit(d.relPath, d.tsFiles)
-			case len(d.pyFiles) > 0:
-				if mod := parsePythonModule(d.relPath, d.pyFiles); mod != nil {
-					r.mods = []ModuleMap{*mod}
-				}
-			case len(d.rsFiles) > 0:
-				if mod := parseRustModule(d.relPath, d.rsFiles); mod != nil {
-					r.mods = []ModuleMap{*mod}
-				}
-			default:
-				if isInterestingDir(d.relPath) {
-					r.mods = []ModuleMap{{
-						Path:      d.relPath + "/",
-						Language:  detectLanguage(d.allFiles),
-						FileCount: len(d.allFiles),
-						Summary:   fmt.Sprintf("%d files", len(d.allFiles)),
-					}}
-				}
-			}
-
-			// Edge extraction — for ALL languages present in this dir (separate from module switch)
-			if len(d.goFiles) > 0 {
-				r.edges = append(r.edges, extractGoCallEdges(d.relPath, d.goFiles)...)
-				r.edges = append(r.edges, extractImportEdges(d.relPath, d.goFiles, nil)...)
-			}
-			if len(d.tsFiles) > 0 {
-				r.edges = append(r.edges, extractTSCallEdges(d.relPath, d.tsFiles)...)
-				r.edges = append(r.edges, extractImportEdges(d.relPath, d.tsFiles, &tsLangConfig)...)
-			}
-			if len(d.pyFiles) > 0 {
-				r.edges = append(r.edges, extractPyCallEdges(d.relPath, d.pyFiles)...)
-				r.edges = append(r.edges, extractImportEdges(d.relPath, d.pyFiles, &pyConfig)...)
-			}
-			if len(d.rsFiles) > 0 {
-				r.edges = append(r.edges, extractRsCallEdges(d.relPath, d.rsFiles)...)
-				r.edges = append(r.edges, extractImportEdges(d.relPath, d.rsFiles, &rsConfig)...)
-			}
+			r.mods, r.edges = parseDirSource(d)
 
 			if len(r.mods) > 0 || len(r.edges) > 0 {
 				results <- r
@@ -286,19 +433,7 @@ func ScanCodebase(rootDir string, onProgress func(ScanProgress)) (*CodemapScanRe
 
 	// Process markdown files in all directories
 	for _, d := range dirs {
-		for _, mdFile := range d.mdFiles {
-			relFile := filepath.Base(mdFile)
-			relPath := d.relPath
-			if relPath == "." {
-				relPath = relFile
-			} else {
-				relPath = relPath + "/" + relFile
-			}
-			mod := parseMarkdownFile(relPath, mdFile)
-			if mod != nil {
-				modules = append(modules, *mod)
-			}
-		}
+		modules = append(modules, dirMarkdownModules(d)...)
 	}
 
 	// Sort by path for stable output

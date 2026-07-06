@@ -491,10 +491,17 @@ func (e *Engine) Autopilot(ctx context.Context, namespace string, opts Autopilot
 		if debug {
 			log.Printf("[autopilot] summary_len=%d memText_len=%d", len(summary), len(memText))
 		}
+		// Cap file associations to avoid bloated memories (the full list is not
+		// useful for co-change or search — a representative sample suffices).
+		filesForMem := area.Files
+		if len(filesForMem) > 20 {
+			filesForMem = filesForMem[:20]
+		}
+
 		memErr := e.AddWithOptions(ctx, MemoryInput{
 			UserMessage: memText,
 			Type:        "autopilot",
-			Files:       area.Files,
+			Files:       filesForMem,
 			Salience:    0.85,
 		}, namespace)
 		if memErr == nil {

@@ -15,11 +15,13 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -38,14 +40,14 @@ type CLIConfig struct {
 		EmbeddingModel     string `yaml:"embedding_model"`
 		EmbeddingAPIKeyEnv string `yaml:"embedding_api_key_env"`
 		EmbeddingDimension int    `yaml:"embedding_dimension"`
-		SynthesisProvider  string `yaml:"synthesis_provider"`   // "anthropic" or "" (use main summarizer)
-		SynthesisModel     string `yaml:"synthesis_model"`      // e.g. "glm-5.1"
+		SynthesisProvider  string `yaml:"synthesis_provider"`    // "anthropic" or "" (use main summarizer)
+		SynthesisModel     string `yaml:"synthesis_model"`       // e.g. "glm-5.1"
 		SynthesisAPIKeyEnv string `yaml:"synthesis_api_key_env"` // e.g. "ZAI_API_KEY"
-		SynthesisBaseURL   string `yaml:"synthesis_base_url"`   // e.g. "https://api.z.ai/api/anthropic"
-		ExplorerProvider  string `yaml:"explorer_provider"`
-		ExplorerModel     string `yaml:"explorer_model"`
-		ExplorerAPIKeyEnv string `yaml:"explorer_api_key_env"`
-		ExplorerBaseURL   string `yaml:"explorer_base_url"`
+		SynthesisBaseURL   string `yaml:"synthesis_base_url"`    // e.g. "https://api.z.ai/api/anthropic"
+		ExplorerProvider   string `yaml:"explorer_provider"`
+		ExplorerModel      string `yaml:"explorer_model"`
+		ExplorerAPIKeyEnv  string `yaml:"explorer_api_key_env"`
+		ExplorerBaseURL    string `yaml:"explorer_base_url"`
 	} `yaml:"providers"`
 	Pipeline struct {
 		EpisodeInterval string `yaml:"episode_interval"`
@@ -276,18 +278,18 @@ func main() {
 		cmdCoChange(cfg)
 	case "entities":
 		cmdEntities(cfg)
+	case "facts":
+		cmdFacts(cfg)
 	case "file-context":
 		cmdFileContext(cfg)
 	case "file-index":
 		cmdFileIndex(cfg)
-	case "rate":
-		cmdRate(cfg)
-	case "train":
-		cmdTrain(cfg)
+	case "recall":
+		cmdRecall(cfg)
+	case "precedent":
+		cmdPrecedent(cfg)
 	case "show":
 		cmdShow(cfg)
-	case "stats":
-		cmdStats(cfg)
 	case "health":
 		cmdHealth(cfg)
 	case "explore":
@@ -304,6 +306,10 @@ func main() {
 		cmdBenchmark(cfg)
 	case "anticipation-stats":
 		cmdAnticipationStats(cfg)
+	case "archive-v1":
+		cmdArchiveV1(cfg)
+	case "migrate-v2":
+		cmdMigrateV2(cfg)
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -332,9 +338,13 @@ Commands:
   distill     Extract memories from a session transcript
   cochange    Query the file co-change graph (which files change together)
   entities    Query the entity graph (stats, search, show, top)
+  facts       Export/import durable facts as editable markdown (audit + correction mirror)
   docs        List/show/delete/export knowledge docs
   file-context  Get memories associated with a specific file (warnings, decisions, maps)
   file-index    Generate file index for Read hook fast-path filtering
+  recall        Recall durable facts by semantic similarity (v2 pull tool)
+  precedent     Recall prior decisions + dead-ends for an approach (v2 pull tool)
+  facts         Inspect durable facts (stats: served/hit scorecard, dead + stale candidates)
   rate        Submit context quality ratings (item-level or session-level)
   train       Train the re-ranker model from accumulated ratings
   stats       Show context quality statistics and re-ranker status
@@ -347,6 +357,8 @@ Commands:
   autopilot   Autonomously explore codebase and generate memories
   benchmark   Compare cold-start vs warm context assembly quality
   anticipation-stats  Measure anticipatory pre-exploration hit rate
+  archive-v1 Dump the entire v1 store to JSON (Phase 0 migration safety net)
+  migrate-v2 Curate v1 detail memories + knowledge docs into facts (one-time)
 
 Flags (all commands):
   --ns     Namespace (default: auto-detect from cwd or config)
@@ -512,6 +524,8 @@ func cmdContext(cfg CLIConfig) {
 	noGraph := fs.Bool("no-graph", false, "Disable entity graph boosting")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	indexMode := fs.Bool("index", false, "Progressive disclosure: output compact index instead of full context")
+	legacyMode := fs.Bool("legacy", false, "Use the v1 token-budgeted assembly instead of the v2 pinned block")
+	pinnedBudget := fs.Int("pinned-budget", 0, "Token cap for the v2 pinned block (default 500); ignored with -legacy")
 	fs.Parse(os.Args[2:])
 
 	query := strings.Join(fs.Args(), " ")
@@ -610,16 +624,16 @@ func cmdContext(cfg CLIConfig) {
 				}
 				sampleIDs = append(sampleIDs, item.ID)
 			}
-			snapFlag := ""
-			if idx.SnapshotID != "" {
-				snapFlag = " --snapshot " + idx.SnapshotID
-			}
-			fmt.Printf("\n  Fetch: ~/go/bin/dualmem show%s %s\n", snapFlag, strings.Join(sampleIDs, " "))
+			fmt.Printf("\n  Fetch: ~/go/bin/dualmem show %s\n", strings.Join(sampleIDs, " "))
 		}
 		return
 	}
 
-	block, err := engine.AssembleContextWith(ctx, namespace, query, *budget, opts)
+	block, err := engine.Assemble(ctx, namespace, query, *budget, dualmem.AssembleOptions{
+		Legacy:       *legacyMode,
+		SessionID:    cliSessionID(namespace),
+		PinnedBudget: *pinnedBudget,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -642,11 +656,7 @@ func cmdContext(cfg CLIConfig) {
 	if intentLabel == "" {
 		intentLabel = "default"
 	}
-	snapInfo := ""
-	if block.SnapshotID != "" {
-		snapInfo = fmt.Sprintf(", snapshot: %s", block.SnapshotID)
-	}
-	fmt.Printf("\n(%d tokens, %d sources, intent: %s%s)\n", block.TokenCount, len(block.Sources), intentLabel, snapInfo)
+	fmt.Printf("\n(%d tokens, %d sources, intent: %s)\n", block.TokenCount, len(block.Sources), intentLabel)
 }
 
 func cmdShow(cfg CLIConfig) {
@@ -1355,7 +1365,7 @@ func cmdSearchCode(cfg CLIConfig) {
 
 	// Default: HDC+BM25 hybrid search (module-level, descriptive summaries)
 	engine, engErr := dualmem.NewForCodeSearch(dualmem.Config{
-		RootDir:   rootDir,
+		RootDir:    rootDir,
 		SQLitePath: cfg.Storage.SQLitePath,
 	})
 	if engErr != nil {
@@ -1575,9 +1585,6 @@ func cmdAutopilot(cfg CLIConfig) {
 	model := fs.String("model", "", "Override explorer model name")
 	baseURL := fs.String("base-url", "", "Override explorer model base URL")
 	stats := fs.Bool("stats", false, "Show coverage statistics only")
-	workflows := fs.Bool("workflows", false, "Discover and analyze cross-cutting workflows from git history")
-	depthMonths := fs.Int("depth-months", 6, "How far back in git history for workflows")
-	minCommits := fs.Int("min-commits", 3, "Minimum commits per workflow cluster")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	fs.Parse(os.Args[2:])
 
@@ -1626,49 +1633,6 @@ func cmdAutopilot(cfg CLIConfig) {
 				engine.SetExplorerGenerator(dualmem.NewAnthropicSummarizer(apiKey, url, *model))
 			}
 		}
-	}
-
-	// Workflow mode: discover and analyze cross-cutting workflows from git history.
-	if *workflows {
-		wOpts := dualmem.WorkflowAutopilotOpts{
-			AutopilotOpts: dualmem.AutopilotOpts{
-				Budget:    *budget,
-				DryRun:    *dryRun,
-				Force:     *force,
-				ModelName: *model,
-				BaseURL:   *baseURL,
-			},
-			DepthMonths:  *depthMonths,
-			MinCommits:   *minCommits,
-			MaxWorkflows: 20,
-		}
-		wResult, wErr := engine.AutopilotWorkflows(ctx, namespace, wOpts)
-		if wErr != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", wErr)
-			os.Exit(1)
-		}
-		if *jsonOut {
-			json.NewEncoder(os.Stdout).Encode(wResult)
-			return
-		}
-		if *dryRun {
-			fmt.Printf("Workflow discovery: %d clusters found\n\n", len(wResult.Clusters))
-			for i, c := range wResult.Clusters {
-				if i >= 30 {
-					fmt.Printf("... and %d more\n", len(wResult.Clusters)-30)
-					break
-				}
-				fmt.Printf("  %.3f  %-40s [%s] (%d files, %d commits)\n",
-					c.Score, c.ID, strings.Join(c.Tickets, ","), len(c.Files), c.Commits)
-			}
-			return
-		}
-		fmt.Printf("Workflows: explored %d/%d, created %d memories, used %d tokens (skipped %d)\n",
-			wResult.Explored, len(wResult.Clusters), wResult.MemoriesAdded, wResult.TokensUsed, wResult.Skipped)
-		if wResult.Error != "" {
-			fmt.Fprintf(os.Stderr, "Warning: %s\n", wResult.Error)
-		}
-		return
 	}
 
 	opts := dualmem.AutopilotOpts{
@@ -1810,6 +1774,146 @@ func cmdAnticipationStats(cfg CLIConfig) {
 	}
 
 	fmt.Print(dualmem.FormatAnticipationStats(stats, namespace))
+}
+
+func cmdMigrateV2(cfg CLIConfig) {
+	fs := flag.NewFlagSet("migrate-v2", flag.ExitOnError)
+	ns := fs.String("ns", "", "Namespace to migrate (default: auto-detect)")
+	archiveDir := fs.String("archive-dir", "", "Archive directory (default: ~/.dualmem-v1-archive)")
+	commit := fs.Bool("commit", false, "Insert facts (default is dry-run)")
+	out := fs.String("out", "", "Write the markdown mirror preview to <path> instead of stdout")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	namespace := resolveNamespace(*ns, cfg)
+	if namespace == "" {
+		fmt.Fprintln(os.Stderr, "Error: could not resolve namespace (pass --ns)")
+		os.Exit(1)
+	}
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	res, err := engine.MigrateV2(context.Background(), dualmem.MigrateV2Options{
+		Namespace:  namespace,
+		ArchiveDir: *archiveDir,
+		Commit:     *commit,
+	})
+	if err != nil {
+		var ame *dualmem.ArchiveMissingError
+		if errors.As(err, &ame) {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", ame)
+			fmt.Fprintf(os.Stderr, "Run this first, then re-run migrate-v2:\n  dualmem archive-v1 --ns %s\n", namespace)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(res)
+		return
+	}
+
+	mode := "DRY-RUN"
+	if *commit {
+		mode = "COMMITTED"
+	}
+	fmt.Printf("=== DualMem v2 Migration [%s] ===\n", mode)
+	fmt.Printf("Namespace: %s\n", res.Namespace)
+	fmt.Printf("Archive:   %s\n", res.Archive)
+	fmt.Printf("Sources:   %d (v1 detail memories + knowledge docs)\n", res.Sources)
+	fmt.Printf("%s\n", res.Summary())
+	if len(res.Errors) > 0 {
+		fmt.Printf("Errors:    %d (items skipped due to curation failures)\n", len(res.Errors))
+		for _, me := range res.Errors {
+			fmt.Printf("  [%s] %s\n", me.SourceID, me.Reason)
+		}
+	}
+	fmt.Println()
+
+	if *out != "" {
+		if err := os.WriteFile(*out, []byte(res.Markdown), 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", *out, err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Markdown mirror preview written to %s\n", *out)
+	} else {
+		fmt.Print(res.Markdown)
+	}
+
+	if !*commit && (res.Skipped > 0 || res.DedupeSkipped > 0 || sumMapValues(res.KeptByKind) > 0) {
+		fmt.Println("\n(dry-run; pass --commit to insert facts)")
+	}
+}
+
+// sumMapValues returns the sum of a map[string]int's values.
+func sumMapValues(m map[string]int) int {
+	var n int
+	for _, v := range m {
+		n += v
+	}
+	return n
+}
+
+func cmdArchiveV1(cfg CLIConfig) {
+	fs := flag.NewFlagSet("archive-v1", flag.ExitOnError)
+	out := fs.String("out", "", "Destination directory (default: ~/.dualmem-v1-archive)")
+	force := fs.Bool("force", false, "Overwrite an existing non-empty archive directory")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	fs.Parse(os.Args[2:])
+
+	res, err := dualmem.ArchiveV1(cfg.Storage.SQLitePath, dualmem.ArchiveV1Options{
+		OutDir: *out,
+		Force:  *force,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(res)
+		return
+	}
+
+	fmt.Printf("=== DualMem v1 Archive ===\n")
+	fmt.Printf("Source DB: %s\n", cfg.Storage.SQLitePath)
+	fmt.Printf("Out dir:   %s\n", res.OutDir)
+	fmt.Printf("Namespaces: %d, total rows: %d\n\n", len(res.Namespaces), res.TotalRows)
+
+	for _, ns := range res.Namespaces {
+		counts := res.PerNSCounts[ns]
+		fmt.Printf("[%s]\n", ns)
+		// Stable ordering: tables sorted by name, namespaced tables first then globals.
+		var names []string
+		for t := range counts {
+			names = append(names, t)
+		}
+		sort.Strings(names)
+		for _, t := range names {
+			fmt.Printf("  %-28s %d\n", t, counts[t])
+		}
+		fmt.Println()
+	}
+
+	if len(res.GlobalCounts) > 0 {
+		fmt.Println("[global tables]")
+		var names []string
+		for t := range res.GlobalCounts {
+			names = append(names, t)
+		}
+		sort.Strings(names)
+		for _, t := range names {
+			fmt.Printf("  %-28s %d\n", t, res.GlobalCounts[t])
+		}
+	}
+
+	fmt.Printf("\nDone. Archive written to %s\n", res.OutDir)
 }
 
 func cmdSynthesize(cfg CLIConfig) {
@@ -2022,6 +2126,112 @@ func cmdDocs(cfg CLIConfig) {
 	}
 }
 
+// cmdFacts is the durable-facts CLI (dualmem v2). Today it exposes `stats` —
+// the served/hit scorecard that replaces the dead rate_context loop. Future
+// subcommands (export/import from task 3) live in their own worktree branches.
+// cmdFactsStats runs `dualmem facts stats`. Renders the served/hit scorecard:
+// per-kind counts, overall roll-up, dead facts (served often, never hit), and
+// staleness candidates (git_commit far behind HEAD).
+func cmdFactsStats(cfg CLIConfig) {
+	fs := flag.NewFlagSet("facts stats", flag.ExitOnError)
+	nsFlag := fs.String("ns", "", "Namespace (defaults to current repo). Use '' to scope to user-global facts only; repeat for multiple.")
+	allFlag := fs.Bool("all", false, "Score all namespaces (repo-scoped + user-global) instead of just the current repo.")
+	deadMin := fs.Int("dead-min-serves", 5, "A fact is 'dead' if served >= this many times with zero hits.")
+	staleCommits := fs.Int("stale-commits", 50, "A fact is 'stale' if its git_commit is more than this many commits behind HEAD.")
+	deadLimit := fs.Int("dead-limit", 20, "Max dead-fact rows to list.")
+	staleLimit := fs.Int("stale-limit", 20, "Max stale-fact rows to list.")
+	jsonFlag := fs.Bool("json", false, "Emit the scorecard as JSON.")
+	fs.Parse(os.Args[3:])
+
+	engine, err := newEngine(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+
+	opts := dualmem.FactStatsOpts{
+		DeadMinServes:         *deadMin,
+		StaleMaxCommitsBehind: *staleCommits,
+		DeadLimit:             *deadLimit,
+		StaleLimit:            *staleLimit,
+	}
+	if *allFlag {
+		// Empty Namespaces = all.
+	} else if *nsFlag != "" {
+		opts.Namespaces = []string{*nsFlag}
+	} else {
+		opts.Namespaces = []string{resolveNamespace("", cfg)}
+	}
+
+	scorecard, err := engine.FactStats(opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonFlag {
+		json.NewEncoder(os.Stdout).Encode(scorecard)
+		return
+	}
+	renderFactScorecard(scorecard)
+}
+
+// renderFactScorecard prints the scorecard in a human-readable table.
+func renderFactScorecard(s *dualmem.FactScorecard) {
+	fmt.Println("Facts scorecard (served/hit signal)")
+	fmt.Printf("  thresholds: dead>= %d serves (0 hits) · stale > %d commits behind HEAD\n\n",
+		s.Opts.DeadMinServes, s.Opts.StaleMaxCommitsBehind)
+
+	fmt.Printf("%-14s %8s %8s %8s %10s\n", "kind", "facts", "served", "hits", "hit-rate")
+	for _, r := range s.ByKind {
+		fmt.Printf("%-14s %8d %8d %8d %9s\n", r.Kind, r.FactsCount, r.ServedCount, r.HitCount, hitRate(r.ServedCount, r.HitCount))
+	}
+	fmt.Printf("%-14s %8d %8d %8d %9s\n", "(overall)", s.Overall.FactsCount, s.Overall.ServedCount, s.Overall.HitCount, hitRate(s.Overall.ServedCount, s.Overall.HitCount))
+
+	fmt.Println()
+	if len(s.Dead) == 0 {
+		fmt.Println("Dead facts: none")
+	} else {
+		fmt.Printf("Dead facts (served >= %d, never hit): %d\n", s.Opts.DeadMinServes, len(s.Dead))
+		for _, d := range s.Dead {
+			fmt.Printf("  [%s] (%d serves) %s\n", d.Kind, d.Serves, truncateFactText(d.Text, 90))
+		}
+	}
+
+	fmt.Println()
+	if len(s.Stale) == 0 {
+		fmt.Println("Stale facts: none")
+	} else {
+		fmt.Printf("Stale candidates (> %d commits behind HEAD): %d\n", s.Opts.StaleMaxCommitsBehind, len(s.Stale))
+		for _, st := range s.Stale {
+			short := st.GitCommit
+			if len(short) > 7 {
+				short = short[:7]
+			}
+			fmt.Printf("  [%s] @%s %s\n", st.Kind, short, truncateFactText(st.Text, 90))
+		}
+	}
+}
+
+// hitRate formats the hits/served ratio as a percentage, or "-" when nothing
+// was served.
+func hitRate(served, hits int) string {
+	if served == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%.0f%%", 100.0*float64(hits)/float64(served))
+}
+
+// truncateFactText shortens a fact's text for one-line scorecard rows.
+func truncateFactText(text string, max int) string {
+	text = strings.TrimSpace(text)
+	if len(text) <= max {
+		return text
+	}
+	return text[:max-1] + "…"
+}
+
 func cmdDistill(cfg CLIConfig) {
 	distillFlags := flag.NewFlagSet("distill", flag.ExitOnError)
 	autoFlag := distillFlags.Bool("auto", false, "Auto-detect CC session, skip if already distilled")
@@ -2058,7 +2268,7 @@ func cmdDistill(cfg CLIConfig) {
 		os.Exit(1)
 	}
 
-	if result.Written > 0 {
+	if result.FactsWritten > 0 {
 		regenerateFileIndex(cfg, ns)
 	}
 
@@ -2072,16 +2282,14 @@ func cmdDistill(cfg CLIConfig) {
 		}
 		fmt.Printf("Session: %s\n", result.SessionID)
 		fmt.Printf("Summary: %s\n", result.Summary)
-		fmt.Printf("Facts extracted: %d, written: %d, skipped (duplicates): %d\n", len(result.Facts), result.Written, result.Skipped)
-		if len(result.Triples) > 0 {
-			fmt.Printf("Entity triples: %d\n", len(result.Triples))
-		}
-		if result.DryRun && len(result.Facts) > 0 {
-			fmt.Println("\nExtracted facts:")
-			for i, f := range result.Facts {
-				fmt.Printf("  %d. [%s] %s (salience: %.1f)\n", i+1, f.Type, f.Text, f.Salience)
-				if len(f.Files) > 0 {
-					fmt.Printf("     Files: %s\n", strings.Join(f.Files, ", "))
+		fmt.Printf("Fact candidates: %d, written: %d, superseded: %d, identical: %d, malformed: %d\n",
+			len(result.Candidates), result.FactsWritten, result.FactsSuperseded, result.FactsIdentical, result.FactsMalformed)
+		if result.DryRun && len(result.Candidates) > 0 {
+			fmt.Println("\nProposed candidates:")
+			for i, c := range result.Candidates {
+				fmt.Printf("  %d. [%s] %s\n", i+1, c.Kind, c.Text)
+				if len(c.Files) > 0 {
+					fmt.Printf("     Files: %s\n", strings.Join(c.Files, ", "))
 				}
 			}
 		}
@@ -2208,6 +2416,140 @@ func cmdEntities(cfg CLIConfig) {
 		os.Exit(1)
 	}
 }
+
+// cmdFacts implements `dualmem facts export` and `dualmem facts import`, the
+// markdown mirror for durable facts (dualmem v2, principle 5). Export renders
+// live facts grouped by kind then namespace with provenance + ID anchors;
+// import reconciles an edited file back into the store (dry-run by default,
+// --commit applies).
+func cmdFacts(cfg CLIConfig) {
+	subArgs := os.Args[2:]
+	subCmd := ""
+	if len(subArgs) > 0 && subArgs[0] != "-" && !strings.HasPrefix(subArgs[0], "--") {
+		subCmd = subArgs[0]
+		subArgs = subArgs[1:]
+	}
+
+	switch subCmd {
+	case "stats":
+		cmdFactsStats(cfg)
+	case "export":
+		fs := flag.NewFlagSet("facts export", flag.ExitOnError)
+		out := fs.String("out", "", "Write to <path> instead of stdout")
+		fs.Parse(subArgs)
+
+		engine, err := newEngine(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		defer engine.Close()
+
+		md, err := engine.ExportFacts()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if *out != "" {
+			if err := os.WriteFile(*out, []byte(md), 0o644); err != nil {
+				fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", *out, err)
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "Exported facts to %s\n", *out)
+		} else {
+			fmt.Print(md)
+		}
+
+	case "import":
+		fs := flag.NewFlagSet("facts import", flag.ExitOnError)
+		commit := fs.Bool("commit", false, "Apply changes (default is dry-run)")
+		fs.Parse(subArgs)
+
+		if fs.NArg() < 1 {
+			fmt.Fprintln(os.Stderr, "Usage: dualmem facts import <path> [--commit]")
+			os.Exit(1)
+		}
+		path := fs.Arg(0)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", path, err)
+			os.Exit(1)
+		}
+
+		engine, err := newEngine(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		defer engine.Close()
+
+		res, err := engine.ImportFacts(context.Background(), string(data), *commit)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		mode := "dry-run"
+		if *commit {
+			mode = "committed"
+		}
+		fmt.Printf("Facts import (%s): %s\n", mode, res.Summary())
+		if len(res.Edited) > 0 {
+			fmt.Println("  edited:")
+			for _, it := range res.Edited {
+				fmt.Printf("    [%s] %s\n", it.ID, truncate(it.Text, 80))
+			}
+		}
+		if len(res.Retired) > 0 {
+			fmt.Println("  retired:")
+			for _, it := range res.Retired {
+				fmt.Printf("    [%s] %s\n", it.ID, truncate(it.Text, 80))
+			}
+		}
+		if len(res.Added) > 0 {
+			fmt.Println("  added:")
+			for _, it := range res.Added {
+				id := it.ID
+				if id == "" {
+					id = "(pending)"
+				}
+				fmt.Printf("    [%s] %s\n", id, truncate(it.Text, 80))
+			}
+		}
+		if len(res.Unchanged) > 0 {
+			fmt.Printf("  unchanged: %d\n", len(res.Unchanged))
+		}
+		if !*commit && (len(res.Edited) > 0 || len(res.Retired) > 0 || len(res.Added) > 0) {
+			fmt.Println("  (dry-run; pass --commit to apply)")
+		}
+
+	case "", "help", "-h", "--help":
+		fmt.Fprint(os.Stderr, `dualmem facts — markdown mirror of durable facts
+
+Usage:
+  dualmem facts export [--out <path>]     Render live facts as grouped markdown
+  dualmem facts import <path> [--commit]  Reconcile an edited mirror (dry-run by default)
+
+Export groups facts by kind, then namespace. Each bullet has a provenance
+suffix (source, git short-sha, YYYY-MM-DD) and a stable ID anchor:
+  - Chose SQLite. <!-- fact:ID --> (verified, abc1234, 2026-07-04)
+
+Import reconciles edits: unchanged bullets are no-ops; edited text supersedes
+the old fact (source preserved); removed bullets retire a fact (superseded,
+no successor); new bullets (no ID comment) insert as source=verified.
+`)
+		if subCmd == "" {
+			os.Exit(1)
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown facts subcommand: %s\nUsage: dualmem facts [export|import|stats]\n", subCmd)
+		os.Exit(1)
+	}
+}
+
+// truncate clips s to n runes with an ellipsis, for compact CLI summaries.
+// (Defined earlier in this file; re-declared here would conflict.)
 
 func cmdCoChange(cfg CLIConfig) {
 	fs := flag.NewFlagSet("cochange", flag.ExitOnError)
@@ -2363,10 +2705,9 @@ func cmdFileContext(cfg CLIConfig) {
 		os.Exit(1)
 	}
 
-	// Also fetch workflow hints for this file
-	workflowHints, _ := engine.GetWorkflowHintsForFile(ctx, namespace, filename)
+	// Gate mode fetches file-context annotations.
 
-	if len(results) == 0 && len(workflowHints) == 0 {
+	if len(results) == 0 {
 		return // Silent exit — no memories for this file
 	}
 
@@ -2387,7 +2728,7 @@ func cmdFileContext(cfg CLIConfig) {
 			relPath = filepath.Base(abs)
 		}
 
-		totalObs := len(results) + len(workflowHints)
+		totalObs := len(results)
 		fmt.Printf("[File Memory] %s (%d cached observations, file ~%dtok)\n", relPath, totalObs, tokEst)
 		fmt.Println("Prior context for this file — the full read will follow, but these may already answer your question:")
 		fmt.Println()
@@ -2397,7 +2738,7 @@ func cmdFileContext(cfg CLIConfig) {
 			"decision":   "★",
 			"continuity": "↻",
 			"knowledge":  "📖",
-			"checkpoint":  "📋",
+			"checkpoint": "📋",
 			"map":        "🗺",
 			"trace":      "🔍",
 			"seed":       "🌱",
@@ -2412,13 +2753,6 @@ func cmdFileContext(cfg CLIConfig) {
 			dateStr := r.CreatedAt.Format("2006-01-02")
 			fmt.Printf("%s [%s] %s (%s)\n", icon, r.Type, r.Text, dateStr)
 		}
-		for _, wh := range workflowHints {
-			ticketStr := ""
-			if len(wh.Tickets) > 0 {
-				ticketStr = " (" + strings.Join(wh.Tickets, ", ") + ")"
-			}
-			fmt.Printf("📎 [workflow] \"%s\"%s — search \"workflow:%s\" for full detail\n", wh.Summary, ticketStr, wh.WorkflowID)
-		}
 		return
 	}
 
@@ -2429,6 +2763,25 @@ func cmdFileContext(cfg CLIConfig) {
 
 	for _, r := range results {
 		fmt.Printf("[%s] %s (%.2f, %s)\n", r.Type, r.Text, r.Salience, r.CreatedAt.Format("2006-01-02"))
+	}
+
+	// --- dualmem v2 additions (non-gate only): durable facts citing the file +
+	// git-derived co-change neighbors. Additive; the --gate hook path above is
+	// untouched so the PreToolUse hook output stays byte-stable. ---
+	facts, ferr := engine.FactsForFile(namespace, filename, queryLimit)
+	if ferr == nil && len(facts) > 0 {
+		fmt.Println("\nFacts:")
+		for _, f := range facts {
+			fmt.Println(formatFactCLI(f))
+		}
+		engine.RecordServed(cliSessionID(namespace), factIDs(facts), "file-context")
+	}
+	neighbors := cliGitCoChangeNeighbors(cfg, filename, 5)
+	if len(neighbors) > 0 {
+		fmt.Println("\nCo-change neighbors (git-derived):")
+		for _, n := range neighbors {
+			fmt.Printf("  %s\n", n)
+		}
 	}
 }
 
@@ -2472,20 +2825,21 @@ func cmdFileIndex(cfg CLIConfig) {
 	}
 }
 
-// --- Rate command ---
+// --- Recall / Precedent (dualmem v2 pull tools) ---
 
-func cmdRate(cfg CLIConfig) {
-	fs := flag.NewFlagSet("rate", flag.ExitOnError)
+func cmdRecall(cfg CLIConfig) {
+	fs := flag.NewFlagSet("recall", flag.ExitOnError)
 	ns := fs.String("ns", "", "Namespace")
-	snapshot := fs.String("snapshot", "", "Snapshot ID to rate items for")
-	phase := fs.String("phase", "late", "Rating phase: early or late")
-	ratingsJSON := fs.String("ratings", "", `Item ratings as JSON: {"mem_id": 0-2, ...}`)
-	// Session-level rating
-	session := fs.Bool("session", false, "Submit a session-level rating instead")
-	score := fs.Int("score", 0, "Session score (1-5)")
-	explanation := fs.String("explanation", "", "Session rating explanation")
+	kind := fs.String("kind", "", "Fact kind filter: decision, deadend, gotcha, preference, reference")
+	limit := fs.Int("limit", 5, "Max facts")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	fs.Parse(os.Args[2:])
+
+	query := strings.Join(fs.Args(), " ")
+	if query == "" {
+		fmt.Fprintln(os.Stderr, "usage: dualmem recall <query> [--ns <ns>] [--kind <kind>] [--limit 5] [--json]")
+		os.Exit(1)
+	}
 
 	namespace := resolveNamespace(*ns, cfg)
 	engine, err := newEngine(cfg)
@@ -2495,62 +2849,41 @@ func cmdRate(cfg CLIConfig) {
 	}
 	defer engine.Close()
 
-	if *session {
-		if *score < 1 || *score > 5 {
-			fmt.Fprintln(os.Stderr, "session score must be 1-5")
-			os.Exit(1)
-		}
-		sr := &dualmem.SessionRating{
-			ID:          fmt.Sprintf("sr_%d", time.Now().UnixNano()),
-			Namespace:   namespace,
-			SessionID:   fmt.Sprintf("sess_%d", time.Now().UnixNano()),
-			Score:       *score,
-			Explanation: *explanation,
-		}
-		if err := engine.SubmitSessionRating(sr); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-		if *jsonOut {
-			json.NewEncoder(os.Stdout).Encode(map[string]any{"status": "ok", "session_rating_id": sr.ID})
-		} else {
-			fmt.Printf("Session rating saved (score=%d)\n", *score)
-		}
+	ctx := context.Background()
+	facts, err := engine.SearchFacts(ctx, query, namespace, *kind, *limit)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	engine.RecordServed(cliSessionID(namespace), factIDs(facts), "recall")
+
+	if *jsonOut {
+		json.NewEncoder(os.Stdout).Encode(facts)
 		return
 	}
-
-	// Item-level rating
-	if *snapshot == "" || *ratingsJSON == "" {
-		fmt.Fprintln(os.Stderr, "usage: dualmem rate --snapshot <id> --ratings '{\"mem_id\": 2, ...}'")
-		fmt.Fprintln(os.Stderr, "       dualmem rate --session --score 4 --explanation 'helpful'")
-		os.Exit(1)
+	if len(facts) == 0 {
+		fmt.Println("No matching facts found.")
+		return
 	}
-
-	var ratings map[string]int
-	if err := json.Unmarshal([]byte(*ratingsJSON), &ratings); err != nil {
-		fmt.Fprintf(os.Stderr, "invalid ratings JSON: %v\n", err)
-		os.Exit(1)
-	}
-
-	if err := engine.SubmitRatings(namespace, *snapshot, *phase, ratings); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-
-	if *jsonOut {
-		json.NewEncoder(os.Stdout).Encode(map[string]any{"status": "ok", "items_rated": len(ratings), "phase": *phase})
-	} else {
-		fmt.Printf("Rated %d items (phase=%s, snapshot=%s)\n", len(ratings), *phase, *snapshot)
+	fmt.Printf("Recalled %d fact(s):\n\n", len(facts))
+	for _, f := range facts {
+		fmt.Println(formatFactCLI(f))
 	}
 }
 
-// --- Train command ---
-
-func cmdTrain(cfg CLIConfig) {
-	fs := flag.NewFlagSet("train", flag.ExitOnError)
+func cmdPrecedent(cfg CLIConfig) {
+	fs := flag.NewFlagSet("precedent", flag.ExitOnError)
 	ns := fs.String("ns", "", "Namespace")
+	limit := fs.Int("limit", 5, "Max facts")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	fs.Parse(os.Args[2:])
+
+	approach := strings.Join(fs.Args(), " ")
+	if approach == "" {
+		fmt.Fprintln(os.Stderr, "usage: dualmem precedent <approach> [--ns <ns>] [--limit 5] [--json]")
+		fmt.Fprintln(os.Stderr, "Did we already try/decide/reject this? Searches decision + deadend facts.")
+		os.Exit(1)
+	}
 
 	namespace := resolveNamespace(*ns, cfg)
 	engine, err := newEngine(cfg)
@@ -2560,42 +2893,112 @@ func cmdTrain(cfg CLIConfig) {
 	}
 	defer engine.Close()
 
-	rows, err := engine.GetTrainingRows(namespace)
+	ctx := context.Background()
+	facts, err := engine.SearchFactsMulti(ctx, approach, namespace, []string{dualmem.FactKindDecision, dualmem.FactKindDeadEnd}, *limit)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error loading training data: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-
-	weights, err := dualmem.TrainReranker(rows)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "training failed: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Store weights in config
-	weightsJSON, _ := json.Marshal(weights)
-	if err := engine.SetConfigValue("reranker_weights", string(weightsJSON)); err != nil {
-		fmt.Fprintf(os.Stderr, "error saving weights: %v\n", err)
-		os.Exit(1)
-	}
+	engine.RecordServed(cliSessionID(namespace), factIDs(facts), "precedent")
 
 	if *jsonOut {
-		json.NewEncoder(os.Stdout).Encode(weights)
-	} else {
-		fmt.Printf("Re-ranker trained on %d samples\n", weights.SampleCount)
-		fmt.Printf("Coefficients:\n")
-		featureNames := []string{"cosine_sim", "importance", "salience", "type_is_warning",
-			"type_is_decision", "type_is_continuity", "file_overlap", "age_days", "text_length", "sector_match"}
-		for i, name := range featureNames {
-			if weights.Coefficients[i] != 0 {
-				fmt.Printf("  %-20s %+.3f\n", name, weights.Coefficients[i])
-			}
-		}
-		fmt.Printf("  %-20s %+.3f\n", "bias", weights.Bias)
+		json.NewEncoder(os.Stdout).Encode(facts)
+		return
+	}
+	if len(facts) == 0 {
+		fmt.Println("No prior decision or dead-end found for this approach.")
+		return
+	}
+	fmt.Printf("%d prior decision(s)/dead-end(s):\n\n", len(facts))
+	for _, f := range facts {
+		fmt.Println(formatFactCLI(f))
 	}
 }
 
-// --- Consult command ---
+// factIDs collects the IDs of a fact slice (nil-safe).
+func factIDs(facts []*dualmem.Fact) []string {
+	ids := make([]string, 0, len(facts))
+	for _, f := range facts {
+		if f != nil && f.ID != "" {
+			ids = append(ids, f.ID)
+		}
+	}
+	return ids
+}
+
+// cliSessionID derives a per-invocation session tag for RecordServed. It is
+// stable within a single CLI run so the same command can attribute served facts.
+func cliSessionID(namespace string) string {
+	return "cli:" + fmt.Sprintf("%x", md5.Sum([]byte(namespace)))[:8]
+}
+
+// formatFactCLI renders one durable fact for terminal output: kind, text,
+// provenance (source · short sha · date), and a capped file list.
+func formatFactCLI(f *dualmem.Fact) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("[%s] %s", f.Kind, f.Text))
+	dateStr := ""
+	if !f.CreatedAt.IsZero() {
+		dateStr = f.CreatedAt.Format("2006-01-02")
+	}
+	short := f.GitCommit
+	if len(short) > 7 {
+		short = short[:7]
+	}
+	prov := fmt.Sprintf("source=%s", f.Source)
+	if short != "" {
+		prov += " · commit=" + short
+	}
+	if dateStr != "" {
+		prov += " · " + dateStr
+	}
+	sb.WriteString("\n  " + prov)
+	if len(f.Files) > 0 {
+		shown := f.Files
+		if len(shown) > 5 {
+			sb.WriteString(fmt.Sprintf("\n  Files: %s (+%d more)", strings.Join(shown[:5], ", "), len(shown)-5))
+		} else {
+			sb.WriteString("\n  Files: " + strings.Join(shown, ", "))
+		}
+	}
+	return sb.String()
+}
+
+// cliGitCoChangeNeighbors returns formatted "path (co-change W)" lines for the
+// files that git-history-co-change with the given path. Pure git-derived
+// (git_cochange.go); never the memory cochange layer. Best-effort: returns nil
+// on any error or empty graph.
+func cliGitCoChangeNeighbors(cfg CLIConfig, path string, topN int) []string {
+	if path == "" {
+		return nil
+	}
+	rootDir, _ := os.Getwd()
+	if out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output(); err == nil {
+		if t := strings.TrimSpace(string(out)); t != "" {
+			rootDir = t
+		}
+	}
+	edges, err := dualmem.BuildGitCoChangeGraph(rootDir, 3, 50)
+	if err != nil || len(edges) == 0 {
+		return nil
+	}
+	neighbors := dualmem.CoChangeNeighbors(edges, []string{path}, topN)
+	type kv struct {
+		path   string
+		weight float64
+	}
+	sorted := make([]kv, 0, len(neighbors))
+	for p, w := range neighbors {
+		sorted = append(sorted, kv{p, w})
+	}
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].weight > sorted[j].weight })
+	out := make([]string, 0, len(sorted))
+	for _, n := range sorted {
+		out = append(out, fmt.Sprintf("%s (co-change %.2f)", n.path, n.weight))
+	}
+	return out
+}
+
 
 func cmdIndex(cfg CLIConfig) {
 	fs := flag.NewFlagSet("index", flag.ExitOnError)
@@ -2960,72 +3363,4 @@ func cmdConsultCompare(cfg CLIConfig, namespace, query string, budget int) {
 		flashTokens, flashDur.Seconds(), synthModel, synthTokens, synthDur.Seconds())
 }
 
-// --- Stats command ---
-
-func cmdStats(cfg CLIConfig) {
-	fs := flag.NewFlagSet("stats", flag.ExitOnError)
-	ns := fs.String("ns", "", "Namespace")
-	jsonOut := fs.Bool("json", false, "JSON output")
-	fs.Parse(os.Args[2:])
-
-	namespace := resolveNamespace(*ns, cfg)
-	engine, err := newEngine(cfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	defer engine.Close()
-
-	stats, err := engine.GetRatingStats(namespace)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-
-	if *jsonOut {
-		json.NewEncoder(os.Stdout).Encode(stats)
-		return
-	}
-
-	fmt.Printf("Context Quality Stats (%s)\n", namespace)
-	fmt.Println(strings.Repeat("─", 45))
-	fmt.Printf("  Total ratings:     %d items across %d sessions\n", stats.TotalRatings, stats.TotalSessions)
-	fmt.Printf("  Avg precision:     %.2f (items rated 1-2 / total)\n", stats.AvgPrecision)
-	if stats.AvgSessionScore > 0 {
-		fmt.Printf("  Avg session score: %.1f / 5.0\n", stats.AvgSessionScore)
-	}
-
-	if len(stats.ByMemType) > 0 {
-		fmt.Println()
-		fmt.Println("  By memory type:")
-		for memType, ts := range stats.ByMemType {
-			fmt.Printf("    %-14s avg=%.2f  (%.0f%% relevant, n=%d)\n", memType, ts.AvgRating, ts.RelevantPct, ts.Count)
-		}
-	}
-
-	// Re-ranker status
-	weightsJSON, _ := engine.GetConfigValue("reranker_weights")
-	if weightsJSON != "" {
-		var weights dualmem.RerankerWeights
-		if json.Unmarshal([]byte(weightsJSON), &weights) == nil {
-			fmt.Printf("\n  Re-ranker: trained (%d samples, %s)\n", weights.SampleCount, weights.TrainedAt.Format("2006-01-02"))
-			if weights.IsStale(60) {
-				fmt.Println("  ⚠ Weights are stale (>60 days) — run `dualmem train` to refresh")
-			}
-		}
-	} else {
-		fmt.Printf("\n  Re-ranker: not trained (need 50+ ratings)\n")
-	}
-
-	if len(stats.RecentPrecision) > 0 {
-		fmt.Print("\n  Trend (recent sessions): ")
-		for i, p := range stats.RecentPrecision {
-			if i > 0 {
-				fmt.Print(" → ")
-			}
-			fmt.Printf("%.2f", p)
-		}
-		fmt.Println()
-	}
-}
 

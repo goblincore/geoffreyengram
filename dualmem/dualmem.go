@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,16 +23,16 @@ import (
 
 // Engine is the main DualMem implementation.
 type Engine struct {
-	mu            sync.RWMutex
-	store         Store
-	detail        *DetailPath
-	sketch        *SketchPath
-	pipeline      *Pipeline
-	projector     *Projector
-	embedder      EmbeddingProvider
-	classifier    SectorClassifier
-	extractor     EntityExtractor
-	cfg           *Config
+	mu             sync.RWMutex
+	store          Store
+	detail         *DetailPath
+	sketch         *SketchPath
+	pipeline       *Pipeline
+	projector      *Projector
+	embedder       EmbeddingProvider
+	classifier     SectorClassifier
+	extractor      EntityExtractor
+	cfg            *Config
 	OnScanProgress func(ScanProgress) // optional callback for scan progress reporting
 }
 
@@ -393,11 +392,6 @@ func (e *Engine) FileContext(ctx context.Context, userID string, filename string
 	return result, nil
 }
 
-// GetWorkflowHintsForFile returns workflow hints for a single file.
-func (e *Engine) GetWorkflowHintsForFile(ctx context.Context, userID string, filename string) ([]WorkflowHint, error) {
-	return e.store.GetWorkflowHintsForFiles(userID, []string{filename})
-}
-
 // FileIndex returns all basenames that have associated high-signal memories.
 // Used to generate the file index for the Read hook fast-path.
 func (e *Engine) FileIndex(ctx context.Context, userID string) ([]string, error) {
@@ -435,11 +429,11 @@ func (e *Engine) FileIndex(ctx context.Context, userID string) ([]string, error)
 // Edge-type multipliers for structure-aware graph boosting.
 // These weight how strongly an edge type should contribute to memory boost.
 var edgeTypeMultiplier = map[string]float64{
-	"depends_on":  1.0,
-	"implements":  0.9,
-	"modifies":    0.8,
-	"uses":        0.7,
-	"relates":     0.5,
+	"depends_on": 1.0,
+	"implements": 0.9,
+	"modifies":   0.8,
+	"uses":       0.7,
+	"relates":    0.5,
 }
 
 // computeGraphBoost extracts entity candidates from query text, expands them
@@ -673,9 +667,9 @@ func (e *Engine) GetStructuralNeighborPaths(namespace string, seedPaths []string
 // Annotation represents a piece of context associated with a file path.
 type Annotation struct {
 	FilePath string  `json:"file_path"`
-	Type     string  `json:"type"`      // "decision", "warning", "continuity", "knowledge", "checkpoint", "structure"
+	Type     string  `json:"type"` // "decision", "warning", "continuity", "knowledge", "checkpoint", "structure"
 	Text     string  `json:"text"`
-	Source   string  `json:"source"`    // "memory", "knowledge_doc", "checkpoint"
+	Source   string  `json:"source"` // "memory", "knowledge_doc", "checkpoint"
 	Salience float64 `json:"salience"`
 	MemoryID string  `json:"memory_id,omitempty"` // for dedup tracking
 }
@@ -794,32 +788,6 @@ func (e *Engine) FileAnnotations(ctx context.Context, namespace string, filePath
 		}
 	}
 
-	// 4. Workflow hints — lightweight pointers to autopilot workflow memories
-	workflowHints, _ := e.store.GetWorkflowHintsForFiles(namespace, filePaths)
-	for _, wh := range workflowHints {
-		whID := "wh_" + wh.WorkflowID
-		if seenIDs[whID] {
-			continue
-		}
-		seenIDs[whID] = true
-		ticketStr := ""
-		if len(wh.Tickets) > 0 {
-			ticketStr = " (" + strings.Join(wh.Tickets, ", ") + ")"
-		}
-		hintText := fmt.Sprintf(`"%s"%s — search "workflow:%s" for full detail`, wh.Summary, ticketStr, wh.WorkflowID)
-		if len(hintText) > 200 {
-			hintText = hintText[:197] + "..."
-		}
-		annotations = append(annotations, Annotation{
-			FilePath: wh.MatchedFile,
-			Type:     "workflow",
-			Text:     hintText,
-			Source:   "workflow_hint",
-			Salience: 0.85,
-			MemoryID: whID,
-		})
-	}
-
 	// Sort by salience descending
 	sort.Slice(annotations, func(i, j int) bool {
 		return annotations[i].Salience > annotations[j].Salience
@@ -842,6 +810,58 @@ type ContextOpts struct {
 	Intent            Intent  // Explicit intent override (empty = auto-detect from query)
 	MinSimilarity     float64 // If > 0, exclude detail memories below this cosine similarity
 	DisableGraphBoost bool    // If true, skip entity graph boost in search
+}
+
+// AssembleOptions selects between the v2 pinned-block assembly (default) and
+// the v1 legacy assembly, and tunes the v2 pinned block. See
+// docs/superpowers/plans/2026-07-04-dualmem-v2.md ("Assembly v2").
+//
+// The v2 pinned block is a tiny (<500 token), LLM-free, scan-free context
+// header: latest handoff, user-global preferences, facts touching changed
+// files, and a one-line codemap status. Deep retrieval moves to pull tools
+// (task 6). Set Legacy=true to opt back into the v1 token-budgeted block
+// (kept verbatim until task 9 deletes the v1 layer).
+type AssembleOptions struct {
+	// Legacy selects the v1 assembly path. False (zero value) = v2 pinned
+	// block, which is the production default.
+	Legacy bool
+
+	// SessionID, when set on the v2 path, attributes the pinned block's served
+	// facts for instrumentation (task 7): every fact emitted into the block is
+	// logged to served_facts so the distill-time file-touch correlator can
+	// credit hits. Empty = the block is still assembled, but its facts are not
+	// logged (use during one-off or test runs).
+	SessionID string
+
+	// PinnedBudget is the hard token cap for the v2 pinned block. Defaults to
+	// DefaultPinnedBudget when zero or negative.
+	PinnedBudget int
+
+	// ChangedFactCap limits how many changed-file facts item 3 may emit. Zero
+	// means DefaultChangedFactCap.
+	ChangedFactCap int
+}
+
+// DefaultPinnedBudget is the hard cap on the v2 pinned block. See plan §
+// "Assembly v2" — 500 tokens is a placeholder to be tuned after task 7
+// instrumentation lands.
+const DefaultPinnedBudget = 500
+
+// DefaultChangedFactCap bounds item 3 (facts touching changed files) so a
+// large diff can't crowd out the handoff and preferences.
+const DefaultChangedFactCap = 6
+
+// Assemble is the v2-default context assembly entry point. With the zero-value
+// AssembleOptions (Legacy=false) it emits the v2 pinned block; with Legacy=true
+// it delegates to the v1 token-budgeted block (AssembleContextWith).
+//
+// AssembleContext / AssembleContextWith remain as v1-only entry points so
+// existing callers and the SWR regression tests keep their exact behavior.
+func (e *Engine) Assemble(ctx context.Context, userID, query string, tokenBudget int, opts AssembleOptions) (*ContextBlock, error) {
+	if opts.Legacy {
+		return e.AssembleContextWith(ctx, userID, query, tokenBudget, nil)
+	}
+	return e.assemblePinnedV2(ctx, userID, query, opts)
 }
 
 func (e *Engine) AssembleContext(ctx context.Context, userID string, query string, tokenBudget int) (*ContextBlock, error) {
@@ -955,7 +975,15 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 				useBoostOnly := intent == IntentContinue && len(boostPaths) > 0
 				mapText := codeMap.RenderAtBudgetWithCoChange(mapBudget, codemapQuery, moduleEmbs, boostPaths, cochangeNeighbors, useBoostOnly)
 				mapTokens := estimateTokens(mapText)
-				parts = append(parts, "[Codebase Map]\n"+mapText)
+				header := "[Codebase Map]"
+				if codeMap.Stale {
+					if codeMap.CommitsBehind > 0 {
+						header = fmt.Sprintf("[Codebase Map — %d commits behind, run `dualmem index` to refresh]", codeMap.CommitsBehind)
+					} else {
+						header = "[Codebase Map — stale, run `dualmem index` to refresh]"
+					}
+				}
+				parts = append(parts, header+"\n"+mapText)
 				sources = append(sources, SourceRef{Type: "codemap", ID: userID})
 				tokensUsed += mapTokens
 			}
@@ -970,29 +998,6 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 			parts = append(parts, cpText)
 			sources = append(sources, SourceRef{Type: "checkpoint", ID: cp.Task})
 			tokensUsed += cpTokens
-		}
-	}
-
-	// Workflow Hints — ticket-prefix lookup from active checkpoints
-	ticketPrefixes := extractTicketsFromCheckpoints(checkpoints)
-	if len(ticketPrefixes) > 0 {
-		workflowHints, _ := e.store.GetWorkflowHintsForTickets(userID, ticketPrefixes)
-		if len(workflowHints) > 0 {
-			var hintLines []string
-			for _, wh := range workflowHints {
-				ticketStr := ""
-				if len(wh.Tickets) > 0 {
-					ticketStr = " (" + strings.Join(wh.Tickets, ", ") + ")"
-				}
-				hintLines = append(hintLines, fmt.Sprintf(`📎 "%s"%s — search "workflow:%s"`, wh.Summary, ticketStr, wh.WorkflowID))
-			}
-			whText := "[Workflow Hints]\n" + strings.Join(hintLines, "\n")
-			whTokens := estimateTokens(whText)
-			if tokensUsed+whTokens <= tokenBudget {
-				parts = append(parts, whText)
-				sources = append(sources, SourceRef{Type: "workflow_hint", ID: "tickets"})
-				tokensUsed += whTokens
-			}
 		}
 	}
 
@@ -1179,15 +1184,6 @@ func (e *Engine) AssembleContextWith(ctx context.Context, userID string, query s
 		Sources:    sources,
 		Intent:     intent,
 	}
-
-	// Persist context snapshot for retrospective rating.
-	// Best-effort — snapshot failure must not break context assembly.
-	snapID := fmt.Sprintf("snap_%d", time.Now().UnixNano())
-	snapshot := BuildSnapshot(snapID, userID, query, block, results.DetailMemories, time.Now())
-	if err := e.SaveSnapshot(snapshot); err == nil {
-		block.SnapshotID = snapID
-	}
-
 	return block, nil
 }
 
@@ -1220,41 +1216,6 @@ func extractFileHints(checkpoints []Checkpoint, memories []DetailMemory) []strin
 		}
 	}
 	return hints
-}
-
-// extractTicketsFromCheckpoints scans checkpoint Task and Text fields for ticket prefixes.
-// Returns deduplicated ticket IDs like ["LC-1635", "LC-1729"].
-func extractTicketsFromCheckpoints(checkpoints []Checkpoint) []string {
-	re := regexp.MustCompile(`[A-Z]+-\d+`)
-	seen := make(map[string]bool)
-	var tickets []string
-
-	for _, cp := range checkpoints {
-		for _, m := range re.FindAllString(cp.Task, -1) {
-			if !seen[m] {
-				seen[m] = true
-				tickets = append(tickets, m)
-			}
-		}
-		for _, step := range cp.CompletedSteps {
-			for _, m := range re.FindAllString(step, -1) {
-				if !seen[m] {
-					seen[m] = true
-					tickets = append(tickets, m)
-				}
-			}
-		}
-		for _, step := range cp.RemainingSteps {
-			for _, m := range re.FindAllString(step, -1) {
-				if !seen[m] {
-					seen[m] = true
-					tickets = append(tickets, m)
-				}
-			}
-		}
-	}
-
-	return tickets
 }
 
 // AssembleContextIndex returns a compact index of available context items
@@ -1412,16 +1373,6 @@ func (e *Engine) AssembleContextIndex(ctx context.Context, userID string, query 
 		Intent:        intent,
 		AlsoAvailable: also,
 	}
-
-	// Persist a context snapshot for the rating pipeline.
-	// All index items are recorded as candidates — ShowItems will later
-	// mark which ones were actually fetched (implicit relevance signal).
-	snapID := fmt.Sprintf("snap_%d", time.Now().UnixNano())
-	snapshot := buildIndexSnapshot(snapID, userID, query, items, results.DetailMemories, now)
-	if err := e.SaveSnapshot(snapshot); err == nil {
-		idx.SnapshotID = snapID
-	}
-
 	return idx, nil
 }
 
@@ -1897,7 +1848,7 @@ func (e *Engine) ReadCodeEvidence(ctx context.Context, namespace, query string, 
 					Content:    content,
 					Relevance:  fr.Summary,
 					TokenCount: tokens,
-			})
+				})
 				evidence.TotalTokens += tokens
 			} else {
 				for _, ident := range matches {
@@ -2087,55 +2038,14 @@ func fileOverlap(a, b []string) float64 {
 	return float64(overlap) / float64(len(a))
 }
 
-// buildIndexSnapshot creates a ContextSnapshot from index items, enriching
-// detail memory items with their search features for re-ranker training.
-func buildIndexSnapshot(id, namespace, query string, items []IndexEntry, details []DetailMemory, now time.Time) *ContextSnapshot {
-	// Build lookup for detail memory features
-	detailMap := make(map[string]*DetailMemory, len(details))
-	for i := range details {
-		detailMap[details[i].ID] = &details[i]
-	}
-
-	var sources []SnapshotSource
-	for _, item := range items {
-		ss := SnapshotSource{
-			ID:         item.ID,
-			Type:       item.Type,
-			TextLength: item.TokenCount,
-		}
-		// Enrich with detail memory features if this is a detail memory
-		if dm, ok := detailMap[item.ID]; ok {
-			ss.CosineSim = dm.Similarity
-			ss.Importance = dm.ImportanceScore
-			ss.Salience = dm.Salience
-			ss.Sector = dm.Sector
-			ss.MemType = dm.Type
-			ss.AgeDays = now.Sub(dm.CreatedAt).Hours() / 24
-		}
-		sources = append(sources, ss)
-	}
-
-	totalTokens := 0
-	for _, item := range items {
-		totalTokens += item.TokenCount
-	}
-
-	return &ContextSnapshot{
-		ID:         id,
-		Namespace:  namespace,
-		Query:      query,
-		Sources:    sources,
-		TokensUsed: totalTokens,
-		CreatedAt:  now,
-	}
-}
 
 // ShowItems renders full text for specific memory items by ID.
 // Accepts mixed ID prefixes: raw IDs (detail memories), chk_* (checkpoints),
 // kdoc_* (knowledge docs), ep_* (episodes).
-// If snapshotID is non-empty, submits implicit ratings: fetched items get
-// rating=2 (relevant), all other items in the snapshot get rating=0 (skipped).
+// The snapshotID parameter is retained for caller compatibility but is now
+// unused (v2 dropped the implicit-rating feedback loop).
 func (e *Engine) ShowItems(ctx context.Context, namespace string, ids []string, snapshotID string) (string, error) {
+	_ = snapshotID
 	var parts []string
 
 	for _, id := range ids {
@@ -2194,11 +2104,6 @@ func (e *Engine) ShowItems(ctx context.Context, namespace string, ids []string, 
 		parts = append(parts, text)
 	}
 
-	// Record implicit ratings if a snapshot was provided
-	if snapshotID != "" {
-		_ = e.SubmitImplicitRatings(namespace, snapshotID, ids) // best-effort
-	}
-
 	return strings.Join(parts, "\n\n"), nil
 }
 
@@ -2255,10 +2160,11 @@ func sanitizeID(s string) string {
 	return b.String()
 }
 
-// getOrGenerateCodeMap loads a stored code map or generates one on the fly.
-// Returns the code map and per-module embeddings (for query-aware ranking).
 // GetCodeMap returns the cached code map and hybrid CodeIndex for a namespace.
-// Regenerates if the git commit has changed. Encoding is deterministic (no API calls).
+// Stale-while-revalidate: if a stored map exists it is served immediately even
+// when the git commit has moved (marked with Stale/CommitsBehind) — it never
+// blocks on a rescan. A full scan only runs inline when no map exists at all
+// (true first run). Use RefreshCodeMap to force regeneration.
 func (e *Engine) GetCodeMap(ctx context.Context, namespace string) (*CodeMap, *CodeIndex) {
 	return e.getOrGenerateCodeMap(ctx, namespace)
 }
@@ -2268,8 +2174,9 @@ func (e *Engine) getOrGenerateCodeMap(ctx context.Context, namespace string) (*C
 
 	stored, _ := e.store.GetCodeMap(namespace)
 
-	// Use cache if git commit matches
-	if stored != nil && stored.GitCommit == currentCommit && currentCommit != "" {
+	// Serve any stored map immediately — fresh or stale. Never block context
+	// assembly on a codebase rescan (large monorepos can take minutes).
+	if stored != nil {
 		cm := &CodeMap{
 			Namespace:   stored.Namespace,
 			RootDir:     stored.RootDir,
@@ -2278,13 +2185,37 @@ func (e *Engine) getOrGenerateCodeMap(ctx context.Context, namespace string) (*C
 			GeneratedAt: stored.GeneratedAt,
 			GitCommit:   stored.GitCommit,
 		}
+		if currentCommit != "" && stored.GitCommit != currentCommit {
+			cm.Stale = true
+			cm.CommitsBehind = countCommitsBetween(e.cfg.RootDir, stored.GitCommit, currentCommit)
+		}
 		return cm, BuildCodeIndex(cm)
 	}
 
-	// Regenerate (unified scan: code map + structural edges in one pass)
-	result, err := ScanCodebase(e.cfg.RootDir, e.OnScanProgress)
+	// True first run: no stored map. Generate inline.
+	cm, idx, err := e.RefreshCodeMap(ctx, namespace)
 	if err != nil {
 		return nil, nil
+	}
+	return cm, idx
+}
+
+// RefreshCodeMap rescans the codebase and persists the result. When a stored
+// map exists and git can enumerate what changed since it was built, only the
+// affected directories are re-parsed (incremental); otherwise it falls back to
+// a full filesystem walk. Called by the CLI `map` command, on true first run,
+// and by background refresh workers.
+func (e *Engine) RefreshCodeMap(ctx context.Context, namespace string) (*CodeMap, *CodeIndex, error) {
+	_, currentCommit := GetGitState(e.cfg.RootDir)
+
+	if cm, idx := e.tryIncrementalRefresh(namespace, currentCommit); cm != nil {
+		return cm, idx, nil
+	}
+
+	// Unified scan: code map + structural edges in one pass
+	result, err := ScanCodebase(e.cfg.RootDir, e.OnScanProgress)
+	if err != nil {
+		return nil, nil, err
 	}
 	cm := result.CodeMap
 	cm.Namespace = namespace
@@ -2298,6 +2229,111 @@ func (e *Engine) getOrGenerateCodeMap(ctx context.Context, namespace string) (*C
 		}
 		e.store.InsertStructuralEdges(namespace, result.Edges)
 	}
+
+	return cm, BuildCodeIndex(cm), nil
+}
+
+// Incremental refresh guards: above these thresholds a full walk is likely
+// cheaper (and certainly simpler) than many targeted rescans.
+const (
+	maxIncrementalFiles = 500
+	maxIncrementalDirs  = 100
+)
+
+// tryIncrementalRefresh re-parses only the directories touched since the
+// stored map's commit, merging the results into the stored map. Returns
+// (nil, nil) when incremental refresh isn't possible — no stored map, no git
+// state, unresolvable diff, or too many changes — and the caller falls back
+// to a full scan.
+func (e *Engine) tryIncrementalRefresh(namespace, currentCommit string) (*CodeMap, *CodeIndex) {
+	if currentCommit == "" {
+		return nil, nil
+	}
+	stored, err := e.store.GetCodeMap(namespace)
+	if err != nil || stored == nil || stored.GitCommit == "" {
+		return nil, nil
+	}
+
+	changed, ok := ChangedFilesSince(e.cfg.RootDir, stored.GitCommit)
+	if !ok || len(changed) > maxIncrementalFiles {
+		return nil, nil
+	}
+
+	// Group changed files by directory (git emits slash-separated paths).
+	dirSet := make(map[string]bool)
+	for _, f := range changed {
+		dir := "."
+		if i := strings.LastIndex(f, "/"); i >= 0 {
+			dir = f[:i]
+		}
+		dirSet[dir] = true
+	}
+	if len(dirSet) > maxIncrementalDirs {
+		return nil, nil
+	}
+
+	oldModules := UnmarshalZoom2(stored.Zoom2JSON)
+
+	if len(dirSet) == 0 {
+		// Nothing changed on disk — the map content is still valid, just
+		// re-stamp the commit so staleness checks stop firing.
+		cm := &CodeMap{
+			Namespace:   namespace,
+			RootDir:     stored.RootDir,
+			Zoom1:       stored.Zoom1,
+			Zoom2:       oldModules,
+			GitCommit:   currentCommit,
+			GeneratedAt: time.Now(),
+		}
+		if err := e.store.UpsertCodeMap(namespace, e.cfg.RootDir, cm.Zoom1, cm.MarshalZoom2(), currentCommit); err != nil {
+			return nil, nil
+		}
+		return cm, BuildCodeIndex(cm)
+	}
+
+	dirs := make([]string, 0, len(dirSet))
+	for d := range dirSet {
+		dirs = append(dirs, d)
+	}
+	sort.Strings(dirs)
+
+	if e.OnScanProgress != nil {
+		e.OnScanProgress(ScanProgress{Phase: "incremental", DirsFound: len(dirs), FileCount: len(changed)})
+	}
+
+	newMods, newEdges, err := ScanDirs(e.cfg.RootDir, dirs)
+	if err != nil {
+		return nil, nil
+	}
+
+	// Merge: drop modules owned by rescanned dirs, add their replacements.
+	merged := make([]ModuleMap, 0, len(oldModules)+len(newMods))
+	for _, m := range oldModules {
+		if !dirSet[moduleOwnerDir(m.Path)] {
+			merged = append(merged, m)
+		}
+	}
+	merged = append(merged, newMods...)
+	sort.Slice(merged, func(i, j int) bool {
+		return merged[i].Path < merged[j].Path
+	})
+
+	cm := &CodeMap{
+		Namespace:   namespace,
+		RootDir:     e.cfg.RootDir,
+		Zoom1:       synthesizeZoom1(merged, e.cfg.RootDir),
+		Zoom2:       merged,
+		GitCommit:   currentCommit,
+		GeneratedAt: time.Now(),
+	}
+	if err := e.store.UpsertCodeMap(namespace, e.cfg.RootDir, cm.Zoom1, cm.MarshalZoom2(), currentCommit); err != nil {
+		return nil, nil
+	}
+
+	for i := range newEdges {
+		newEdges[i].Namespace = namespace
+	}
+	e.store.ReplaceStructuralEdgesForDirs(namespace, dirs, newEdges)
 
 	return cm, BuildCodeIndex(cm)
 }
@@ -2838,7 +2874,7 @@ func truncateGC(s string, max int) string {
 
 // HealthCheck is the result of a database health inspection.
 type HealthCheck struct {
-	Status  string        // "healthy", "warnings", "issues"
+	Status  string // "healthy", "warnings", "issues"
 	Checks  []HealthEntry
 	Summary HealthSummary
 }
