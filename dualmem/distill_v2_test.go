@@ -23,12 +23,8 @@ func (m *mockDistillGenerator) GenerateText(_ context.Context, prompt string, _ 
 	return m.response, m.err
 }
 
-// boolPtr returns a pointer to b, for Config.LegacyDistill.
-func boolPtr(b bool) *bool { return &b }
-
 // newDistillTestEngine builds an Engine with the mock embedder and an injectable
-// v2 generator (cfg.SynthesisGenerator). Legacy distill is DISABLED so the v2
-// fact-candidate path is exercised in isolation.
+// v2 generator (cfg.SynthesisGenerator).
 func newDistillTestEngine(t *testing.T, gen TextGenerator) *Engine {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "distill.db")
@@ -36,7 +32,6 @@ func newDistillTestEngine(t *testing.T, gen TextGenerator) *Engine {
 		SQLitePath:         dbPath,
 		EmbeddingProvider:  &mockEmbedder{dim: 64},
 		SynthesisGenerator: gen,
-		LegacyDistill:      boolPtr(false),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -366,10 +361,10 @@ func TestDistillPreferenceIsUserGlobal(t *testing.T) {
 	}
 }
 
-func TestDistillLegacySwitchOff(t *testing.T) {
-	// With LegacyDistill disabled and NO Summarizer set, the legacy path must
-	// never be invoked (it would panic/error on the missing Summarizer). The v2
-	// path runs alone via SynthesisGenerator.
+func TestDistillRunsWithoutSummarizer(t *testing.T) {
+	// Distill must not require a Summarizer: the v2 fact-candidate path runs
+	// alone via SynthesisGenerator (the legacy v1 path that needed a Summarizer
+	// was deleted in task 9).
 	resp := `{"candidates":[{"kind":"decision","text":"a fact"}]}`
 	engine := newDistillTestEngine(t, &mockDistillGenerator{response: resp})
 	ctx := context.Background()
@@ -377,10 +372,6 @@ func TestDistillLegacySwitchOff(t *testing.T) {
 	res, err := engine.Distill(ctx, DistillOpts{Text: "User: x", Namespace: "repo"}, "u")
 	if err != nil {
 		t.Fatalf("Distill: %v", err)
-	}
-	// Legacy fields stay zeroed.
-	if len(res.Facts) != 0 || res.Triples != nil || res.Written != 0 {
-		t.Errorf("legacy path should not run when disabled: %+v", res)
 	}
 	if res.FactsWritten != 1 {
 		t.Errorf("v2 path should still write: got FactsWritten=%d", res.FactsWritten)

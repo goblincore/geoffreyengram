@@ -24,31 +24,15 @@ type DistillOpts struct {
 	MaxFacts  int    // Max facts to extract (default 20)
 }
 
-// legacyDistillEnabled reports whether the v1 detail-memory/entity-graph
-// output of Distill should also run. Default is true (preserve existing
-// behavior); task 9 of the v2 plan flips this to false in one line, and later
-// the field plus all legacy-guarded code are deleted.
-func (c *Config) legacyDistillEnabled() bool {
-	if c.LegacyDistill == nil {
-		return true
-	}
-	return *c.LegacyDistill
-}
-
 // DistillResult describes what distillation produced.
 //
-// In v2 the primary output is fact candidates (Candidates / FactsWritten /
-// FactsSuperseded / FactsIdentical / FactsMalformed). The legacy fields (Facts,
-// Triples, Written, Skipped) describe the v1 detail-memory path, which only
-// runs while cfg.LegacyDistill is enabled (default on; task 9 flips it off).
+// The primary output is fact candidates (Candidates / FactsWritten /
+// FactsSuperseded / FactsIdentical / FactsMalformed). The v1 detail-memory
+// path was removed in the v2 kill list (task 9).
 type DistillResult struct {
-	SessionID string          `json:"session_id"`
-	Facts     []DistilledFact `json:"facts"`             // legacy v1 detail-memory candidates
-	Triples   []EntityTriple  `json:"triples,omitempty"` // legacy v1 entity graph
-	Summary   string          `json:"summary"`
-	Skipped   int             `json:"skipped"` // legacy: near-duplicate detail memories skipped
-	Written   int             `json:"written"` // legacy: detail memories actually written
-	DryRun    bool            `json:"dry_run"`
+	SessionID string `json:"session_id"`
+	Summary   string `json:"summary"`
+	DryRun    bool   `json:"dry_run"`
 
 	// v2 fact candidates (the primary output).
 	Candidates      []FactCandidate `json:"candidates,omitempty"`
@@ -56,22 +40,6 @@ type DistillResult struct {
 	FactsSuperseded int             `json:"facts_superseded"` // candidates that superseded a near-dup
 	FactsIdentical  int             `json:"facts_identical"`  // candidates that were exact-text no-ops
 	FactsMalformed  int             `json:"facts_malformed"`  // candidates skipped (bad kind / empty / unparseable)
-}
-
-// DistilledFact is an extracted memory from a session transcript.
-type DistilledFact struct {
-	Text     string   `json:"text"`
-	Type     string   `json:"type"` // "decision", "warning", "continuity", "map", "general"
-	Salience float64  `json:"salience"`
-	Files    []string `json:"files,omitempty"`
-	Entities []Entity `json:"entities,omitempty"`
-}
-
-// distillExtractionResponse is the expected JSON response from the LLM.
-type distillExtractionResponse struct {
-	Facts          []DistilledFact `json:"facts"`
-	EntityTriples  []EntityTriple  `json:"entity_triples"`
-	SessionSummary string          `json:"session_summary"`
 }
 
 // FactCandidate is a kind-classified durable fact proposed by the v2 distiller
@@ -147,13 +115,12 @@ func (e *Engine) Distill(ctx context.Context, opts DistillOpts, userID string) (
 	// layers"; it is "propose durable facts from the transcript". Candidates are
 	// kind-classified, deduped against live facts before insert (identical text
 	// is a no-op; an embedding near-duplicate supersedes the old fact), and
-	// stamped source=inferred with the current git commit + session id. This
-	// path always runs (even after task 9 flips the legacy path off).
+	// stamped source=inferred with the current git commit + session id.
 	// See docs/superpowers/plans/2026-07-04-dualmem-v2.md (Phase 4).
 	candidates, candErr := e.extractFactCandidates(ctx, transcript, opts.MaxFacts)
 	if candErr != nil {
 		// Resilience: a failed/empty extraction never fails the whole distill;
-		// we just record zero candidates and fall through to the legacy path.
+		// we just record zero candidates.
 		result.Summary = fmt.Sprintf("v2 extraction failed: %v", candErr)
 	} else {
 		result.Candidates = candidates
@@ -176,34 +143,6 @@ func (e *Engine) Distill(ctx context.Context, opts DistillOpts, userID string) (
 		}
 	}
 
-	// --- legacy v1 path: detail memories + entity graph + synthesis ---
-	//
-	// Behind a single switch so task 9 can cut it in one line (flip the default
-	// in Config.legacyDistillEnabled, then delete this block + the legacy
-	// extraction functions). When enabled (default), this runs in ADDITION to
-	// the v2 path so existing behavior is preserved during the transition.
-	if e.cfg.legacyDistillEnabled() {
-		extraction, err := e.extractFromTranscript(ctx, transcript, opts.MaxFacts)
-		if err != nil {
-			// Don't fail the whole distill on a legacy-path error; surface it.
-			if result.Summary == "" {
-				result.Summary = fmt.Sprintf("legacy extract failed: %v", err)
-			}
-		} else {
-			result.Facts = extraction.Facts
-			result.Triples = extraction.EntityTriples
-			if extraction.SessionSummary != "" {
-				result.Summary = extraction.SessionSummary
-			}
-
-			if opts.DryRun {
-				result.Written = len(extraction.Facts)
-			} else {
-				result.Written, result.Skipped = e.distillWriteLegacy(ctx, extraction, namespace, sessionID, userID)
-			}
-		}
-	}
-
 	// Step 5: Mark as distilled
 	if sessionID != "" && !opts.DryRun {
 		_ = e.store.SetConfigValue("last_distill_session_id", sessionID)
@@ -223,84 +162,6 @@ func (e *Engine) Distill(ctx context.Context, opts DistillOpts, userID string) (
 	}
 
 	return result, nil
-}
-
-// distillWriteLegacy runs the v1 detail-memory + entity-graph + session-summary
-// + synthesis writes from a legacy extraction. It is the entirety of the legacy
-// output path, isolated here so task 9 can delete it in one cut. Best-effort:
-// individual write errors are skipped, never returned. Returns (written, skipped).
-func (e *Engine) distillWriteLegacy(ctx context.Context, extraction *distillExtractionResponse, namespace, sessionID, userID string) (written, skipped int) {
-	for _, fact := range extraction.Facts {
-		salience := fact.Salience
-		if salience < 0.6 {
-			salience = 0.6
-		}
-		if e.isNearDuplicate(ctx, fact.Text, userID, 0.90) {
-			skipped++
-			continue
-		}
-		err := e.AddWithOptions(ctx, MemoryInput{
-			UserMessage: fact.Text,
-			SectorHint:  fact.Type,
-			Salience:    salience,
-			Entities:    fact.Entities,
-			Type:        fact.Type,
-			Files:       fact.Files,
-			SessionID:   sessionID,
-		}, userID)
-		if err != nil {
-			continue
-		}
-		written++
-	}
-
-	// Entity triples to graph
-	if namespace != "" {
-		for _, triple := range extraction.EntityTriples {
-			sourceID, err := e.store.UpsertEntity(&EntityNode{
-				Name:      triple.Source.Text,
-				Type:      triple.Source.Type,
-				Namespace: namespace,
-			})
-			if err != nil {
-				continue
-			}
-			targetID, err := e.store.UpsertEntity(&EntityNode{
-				Name:      triple.Target.Text,
-				Type:      triple.Target.Type,
-				Namespace: namespace,
-			})
-			if err != nil {
-				continue
-			}
-			_ = e.store.UpsertEdge(&EntityEdge{
-				SourceID:  sourceID,
-				TargetID:  targetID,
-				Relation:  triple.Relation,
-				Namespace: namespace,
-			})
-		}
-	}
-
-	// Persist session summary as a continuity memory
-	if extraction.SessionSummary != "" {
-		summaryFiles := collectAllFiles(extraction.Facts)
-		if err := e.AddWithOptions(ctx, MemoryInput{
-			UserMessage: extraction.SessionSummary,
-			Type:        "continuity",
-			Salience:    0.75,
-			Files:       summaryFiles,
-			SessionID:   sessionID,
-		}, userID); err == nil {
-			written++
-		}
-	}
-
-	// Auto-synthesize if enough new memories
-	if written >= 3 {
-		_, _ = e.Synthesize(ctx, namespace, &SynthesizeOpts{})
-	}
-	return written, skipped
 }
 
 // loadTranscript reads a session transcript from the configured source.
@@ -712,24 +573,6 @@ func (e *Engine) distillInsertFactCandidate(ctx context.Context, c FactCandidate
 	return "inserted", nil
 }
 
-// extractFromTranscript uses the LLM to extract structured facts from a transcript.
-func (e *Engine) extractFromTranscript(ctx context.Context, transcript string, maxFacts int) (*distillExtractionResponse, error) {
-	// Need a TextGenerator (GeminiSummarizer implements this)
-	gen, ok := e.cfg.Summarizer.(TextGenerator)
-	if !ok || gen == nil {
-		return nil, fmt.Errorf("summarizer does not implement TextGenerator (needed for distillation)")
-	}
-
-	prompt := formatDistillPrompt(transcript, maxFacts)
-
-	response, err := gen.GenerateText(ctx, prompt, 2000)
-	if err != nil {
-		return nil, fmt.Errorf("LLM extraction: %w", err)
-	}
-
-	return parseDistillResponse(response)
-}
-
 // formatDistillPrompt builds the extraction prompt.
 func formatDistillPrompt(transcript string, maxFacts int) string {
 	return fmt.Sprintf(`You are a memory extraction system. Analyze this coding session transcript and extract the most important facts, decisions, and context that should be remembered for future sessions.
@@ -777,60 +620,6 @@ Rules:
 
 TRANSCRIPT:
 %s`, maxFacts, transcript)
-}
-
-// parseDistillResponse parses the LLM's JSON response.
-func parseDistillResponse(response string) (*distillExtractionResponse, error) {
-	// Strip markdown code fences if present
-	response = strings.TrimSpace(response)
-	if strings.HasPrefix(response, "```json") {
-		response = strings.TrimPrefix(response, "```json")
-		response = strings.TrimSuffix(response, "```")
-		response = strings.TrimSpace(response)
-	} else if strings.HasPrefix(response, "```") {
-		response = strings.TrimPrefix(response, "```")
-		response = strings.TrimSuffix(response, "```")
-		response = strings.TrimSpace(response)
-	}
-
-	var result distillExtractionResponse
-	if err := json.Unmarshal([]byte(response), &result); err != nil {
-		return nil, fmt.Errorf("parse extraction response: %w (response: %.200s)", err, response)
-	}
-
-	// Validate and clamp salience values
-	for i := range result.Facts {
-		if result.Facts[i].Salience < 0.1 {
-			result.Facts[i].Salience = 0.6
-		}
-		if result.Facts[i].Salience > 1.0 {
-			result.Facts[i].Salience = 1.0
-		}
-		// Validate type
-		switch result.Facts[i].Type {
-		case "decision", "warning", "continuity", "map", "trace", "general":
-			// valid
-		default:
-			result.Facts[i].Type = "general"
-		}
-	}
-
-	return &result, nil
-}
-
-// collectAllFiles returns the union of all file paths from distilled facts.
-func collectAllFiles(facts []DistilledFact) []string {
-	seen := make(map[string]bool)
-	var result []string
-	for _, f := range facts {
-		for _, path := range f.Files {
-			if !seen[path] {
-				seen[path] = true
-				result = append(result, path)
-			}
-		}
-	}
-	return result
 }
 
 // enrichWithSessionLog appends a file-touch summary from the auto-capture hook
@@ -1006,7 +795,6 @@ func collectTouchedFiles(namespace, rootDir, transcript string) []string {
 	}
 	return out
 }
-
 
 // readSessionLogFiles returns the deduplicated `files` values from the most
 // recent auto-capture hook log for this namespace. Returns nil when the hook

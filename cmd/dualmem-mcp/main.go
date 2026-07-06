@@ -690,22 +690,22 @@ func distillSessionHandler(engine *dualmem.Engine, ns, sessionID string) func(co
 		if input.DryRun {
 			sb.WriteString("[DRY RUN] ")
 		}
-		sb.WriteString(fmt.Sprintf("Extracted %d facts, wrote %d, skipped %d duplicates.\n",
-			len(result.Facts), result.Written, result.Skipped))
+		sb.WriteString(fmt.Sprintf("Proposed %d fact candidate(s): %d new, %d superseded, %d identical, %d malformed.\n",
+			len(result.Candidates), result.FactsWritten, result.FactsSuperseded, result.FactsIdentical, result.FactsMalformed))
 
 		if result.Summary != "" {
 			sb.WriteString(fmt.Sprintf("Session summary: %s\n", result.Summary))
 		}
 
-		for _, f := range result.Facts {
+		for _, c := range result.Candidates {
 			icon := ""
-			switch f.Type {
-			case "warning":
+			switch c.Kind {
+			case "gotcha", "deadend":
 				icon = "⚠ "
 			case "decision":
 				icon = "★ "
 			}
-			sb.WriteString(fmt.Sprintf("\n  %s[%s] %s", icon, f.Type, f.Text))
+			sb.WriteString(fmt.Sprintf("\n  %s[%s] %s", icon, c.Kind, c.Text))
 		}
 
 		return textResult(sb.String()), nil, nil

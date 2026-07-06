@@ -2268,7 +2268,7 @@ func cmdDistill(cfg CLIConfig) {
 		os.Exit(1)
 	}
 
-	if result.Written > 0 {
+	if result.FactsWritten > 0 {
 		regenerateFileIndex(cfg, ns)
 	}
 
@@ -2282,16 +2282,14 @@ func cmdDistill(cfg CLIConfig) {
 		}
 		fmt.Printf("Session: %s\n", result.SessionID)
 		fmt.Printf("Summary: %s\n", result.Summary)
-		fmt.Printf("Facts extracted: %d, written: %d, skipped (duplicates): %d\n", len(result.Facts), result.Written, result.Skipped)
-		if len(result.Triples) > 0 {
-			fmt.Printf("Entity triples: %d\n", len(result.Triples))
-		}
-		if result.DryRun && len(result.Facts) > 0 {
-			fmt.Println("\nExtracted facts:")
-			for i, f := range result.Facts {
-				fmt.Printf("  %d. [%s] %s (salience: %.1f)\n", i+1, f.Type, f.Text, f.Salience)
-				if len(f.Files) > 0 {
-					fmt.Printf("     Files: %s\n", strings.Join(f.Files, ", "))
+		fmt.Printf("Fact candidates: %d, written: %d, superseded: %d, identical: %d, malformed: %d\n",
+			len(result.Candidates), result.FactsWritten, result.FactsSuperseded, result.FactsIdentical, result.FactsMalformed)
+		if result.DryRun && len(result.Candidates) > 0 {
+			fmt.Println("\nProposed candidates:")
+			for i, c := range result.Candidates {
+				fmt.Printf("  %d. [%s] %s\n", i+1, c.Kind, c.Text)
+				if len(c.Files) > 0 {
+					fmt.Printf("     Files: %s\n", strings.Join(c.Files, ", "))
 				}
 			}
 		}
