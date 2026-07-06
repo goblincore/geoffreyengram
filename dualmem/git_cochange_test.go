@@ -21,8 +21,10 @@ func setupTestGitRepo(t *testing.T) string {
 	runGitForCochange(t, dir, "config", "user.email", "test@test.com")
 	runGitForCochange(t, dir, "config", "user.name", "Test")
 
-	// Set a fixed date for reproducible results
-	commitDate := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
+	// Commit dates are relative to now so the fixture always falls inside
+	// ParseGitLog's --since window (fixed dates rotted once the wall clock
+	// moved 12+ months past them).
+	commitDate := time.Now().UTC().AddDate(0, -3, 0)
 	dateEnv := "GIT_AUTHOR_DATE=" + commitDate.Format(time.RFC3339)
 	committerEnv := "GIT_COMMITTER_DATE=" + commitDate.Format(time.RFC3339)
 
@@ -32,8 +34,8 @@ func setupTestGitRepo(t *testing.T) string {
 	runGitWithEnvForCochange(t, dir, []string{dateEnv, committerEnv}, "add", "auth.go", "jwt.go")
 	runGitWithEnvForCochange(t, dir, []string{dateEnv, committerEnv}, "commit", "-m", "add auth and jwt")
 
-	// Commit 2 (2 months later): auth.go + jwt.go + middleware.go
-	commitDate2 := time.Date(2025, 8, 1, 12, 0, 0, 0, time.UTC)
+	// Commit 2 (a month later): auth.go + jwt.go + middleware.go
+	commitDate2 := time.Now().UTC().AddDate(0, -2, 0)
 	dateEnv2 := "GIT_AUTHOR_DATE=" + commitDate2.Format(time.RFC3339)
 	committerEnv2 := "GIT_COMMITTER_DATE=" + commitDate2.Format(time.RFC3339)
 
@@ -43,8 +45,8 @@ func setupTestGitRepo(t *testing.T) string {
 	runGitWithEnvForCochange(t, dir, []string{dateEnv2, committerEnv2}, "add", "auth.go", "jwt.go", "middleware.go")
 	runGitWithEnvForCochange(t, dir, []string{dateEnv2, committerEnv2}, "commit", "-m", "update auth and jwt, add middleware")
 
-	// Commit 3 (1 month later): middleware.go + handler.go
-	commitDate3 := time.Date(2025, 9, 1, 12, 0, 0, 0, time.UTC)
+	// Commit 3 (a month after that): middleware.go + handler.go
+	commitDate3 := time.Now().UTC().AddDate(0, -1, 0)
 	dateEnv3 := "GIT_AUTHOR_DATE=" + commitDate3.Format(time.RFC3339)
 	committerEnv3 := "GIT_COMMITTER_DATE=" + commitDate3.Format(time.RFC3339)
 

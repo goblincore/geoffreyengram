@@ -1651,21 +1651,11 @@ func TestFileContext(t *testing.T) {
 	}
 }
 
-func TestFileAnnotationsIncludesWorkflowHints(t *testing.T) {
+func TestFileAnnotations(t *testing.T) {
 	engine := newTestEngine(t)
 	ctx := context.Background()
 
-	// Add a workflow memory referencing auth.go
-	if err := engine.AddWithOptions(ctx, MemoryInput{
-		UserMessage: "[workflow:guardian-approval] Guardian approval gate for managed children. Involves LC-1731 ticket.",
-		Type:        "autopilot",
-		Salience:    0.9,
-		Files:       []string{"auth.go", "middleware.go"},
-	}, "user1"); err != nil {
-		t.Fatalf("AddWithOptions workflow: %v", err)
-	}
-
-	// Add a regular warning for the same file
+	// Add a warning attached to auth.go
 	if err := engine.AddWithOptions(ctx, MemoryInput{
 		UserMessage: "Don't modify auth.go hot path",
 		Type:        "warning",
@@ -1675,30 +1665,19 @@ func TestFileAnnotationsIncludesWorkflowHints(t *testing.T) {
 		t.Fatalf("AddWithOptions warning: %v", err)
 	}
 
-	// FileAnnotations should return both the warning and the workflow hint
 	anns := engine.FileAnnotations(ctx, "user1", []string{"auth.go"}, 10)
 
 	hasWarning := false
-	hasWorkflow := false
 	for _, ann := range anns {
 		if ann.Type == "warning" {
 			hasWarning = true
-		}
-		if ann.Type == "workflow" {
-			hasWorkflow = true
-			if ann.Source != "workflow_hint" {
-				t.Errorf("expected source 'workflow_hint', got %q", ann.Source)
-			}
-			if !strings.Contains(ann.Text, "guardian-approval") {
-				t.Errorf("expected workflow hint text to contain 'guardian-approval', got %q", ann.Text)
+			if !strings.Contains(ann.Text, "hot path") {
+				t.Errorf("expected warning text to mention 'hot path', got %q", ann.Text)
 			}
 		}
 	}
 	if !hasWarning {
 		t.Error("expected warning annotation for auth.go")
-	}
-	if !hasWorkflow {
-		t.Error("expected workflow hint annotation for auth.go")
 	}
 }
 
@@ -1871,69 +1850,3 @@ func TestGarbageCollect_SupersedesAllTypes(t *testing.T) {
 	}
 }
 
-func TestAssembleContextWorkflowHints(t *testing.T) {
-	engine := newTestEngine(t)
-	ctx := context.Background()
-
-	if err := engine.AddWithOptions(ctx, MemoryInput{
-		UserMessage: "[workflow:issue-credentials] Credential issuance flow for LC-1635 and LC-1729. Handles boost creation.",
-		Type:        "autopilot",
-		Salience:    0.9,
-		Files:       []string{"routes/inbox.ts"},
-	}, "user1"); err != nil {
-		t.Fatalf("AddWithOptions workflow: %v", err)
-	}
-
-	if err := engine.SaveCheckpoint(ctx, "user1", &Checkpoint{
-		Task:        "LC-1635 credential fixes",
-		Status:      "in_progress",
-		FilesActive: []string{"routes/inbox.ts"},
-	}); err != nil {
-		t.Fatalf("SaveCheckpoint: %v", err)
-	}
-
-	result, err := engine.AssembleContext(ctx, "user1", "fixing the issuance bug", 5000)
-	if err != nil {
-		t.Fatalf("AssembleContext: %v", err)
-	}
-
-	if !strings.Contains(result.Text, "[Workflow Hints]") {
-		t.Error("expected [Workflow Hints] section in context output")
-		t.Logf("Got: %s", result.Text)
-	}
-	if !strings.Contains(result.Text, "issue-credentials") {
-		t.Error("expected 'issue-credentials' workflow ID in hints")
-	}
-}
-
-func TestAssembleContextNoWorkflowHintsWithoutTickets(t *testing.T) {
-	engine := newTestEngine(t)
-	ctx := context.Background()
-
-	if err := engine.AddWithOptions(ctx, MemoryInput{
-		UserMessage: "[workflow:issue-credentials] Credential issuance flow for LC-1635.",
-		Type:        "autopilot",
-		Salience:    0.9,
-		Files:       []string{"routes/inbox.ts"},
-	}, "user1"); err != nil {
-		t.Fatalf("AddWithOptions workflow: %v", err)
-	}
-
-	if err := engine.SaveCheckpoint(ctx, "user1", &Checkpoint{
-		Task:        "general refactoring",
-		Status:      "in_progress",
-		FilesActive: []string{"routes/inbox.ts"},
-	}); err != nil {
-		t.Fatalf("SaveCheckpoint: %v", err)
-	}
-
-	result, err := engine.AssembleContext(ctx, "user1", "general exploration", 5000)
-	if err != nil {
-		t.Fatalf("AssembleContext: %v", err)
-	}
-
-	if strings.Contains(result.Text, "[Workflow Hints]") {
-		t.Error("expected no [Workflow Hints] section without ticket prefixes")
-		t.Logf("Got: %s", result.Text)
-	}
-}
