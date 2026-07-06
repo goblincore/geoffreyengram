@@ -338,16 +338,12 @@ Commands:
   distill     Extract memories from a session transcript
   cochange    Query the file co-change graph (which files change together)
   entities    Query the entity graph (stats, search, show, top)
-  facts       Export/import durable facts as editable markdown (audit + correction mirror)
+  facts       Durable fact store — export/import as editable markdown, stats (served/hit scorecard, dead + stale candidates)
   docs        List/show/delete/export knowledge docs
   file-context  Get memories associated with a specific file (warnings, decisions, maps)
   file-index    Generate file index for Read hook fast-path filtering
   recall        Recall durable facts by semantic similarity (v2 pull tool)
   precedent     Recall prior decisions + dead-ends for an approach (v2 pull tool)
-  facts         Inspect durable facts (stats: served/hit scorecard, dead + stale candidates)
-  rate        Submit context quality ratings (item-level or session-level)
-  train       Train the re-ranker model from accumulated ratings
-  stats       Show context quality statistics and re-ranker status
   gc          Garbage collect stale/expired memories
   health      Inspect database and report health findings
   explore     Read ranked code files and produce grounded briefing

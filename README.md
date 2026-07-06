@@ -2,7 +2,7 @@
 
 Cross-session memory for Claude Code. Pure Go, single binary, SQLite storage.
 
-Remembers decisions, warnings, and context across sessions so your agent doesn't re-learn your codebase every time.
+Remembers decisions, dead-ends, and gotchas across sessions — with git-commit provenance — so your agent doesn't re-learn your codebase every time.
 
 ## Quick Start
 
@@ -17,6 +17,13 @@ dualmem context "fix the auth bug" --budget 3000
 
 For Claude Code integration, add the hook config from [docs/example-claude-md.md](docs/example-claude-md.md).
 
+Upgrading from v1:
+
+```bash
+dualmem archive-v1   # safety-net JSON dump of the entire v1 store
+dualmem migrate-v2   # one-time curation of v1 detail memories + knowledge docs into facts
+```
+
 ## How It Works
 
 Memories are split into two paths. An importance scorer (no LLM calls) routes each one at write time:
@@ -24,11 +31,13 @@ Memories are split into two paths. An importance scorer (no LLM calls) routes ea
 - **Detail path** — decisions, warnings, and anything high-salience stays at full fidelity (768d embeddings, full text, top 100 per project)
 - **Sketch path** — everything else compresses over time: raw memories → episode summaries → narrative arcs → user profile
 
+On top of that sits the **durable facts layer (v2)** — the long-term memory. Session transcripts are distilled into fact candidates and run through an extract → classify → dedupe → supersede pipeline, producing a curated store of short, self-contained facts: decisions, dead-ends, gotchas, preferences, references. Every fact carries provenance — git commit, date, and whether it was *verified* (earned by doing) or *inferred* (from reading) — and corrections happen via supersede chains, never silent edits. `dualmem recall` pulls facts by semantic similarity, `dualmem precedent` surfaces prior decisions and dead-ends before you repeat them, and the whole store round-trips to editable markdown (`dualmem facts`) so you can audit and correct what the system believes.
+
 Context assembly takes a query and a token budget, then packs relevant memories in priority order. It's query-aware — a debugging session gets warnings first, a "what's in progress" session gets continuity items, a cold start gets a structural codemap. Output is grouped by file, not flat-listed.
 
 Memories are indexed by file path. Open `rate_limiter.go` and you get the warnings about that file, even if your task is something else entirely. The `explore` command reads ranked source files and synthesizes a grounded briefing. `consult` does the same but caches the result as a knowledge document for future sessions — so the second time someone asks "how does auth work?" it's instant.
 
-The codebase itself is indexed. Co-change graphs learn which files change together. HDC vectors (2048d, no API calls) enable natural-language code search across your repo. Tree-sitter parses structure for call/import edges. These all feed into context ranking alongside the memories.
+The codebase itself is indexed. Co-change graphs learn which files change together from git history. HDC vectors (2048d, no API calls) enable natural-language code search across your repo. Tree-sitter parses structure for call/import edges. These all feed into context ranking alongside the memories. The codemap is stale-while-revalidate — served instantly from cache, refreshed incrementally from git diffs in the background — so context assembly never blocks on a rescan.
 
 Storage is one SQLite file. No external services.
 
@@ -36,20 +45,24 @@ Storage is one SQLite file. No external services.
 
 | Feature | Description |
 |---------|-------------|
+| **Durable facts (v2)** | Curated long-term store (decision, dead-end, gotcha, preference, reference) with git-commit provenance and supersede chains — round-trips to editable markdown |
+| **Recall & precedent (v2)** | `dualmem recall` pulls facts by semantic similarity; `dualmem precedent` surfaces prior decisions + dead-ends for an approach |
+| **Facts scorecard** | `dualmem facts stats` — served/hit rates, dead and stale fact candidates |
 | **Memory types** | Typed memories (decision, warning, continuity, trace) with intent-aware ranking |
 | **Checkpoints** | Structured session handoffs — task, status, files, what's done, what remains |
 | **Code search** | HDC + BM25 hybrid, finds modules by natural language, no API calls |
 | **Knowledge synthesis** | Clusters related memories into concept docs, served instantly on repeat queries |
 | **Explore** | Reads ranked source files, produces grounded code briefings |
-| **Co-change graph** | Learns which files change together from memory file associations |
+| **Co-change graph** | Learns which files change together from git history |
+| **Codemap freshness** | Stale-while-revalidate with incremental git-diff refresh — context assembly never blocks on a rescan |
 | **Entity graph** | Typed edges between concepts for structure-aware retrieval boost |
-| **Session distillation** | Extracts memories from session transcripts automatically |
+| **Session distillation** | Distills session transcripts into durable fact candidates — extract, classify, dedupe, supersede |
 | **Staleness detection** | Flags memories when referenced files or symbols have changed |
 | **File-scoped recall** | PreToolUse hook surfaces cached observations before file reads |
 | **File-read gate** | Structured decision tree primes agent with file context (~400 tok vs 5-50k full read) |
 | **Symbol extraction** | `dualmem unfold <file> <symbol>` extracts a single function/type with line numbers |
 | **Planning intent** | "roadmap" and "sprint" queries auto-boost continuity memories 2.5x |
-| **Autopilot** | Autonomous codebase exploration — curiosity scorer ranks modules by memory gaps, git heat, complexity, and co-change strength; LLM explores top targets and saves investigation memories |
+| **Autopilot** | Autonomous codebase exploration — ranks modules by memory gaps, git heat, complexity, and co-change strength; LLM explores top targets and saves investigation memories |
 | **Anticipatory worker** | Runs during sessions, watches file activity, pre-explores co-change and structural neighbors before the user needs them |
 | **Benchmark CLI** | `dualmem benchmark` compares cold-start (codemap only) vs warm (with memories) context quality using auto-generated queries from git history |
 | **Anticipation stats** | `dualmem anticipation-stats` measures hit rate of pre-explored files — were they actually needed? |
