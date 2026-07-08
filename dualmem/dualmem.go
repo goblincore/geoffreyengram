@@ -861,7 +861,7 @@ func (e *Engine) Assemble(ctx context.Context, userID, query string, tokenBudget
 	if opts.Legacy {
 		return e.AssembleContextWith(ctx, userID, query, tokenBudget, nil)
 	}
-	return e.assemblePinnedV2(ctx, userID, query, opts)
+	return e.assemblePinnedV2(ctx, userID, query, tokenBudget, opts)
 }
 
 func (e *Engine) AssembleContext(ctx context.Context, userID string, query string, tokenBudget int) (*ContextBlock, error) {
