@@ -353,3 +353,58 @@ func TestPinnedBlock_PreferencesUserGlobal(t *testing.T) {
 	}
 }
 
+
+// TestPinnedBlock_QueryRelevantSection verifies the query-aware retrieval added
+// to the v2 pinned block: a SPECIFIC query surfaces memories about that query
+// (from detail_memories), not just the globally-newest handoff. Regression
+// guard for the LC-1831 surfacing bug where `context "<query>"` ignored the
+// query and returned only the newest (unrelated) checkpoint.
+func TestPinnedBlock_QueryRelevantSection(t *testing.T) {
+	dir := newV2Repo(t)
+	engine := newV2Engine(t, dir)
+	ctx := context.Background()
+	ns := "ns-qrel"
+
+	// A query-matching warning (older) — the memory we expect surfaced.
+	const marker = "LC-1831 i18n plural gotcha"
+	if err := engine.AddWithOptions(ctx, MemoryInput{
+		Type:        "warning",
+		UserMessage: marker + " inlang compiles one other as separate message functions",
+		SectorHint:  "semantic",
+		Salience:    0.9,
+		Files:       []string{"apps/app/src/i18n/index.ts"},
+	}, ns); err != nil {
+		t.Fatalf("add warning: %v", err)
+	}
+
+	// A newer, unrelated checkpoint — becomes the global handoff. Proves the
+	// matching memory is surfaced on relevance, not merely because it is newest.
+	if err := engine.SaveCheckpoint(ctx, ns, &Checkpoint{
+		Task:   "unrelated deploy pipeline rollout",
+		Status: "done",
+	}); err != nil {
+		t.Fatalf("save checkpoint: %v", err)
+	}
+
+	// Specific query → the matching warning must appear.
+	block, err := engine.Assemble(ctx, ns, "LC-1831 i18n translation plural gotcha", 3000, AssembleOptions{})
+	if err != nil {
+		t.Fatalf("Assemble specific: %v", err)
+	}
+	if !strings.Contains(block.Text, marker) {
+		t.Errorf("specific query did not surface the query-relevant memory.\nblock:\n%s", block.Text)
+	}
+
+	// Session-start sentinel → query-blind fast path; the warning is NOT pulled
+	// as a relevant memory (only handoff / prefs / codemap).
+	sentinel, err := engine.Assemble(ctx, ns, "session context", 3000, AssembleOptions{})
+	if err != nil {
+		t.Fatalf("Assemble sentinel: %v", err)
+	}
+	if strings.Contains(sentinel.Text, marker) {
+		t.Errorf("session-start sentinel should NOT surface query-relevant memories.\nblock:\n%s", sentinel.Text)
+	}
+	if !strings.Contains(sentinel.Text, "unrelated deploy pipeline") {
+		t.Errorf("sentinel block missing the handoff checkpoint.\nblock:\n%s", sentinel.Text)
+	}
+}

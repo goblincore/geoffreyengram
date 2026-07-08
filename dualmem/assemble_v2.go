@@ -19,13 +19,21 @@ package dualmem
 //
 // Pinned block order (highest signal first):
 //  1. Latest handoff/checkpoint (what was in flight).
-//  2. User-global preference facts (namespace "", kind "preference").
-//  3. Top-k facts whose files intersect paths changed since the last session
+//  2. Query-relevant memories — ONLY when the caller passes a specific query
+//     (not a session-start sentinel). This is the query-aware retrieval that
+//     makes `context "<question>"` surface memories about that question, drawn
+//     from detail_memories (DualSearch) and repo facts. Session-start assembly
+//     skips it and stays embedding-free.
+//  3. User-global preference facts (namespace "", kind "preference").
+//  4. Top-k facts whose files intersect paths changed since the last session
 //     (git diff via ChangedFilesSince).
-//  4. One-line codemap status: "[Codebase Map — N commits behind, ...]" or a
+//  5. One-line codemap status: "[Codebase Map — N commits behind, ...]" or a
 //     freshness note. Reuses the v1 header phrasing so the SWR regression
 //     test (which asserts on "[Codebase Map" and "commits behind") stays
 //     meaningful.
+//
+// Item 2 is the only part that embeds the query (one retrieval embedding, the
+// same cost as `dualmem recall`); items 1/3/4/5 remain SQLite + git-diff only.
 //
 // Every emitted fact records its ID on ContextBlock.ServedFactIDs so task 7
 // instrumentation can log served facts and later credit file-touch hits.
@@ -41,10 +49,18 @@ import (
 )
 
 // assemblePinnedV2 builds the v2 pinned context block.
-func (e *Engine) assemblePinnedV2(ctx context.Context, userID, query string, opts AssembleOptions) (*ContextBlock, error) {
+func (e *Engine) assemblePinnedV2(ctx context.Context, userID, query string, tokenBudget int, opts AssembleOptions) (*ContextBlock, error) {
 	budget := opts.PinnedBudget
 	if budget <= 0 {
 		budget = DefaultPinnedBudget
+	}
+	// When the caller supplies a specific query (not a session-start sentinel),
+	// the block also carries query-relevant memories, and the caller's token
+	// budget governs how much of that we render. Session-start assembly keeps
+	// the tiny, query-blind, embedding-free fast path.
+	specific := isSpecificQuery(query)
+	if specific && tokenBudget > budget {
+		budget = tokenBudget
 	}
 	changedCap := opts.ChangedFactCap
 	if changedCap <= 0 {
@@ -57,6 +73,7 @@ func (e *Engine) assemblePinnedV2(ctx context.Context, userID, query string, opt
 		servedFactIDs []string
 		tokensUsed    int
 	)
+	emittedFacts := make(map[string]bool) // dedup facts across sections
 
 	emit := func(text string, src SourceRef, factID string) bool {
 		toks := estimateTokens(text)
@@ -72,34 +89,56 @@ func (e *Engine) assemblePinnedV2(ctx context.Context, userID, query string, opt
 		tokensUsed += toks
 		if factID != "" {
 			servedFactIDs = append(servedFactIDs, factID)
+			emittedFacts[factID] = true
 		}
 		return true
 	}
 
 	// Item 1 — latest handoff/checkpoint.
+	var handoffTask string
 	if text, src := e.latestHandoffV2(ctx, userID); text != "" {
 		emit(text, src, "")
+		handoffTask = src.ID
 	}
 
-	// Item 2 — user-global preference facts.
+	// Item 2 — query-relevant memories. Only for specific queries: this is the
+	// query-aware retrieval that makes `context "<question>"` surface memories
+	// about that question rather than just the newest handoff. Reads
+	// detail_memories (via DualSearch) and repo facts; empty/session-start
+	// queries skip it entirely (no embedding call).
+	if specific {
+		for _, it := range e.queryRelevantV2(ctx, userID, query, handoffTask, emittedFacts) {
+			if !emit(it.text, it.src, it.factID) {
+				break
+			}
+		}
+	}
+
+	// Item 3 — user-global preference facts.
 	prefs := e.loadPreferenceFactsV2()
 	for _, f := range prefs {
+		if emittedFacts[f.ID] {
+			continue
+		}
 		entry := formatFactEntry(f, false) // preferences are file-agnostic
 		if !emit(entry, SourceRef{Type: "fact", ID: f.ID}, f.ID) {
 			break
 		}
 	}
 
-	// Item 3 — facts touching files changed since the last session.
+	// Item 4 — facts touching files changed since the last session.
 	changedFacts := e.changedFileFactsV2(userID, changedCap)
 	for _, f := range changedFacts {
+		if emittedFacts[f.ID] {
+			continue
+		}
 		entry := formatFactEntry(f, true) // show the touched files
 		if !emit(entry, SourceRef{Type: "fact", ID: f.ID}, f.ID) {
 			break
 		}
 	}
 
-	// Item 4 — one-line codemap status. Always last; never scans.
+	// Item 5 — one-line codemap status. Always last; never scans.
 	if text, src := e.codemapStatusV2(userID); text != "" {
 		emit(text, src, "")
 	}
@@ -154,6 +193,95 @@ func (e *Engine) latestHandoffV2(ctx context.Context, userID string) (string, So
 		return "", SourceRef{}
 	}
 	return cp.FormatForContext(), SourceRef{Type: "checkpoint", ID: cp.Task}
+}
+
+// sessionStartSentinels are the generic queries the CLI/agents use to fetch a
+// session-start block. They carry no retrieval intent, so the query-aware
+// section is skipped for them (keeping the fast, embedding-free path).
+var sessionStartSentinels = map[string]bool{
+	"":                true,
+	"session":         true,
+	"session start":   true,
+	"session context": true,
+	"context":         true,
+}
+
+// isSpecificQuery reports whether query expresses a real information need
+// (as opposed to a session-start sentinel), which gates the query-aware
+// memories section in the pinned block.
+func isSpecificQuery(query string) bool {
+	return !sessionStartSentinels[strings.ToLower(strings.TrimSpace(query))]
+}
+
+// pinnedRelevanceFloor is the minimum blended similarity a detail memory must
+// clear to enter the query-relevant section. Prevents a near-empty store from
+// padding the block with unrelated memories when nothing actually matches.
+const pinnedRelevanceFloor = 0.30
+
+// pinnedItem is a renderable block entry: its text, provenance ref, and (for
+// facts) the fact ID used for served-fact instrumentation and dedup.
+type pinnedItem struct {
+	text   string
+	src    SourceRef
+	factID string
+}
+
+// queryRelevantV2 returns memories relevant to a specific query, ordered
+// facts-first (curated) then detail memories (raw), for the pinned block's
+// query-aware section. It embeds the query once via SearchFacts/DualSearch.
+//
+//   - skipCheckpointTask drops the checkpoint already shown as the handoff.
+//   - alreadyEmitted drops facts already surfaced (e.g. global preferences).
+//   - Detail memories below pinnedRelevanceFloor are dropped as noise.
+//
+// The returned items are budget-unaware; the caller emits them in order and
+// stops when the block budget is exhausted.
+func (e *Engine) queryRelevantV2(ctx context.Context, userID, query, skipCheckpointTask string, alreadyEmitted map[string]bool) []pinnedItem {
+	var items []pinnedItem
+
+	// Facts first — curated, self-contained, provenance-carrying.
+	if facts, err := e.SearchFacts(ctx, query, userID, "", 5); err == nil {
+		for _, f := range facts {
+			if alreadyEmitted[f.ID] {
+				continue
+			}
+			items = append(items, pinnedItem{
+				text:   formatFactEntry(f, len(f.Files) > 0),
+				src:    SourceRef{Type: "fact", ID: f.ID},
+				factID: f.ID,
+			})
+		}
+	}
+
+	// Detail memories — the bulk of accumulated (pre-v2) memory lives here:
+	// checkpoints, warnings, investigations. Query-ranked by DualSearch.
+	for _, dm := range e.Search(query, userID, 8, nil) {
+		if dm.Similarity < pinnedRelevanceFloor {
+			continue
+		}
+		if dm.Type == "checkpoint" {
+			var cp Checkpoint
+			if err := json.Unmarshal([]byte(dm.Text), &cp); err == nil {
+				if cp.Task == skipCheckpointTask {
+					continue // already rendered as the handoff
+				}
+				items = append(items, pinnedItem{
+					text: cp.FormatForContext(),
+					src:  SourceRef{Type: "checkpoint", ID: cp.Task},
+				})
+				continue
+			}
+		}
+		entry := formatTypeLabel(dm.Type, dm.Sector, dm.ImportanceScore) + "\n" + dm.Text
+		if len(dm.Files) > 0 {
+			entry += "\n  Files: " + strings.Join(dm.Files, ", ")
+		}
+		items = append(items, pinnedItem{
+			text: entry,
+			src:  SourceRef{Type: "detail", ID: dm.ID},
+		})
+	}
+	return items
 }
 
 // loadPreferenceFactsV2 returns user-global preference facts (namespace "",

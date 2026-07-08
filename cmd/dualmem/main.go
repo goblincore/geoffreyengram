@@ -164,6 +164,29 @@ func resolveNamespace(flagNS string, cfg CLIConfig) string {
 	return "claude:" + base
 }
 
+// parseFlagsInterspersed parses fs allowing flags to appear before OR after the
+// positional arguments, and returns the positionals. Go's stdlib flag.Parse
+// stops at the first non-flag token, so `dualmem recall "query" --ns X` would
+// silently drop --ns and fall back to the cwd namespace. This repeatedly parses
+// — consuming leading flags, banking the next positional, then re-parsing the
+// remainder — until all args are consumed. Later flag occurrences win, matching
+// stdlib semantics. fs must use flag.ExitOnError so a genuinely bad flag still
+// exits with the standard message on the first pass.
+func parseFlagsInterspersed(fs *flag.FlagSet, args []string) []string {
+	var positionals []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return positionals
+		}
+		rest := fs.Args()
+		if len(rest) == 0 {
+			return positionals
+		}
+		positionals = append(positionals, rest[0])
+		args = rest[1:]
+	}
+}
+
 func newEngine(cfg CLIConfig) (*dualmem.Engine, error) {
 	apiKey := os.Getenv(cfg.Providers.EmbeddingAPIKeyEnv)
 	if apiKey == "" {
@@ -386,7 +409,7 @@ func cmdAdd(cfg CLIConfig) {
 
 	// If --text not provided, use remaining args
 	if *text == "" {
-		*text = strings.Join(fs.Args(), " ")
+		*text = strings.Join(parseFlagsInterspersed(fs, os.Args[2:]), " ")
 	}
 	if *text == "" {
 		fmt.Fprintln(os.Stderr, "error: --text or positional text required")
@@ -450,7 +473,7 @@ func cmdSearch(cfg CLIConfig) {
 	jsonOut := fs.Bool("json", false, "JSON output")
 	fs.Parse(os.Args[2:])
 
-	query := strings.Join(fs.Args(), " ")
+	query := strings.Join(parseFlagsInterspersed(fs, os.Args[2:]), " ")
 	if query == "" {
 		fmt.Fprintln(os.Stderr, "error: query required")
 		os.Exit(1)
@@ -524,7 +547,7 @@ func cmdContext(cfg CLIConfig) {
 	pinnedBudget := fs.Int("pinned-budget", 0, "Token cap for the v2 pinned block (default 500); ignored with -legacy")
 	fs.Parse(os.Args[2:])
 
-	query := strings.Join(fs.Args(), " ")
+	query := strings.Join(parseFlagsInterspersed(fs, os.Args[2:]), " ")
 	if query == "" {
 		query = "session context"
 	}
@@ -1005,7 +1028,7 @@ func cmdCheckpoint(cfg CLIConfig) {
 
 	if *task == "" {
 		// If no --task, use remaining args
-		*task = strings.Join(fs.Args(), " ")
+		*task = strings.Join(parseFlagsInterspersed(fs, os.Args[2:]), " ")
 	}
 	if *task == "" {
 		fmt.Fprintln(os.Stderr, "error: --task or positional task description required (or use --list)")
@@ -1307,7 +1330,7 @@ func cmdSearchCode(cfg CLIConfig) {
 	graphMode := fs.Bool("graph", false, "Use graph-based PageRank search (experimental)")
 	fs.Parse(os.Args[2:])
 
-	query := strings.Join(fs.Args(), " ")
+	query := strings.Join(parseFlagsInterspersed(fs, os.Args[2:]), " ")
 	if query == "" {
 		fmt.Fprintln(os.Stderr, "usage: dualmem search-code <query>")
 		os.Exit(1)
@@ -2663,7 +2686,7 @@ func cmdFileContext(cfg CLIConfig) {
 	limit := fs.Int("limit", 10, "Max results")
 	fs.Parse(os.Args[2:])
 
-	filename := strings.Join(fs.Args(), " ")
+	filename := strings.Join(parseFlagsInterspersed(fs, os.Args[2:]), " ")
 	if filename == "" {
 		fmt.Fprintln(os.Stderr, "error: filename required")
 		fmt.Fprintln(os.Stderr, "usage: dualmem file-context <filename> [--ns <namespace>] [--json] [--gate]")
@@ -2831,7 +2854,7 @@ func cmdRecall(cfg CLIConfig) {
 	jsonOut := fs.Bool("json", false, "JSON output")
 	fs.Parse(os.Args[2:])
 
-	query := strings.Join(fs.Args(), " ")
+	query := strings.Join(parseFlagsInterspersed(fs, os.Args[2:]), " ")
 	if query == "" {
 		fmt.Fprintln(os.Stderr, "usage: dualmem recall <query> [--ns <ns>] [--kind <kind>] [--limit 5] [--json]")
 		os.Exit(1)
@@ -2874,7 +2897,7 @@ func cmdPrecedent(cfg CLIConfig) {
 	jsonOut := fs.Bool("json", false, "JSON output")
 	fs.Parse(os.Args[2:])
 
-	approach := strings.Join(fs.Args(), " ")
+	approach := strings.Join(parseFlagsInterspersed(fs, os.Args[2:]), " ")
 	if approach == "" {
 		fmt.Fprintln(os.Stderr, "usage: dualmem precedent <approach> [--ns <ns>] [--limit 5] [--json]")
 		fmt.Fprintln(os.Stderr, "Did we already try/decide/reject this? Searches decision + deadend facts.")
