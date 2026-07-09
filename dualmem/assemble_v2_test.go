@@ -408,3 +408,81 @@ func TestPinnedBlock_QueryRelevantSection(t *testing.T) {
 		t.Errorf("sentinel block missing the handoff checkpoint.\nblock:\n%s", sentinel.Text)
 	}
 }
+
+// TestPinnedBlock_QueryRelevantIdentifier is a regression guard for the LC-1928
+// surfacing bug: the query-relevant section called the e.Search shim, which
+// leaves DualSearch's QueryText empty. Empty QueryText disables the detail
+// search's identifier pre-filter — so an exact-ticket query ("LC-9999") fell
+// through to plain cosine fill and a pile of generic high-importance warnings
+// crowded the block, instead of returning only the ticket's own memories. The
+// CLI `search` path (which passes QueryText) surfaced them correctly, which is
+// why the memories "existed" but `context` never showed them.
+//
+// The identifier pre-filter is exclusive: when the query carries an identifier,
+// only memories containing it are returned. We assert that exclusivity — the
+// marked warnings, which do NOT contain the ticket, must be absent — because it
+// is pure string logic, independent of the mock embedder's cosine values (which
+// on a small fixture can surface the checkpoint anyway and mask the bug).
+func TestPinnedBlock_QueryRelevantIdentifier(t *testing.T) {
+	dir := newV2Repo(t)
+	engine := newV2Engine(t, dir)
+	ctx := context.Background()
+	ns := "ns-qrel-id"
+
+	// The memory we expect surfaced: a checkpoint keyed by its ticket id.
+	if err := engine.SaveCheckpoint(ctx, ns, &Checkpoint{
+		Task:   "LC-9999 rework apps page",
+		Status: "in_progress",
+	}); err != nil {
+		t.Fatalf("save target checkpoint: %v", err)
+	}
+
+	// Warnings that do NOT mention the ticket. Each carries a unique marker
+	// token (no digits, so it is not itself an identifier). Salience is kept
+	// below the 0.6 high-salience-guarantee threshold so the ONLY thing that
+	// could surface them is cosine fill — which the identifier pre-filter
+	// suppresses. With QueryText passed, Phase 1 returns only the ticket's
+	// memories and these are excluded; without it, cosine fill lets them in.
+	const warnMarker = "warnmarkertoken"
+	for i, txt := range []string{
+		"header icon color whitelist white on light routes app page",
+		"mobile nav tab bar safe area inset offset apps page tabs alignment",
+		"responsive button min height wrap German apps page launchpad",
+		"theme icon schema strips unknown keys navbar apps page icons",
+		"pathways insights icon horizontal svg bakes text double render icons",
+		"launchpad empty state gate loading flags apps page redesign",
+		"my apps grid tile square responsive desktop breakpoint app page",
+		"more apps search scoping count line apps page launchpad icons",
+	} {
+		if err := engine.AddWithOptions(ctx, MemoryInput{
+			Type:        "warning",
+			UserMessage: warnMarker + " " + txt,
+			SectorHint:  "semantic",
+			Salience:    0.5, // below the 0.6 high-salience guarantee
+			Files:       []string{"apps/app/src/pages/myApps/warn.tsx"},
+		}, ns); err != nil {
+			t.Fatalf("add warning %d: %v", i, err)
+		}
+	}
+
+	// A newer, unrelated checkpoint — the global handoff. Proves the target is
+	// surfaced by query relevance, not because it is newest.
+	if err := engine.SaveCheckpoint(ctx, ns, &Checkpoint{
+		Task:   "unrelated deploy pipeline rollout",
+		Status: "done",
+	}); err != nil {
+		t.Fatalf("save handoff checkpoint: %v", err)
+	}
+
+	block, err := engine.Assemble(ctx, ns, "App page redesign LC-9999 launchpad header icon apps", 3000, AssembleOptions{})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if !strings.Contains(block.Text, "LC-9999") {
+		t.Errorf("exact-ticket query did not surface the LC-9999 checkpoint.\nblock:\n%s", block.Text)
+	}
+	if strings.Contains(block.Text, warnMarker) {
+		t.Errorf("identifier query surfaced non-matching warnings; the identifier "+
+			"pre-filter is not engaged (QueryText was dropped).\nblock:\n%s", block.Text)
+	}
+}
