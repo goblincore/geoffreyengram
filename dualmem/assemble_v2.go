@@ -254,8 +254,17 @@ func (e *Engine) queryRelevantV2(ctx context.Context, userID, query, skipCheckpo
 	}
 
 	// Detail memories — the bulk of accumulated (pre-v2) memory lives here:
-	// checkpoints, warnings, investigations. Query-ranked by DualSearch.
-	for _, dm := range e.Search(query, userID, 8, nil) {
+	// checkpoints, warnings, investigations. Query-ranked by DualSearch. We
+	// call DualSearch directly with QueryText set (not the e.Search shim, which
+	// leaves QueryText empty) so the detail search's identifier pre-filter and
+	// keyword-hybrid blend engage — otherwise an exact-ticket query like
+	// "LC-1928" ranks by cosine+type-boost alone and the matching checkpoint is
+	// crowded out of the top-N by generic high-importance warnings.
+	var details []DetailMemory
+	if res, err := e.DualSearch(ctx, userID, query, SearchOpts{Limit: 8, QueryText: query}); err == nil && res != nil {
+		details = res.DetailMemories
+	}
+	for _, dm := range details {
 		if dm.Similarity < pinnedRelevanceFloor {
 			continue
 		}
