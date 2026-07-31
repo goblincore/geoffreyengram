@@ -31,6 +31,9 @@ The integration will become adapter-based. Claude Code and Codex retain client-n
 - A projectless Codex task uses its generated task directory as `cwd`; auto-detection therefore cannot select a repository namespace. Tasks must be attached to a local project, or a namespace must be supplied explicitly.
 - DualMem distillation currently understands Claude Code session transcripts but not Codex transcripts.
 - Query retrieval can fail when the embedding provider is unavailable even though some context assembly paths degrade to lexical or pinned-memory output.
+- The root `engram` package is the original character/NPC memory engine. Its classifier code was last materially changed in March 2026, while current documentation and development focus on `dualmem/`.
+- The ordinary root test suite includes a live Gemini benchmark that activates whenever a provider key happens to be present, plus HTTP tests that require local sockets. These are legacy-package concerns rather than the supported DualMem verification gate.
+- Two contextual benchmark tests still assert the original strict-file metric contract even though commit `384bb934` intentionally changed precision and recall to award module and sibling coverage. The implementation and commit history agree; the tests and comments are stale.
 
 ## Goals
 
@@ -41,6 +44,7 @@ The integration will become adapter-based. Claude Code and Codex retain client-n
 5. Installation is repeatable, idempotent, non-destructive, and diagnosable.
 6. Existing `claude:*` memories remain available throughout the migration.
 7. Codex transcript distillation has a defined follow-up path without delaying the correctness and security repair.
+8. The original root `engram` package is formally deprecated and separated from the default DualMem test gate.
 
 ## Non-Goals
 
@@ -49,6 +53,7 @@ The integration will become adapter-based. Claude Code and Codex retain client-n
 - Replacing DualMem's storage, ranking, or context-assembly architecture in Phase 1.
 - Automatically migrating existing namespaces to a new vendor-neutral scheme before aliasing and rollback behavior exist.
 - Storing API keys in the repository or generating credential-bearing scripts.
+- Deleting the deprecated root package in this PR; removal requires a separate versioned compatibility decision.
 
 ## Considered Approaches
 
@@ -156,10 +161,34 @@ Diagnostics distinguish required failures from optional provider/network warning
 - Transcript distillation operates locally until it deliberately invokes the configured provider, following existing DualMem provider policy.
 - The current Gemini and Z.AI credentials must be rotated because their literal values were present in an imported hook and entered a diagnostic transcript.
 
+## Legacy Package and Test Suite Policy
+
+The root `engram` package is formally deprecated because the project now focuses on `dualmem/`. Deprecation is explicit and reversible:
+
+- Add package documentation with Go's `Deprecated:` convention directing users to `github.com/goblincore/geoffreyengram/dualmem` and the `dualmem` CLI.
+- Update the README and testing guide so supported commands target `dualmem/`, active command packages, and maintained benchmark packages.
+- Keep the legacy implementation available for compatibility during the deprecation window.
+- Move root-package tests behind a `legacy` build tag so ordinary verification does not exercise an inactive product surface.
+- Keep a documented `go test -tags legacy .` command for maintainers who need compatibility coverage.
+- Require an additional explicit `DUALMEM_LIVE_TESTS=1` opt-in for any test that contacts Gemini or another remote provider. Merely having an API key in the environment never activates network tests.
+- Preserve meaningful socket-backed legacy tests under the legacy tag rather than deleting them solely because a restricted sandbox cannot bind a port.
+
+The contextual benchmark remains maintained. Its tests will be updated to the module-aware contract introduced by commit `384bb934`: a result in a ground-truth module counts toward precision, and a sibling result covers ground-truth files in that module for recall. Function names and comments will stop calling those metrics "strict." Tests are removed only when the corresponding behavior is deprecated or duplicated by stronger coverage; failing expectations are not deleted to obtain a green build.
+
+The default verification matrix becomes:
+
+1. Hermetic unit and integration tests for `dualmem/...` and maintained command packages.
+2. Hermetic contextual benchmark metric tests.
+3. Installer and client-adapter fixture tests using temporary homes and repositories.
+4. Optional legacy tests behind `-tags legacy`.
+5. Optional live-provider tests behind both their package/build selection and `DUALMEM_LIVE_TESTS=1`.
+
 ## Delivery Phases
 
 ### Phase 1: Correctness, security, and durable installation
 
+- Formally deprecate the root `engram` package and separate its tests from the default gate.
+- Make all maintained default tests hermetic and update stale contextual metric expectations.
 - Add cross-agent bootstrap and configuration merge behavior.
 - Add tested Claude and Codex lifecycle adapters for session, prompt, structured read, and structured edit events.
 - Restore one shared `claude:*` namespace in all instructions and hooks.
@@ -188,6 +217,10 @@ Tests will use temporary home directories, temporary Git repositories, fixture h
 
 Phase 1 acceptance checks:
 
+- Default verification performs no network calls and requires no local listening sockets.
+- The deprecated root package remains buildable, is documented with `Deprecated:`, and its tests run only with `-tags legacy`.
+- A present Gemini or Z.AI key does not activate a live test without `DUALMEM_LIVE_TESTS=1`.
+- Contextual precision and recall tests assert the documented module-aware contract from commit `384bb934`.
 - Repeated installation is idempotent and preserves unrelated Claude and Codex settings.
 - Generated files contain credential variable names but no credential values.
 - Installed permission modes are correct.
@@ -209,4 +242,3 @@ Phase 2 acceptance checks:
 The installer creates timestamped backups before changing live configuration and reports their paths. Dry-run output is reviewed first. Claude and Codex hooks are installed independently so either client can be rolled back without changing the database. Existing `claude:*` data is never deleted or rewritten in Phase 1. If a hook causes latency or errors, it can be disabled while instruction-driven CLI recall remains available.
 
 The initial PR will contain this design and the Phase 1 implementation plan. Implementation changes may be split into follow-up PRs if adapter, installer, and transcript-reader review boundaries are clearer separately.
-
