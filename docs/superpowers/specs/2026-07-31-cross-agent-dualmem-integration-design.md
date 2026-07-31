@@ -189,6 +189,7 @@ The default verification matrix becomes:
 
 - Formally deprecate the root `engram` package and separate its tests from the default gate.
 - Make all maintained default tests hermetic and update stale contextual metric expectations.
+- Refresh the README so it describes Claude Code and Codex support, points to the cross-agent installer, marks the root package deprecated, and publishes default, legacy, and live-test commands.
 - Add cross-agent bootstrap and configuration merge behavior.
 - Add tested Claude and Codex lifecycle adapters for session, prompt, structured read, and structured edit events.
 - Restore one shared `claude:*` namespace in all instructions and hooks.
