@@ -360,7 +360,7 @@ Define the intended interface in tests:
 type Adapter interface {
 	Name() string
 	Decode(raw []byte) ([]Event, error)
-	Encode(Response) ([]byte, error)
+	Encode(Event, Response) ([]byte, error)
 }
 
 func TestBuiltinAdapters(t *testing.T) {
@@ -395,7 +395,7 @@ func BuiltinAdapters() Registry
 func (r Registry) Get(name string) (Adapter, bool)
 ```
 
-Reject duplicate or blank adapter names. Claude decoding maps `SessionStart`, `UserPromptSubmit`, `Read`, `Edit`, and `Write` to semantic events. Unknown tools return an empty slice without error. Claude output encoding uses the client-supported additional-context JSON shape.
+Reject duplicate or blank adapter names. Claude decoding maps `SessionStart`, `UserPromptSubmit`, `Read`, `Edit`, and `Write` to semantic events. Unknown tools return an empty slice without error. Claude output encoding uses the client-supported additional-context JSON shape and the supplied semantic event to emit the matching native hook event name.
 
 - [ ] **Step 4: Implement Codex decoder without shell evaluation**
 
@@ -405,7 +405,7 @@ Add private Codex wire structs and:
 func ExtractPatchPaths(patch string) []string
 ```
 
-Parse only `*** Add File:`, `*** Update File:`, and `*** Delete File:` lines. Treat `Bash` as opaque activity and never execute its command. A hostile fixture containing `$(command)` and backticks must remain inert and produce paths only from patch headers. Codex output encoding uses its supported additional-context shape.
+Parse only `*** Add File:`, `*** Update File:`, and `*** Delete File:` lines. Treat `Bash` as opaque activity and never execute its command. A hostile fixture containing `$(command)` and backticks must remain inert and produce paths only from patch headers. Codex output encoding uses its supported additional-context shape and the supplied semantic event to emit the matching native hook event name.
 
 - [ ] **Step 5: Run adapter and protocol tests**
 

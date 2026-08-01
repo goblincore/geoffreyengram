@@ -1,0 +1,12 @@
+{
+  "session_id": "codex-session-001",
+  "transcript_path": "/repo/.codex/rollout.jsonl",
+  "cwd": "/repo",
+  "hook_event_name": "SessionStart",
+  "source": "startup",
+  "model": "test-model",
+  "permission_mode": "default",
+  "future_field": {
+    "ignored": true
+  }
+}

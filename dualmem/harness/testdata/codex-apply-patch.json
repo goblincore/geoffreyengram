@@ -1,0 +1,16 @@
+{
+  "session_id": "codex-session-001",
+  "transcript_path": "/repo/.codex/rollout.jsonl",
+  "cwd": "/repo",
+  "hook_event_name": "PostToolUse",
+  "turn_id": "turn-codex-001",
+  "tool_name": "apply_patch",
+  "tool_use_id": "tool-codex-patch-001",
+  "tool_input": {
+    "command": "*** Begin Patch\n*** Update File: ./internal/adapter.go\n@@\n-old\n+$(command)\n+`command`\n*** Add File: internal/new.go\n+sanitized fixture\n*** Delete File: internal/old.go\n*** Update File: internal/../internal/adapter.go\n@@\n-old\n+new\n*** End Patch"
+  },
+  "tool_response": "Done!",
+  "model": "test-model",
+  "permission_mode": "default",
+  "future_field": "ignored"
+}

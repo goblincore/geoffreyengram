@@ -1,0 +1,11 @@
+{
+  "session_id": "claude-session-001",
+  "transcript_path": "/repo/.claude/transcripts/session.jsonl",
+  "cwd": "/repo",
+  "hook_event_name": "SessionStart",
+  "source": "startup",
+  "permission_mode": "default",
+  "future_field": {
+    "ignored": true
+  }
+}

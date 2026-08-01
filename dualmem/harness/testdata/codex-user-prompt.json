@@ -1,0 +1,11 @@
+{
+  "session_id": "codex-session-001",
+  "transcript_path": "/repo/.codex/rollout.jsonl",
+  "cwd": "/repo",
+  "hook_event_name": "UserPromptSubmit",
+  "turn_id": "turn-codex-001",
+  "prompt": "Add native payload adapters.",
+  "model": "test-model",
+  "permission_mode": "default",
+  "future_field": "ignored"
+}
