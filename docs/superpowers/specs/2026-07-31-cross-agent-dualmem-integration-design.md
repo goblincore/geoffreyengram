@@ -156,7 +156,7 @@ The runtime returns a neutral response before adapter formatting:
 
 An adapter has one purpose: translate a native event into zero or more `DualMem Event v1` envelopes and format the runtime response in the harness's accepted shape.
 
-First-party adapters are compiled and registered explicitly. The registry avoids a closed client enum while keeping execution auditable. Unknown third-party harnesses do not need in-process code: they emit normalized JSON. Arbitrary executable plugin loading is excluded from Phase 1 for security and packaging simplicity.
+First-party native decoders are registered explicitly when they run inside the Go CLI. Claude and Codex use that registry; pi's first-party TypeScript extension performs translation out of process and emits normalized JSON directly. This avoids a closed client enum while keeping execution auditable. Unknown third-party harnesses likewise need no in-process code: they emit normalized JSON. Arbitrary executable plugin loading is excluded from Phase 1 for security and packaging simplicity.
 
 Adapters must:
 
