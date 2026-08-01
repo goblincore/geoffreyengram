@@ -1,3 +1,5 @@
+//go:build legacy
+
 package engram
 
 import (
@@ -112,10 +114,14 @@ func TestClassifyBenchmark_Embedding(t *testing.T) {
 }
 
 // TestClassifyBenchmark_EmbeddingLive runs the benchmark with a real Gemini API.
-// Skip unless GEMINI_API_KEY is set.
+// Skip unless DUALMEM_LIVE_TESTS=1 and GEMINI_API_KEY are set.
 //
-//	GEMINI_API_KEY=... go test -run TestClassifyBenchmark_EmbeddingLive -v -count=1
+//	DUALMEM_LIVE_TESTS=1 GEMINI_API_KEY=... go test -tags legacy -run TestClassifyBenchmark_EmbeddingLive -v -count=1
 func TestClassifyBenchmark_EmbeddingLive(t *testing.T) {
+	if os.Getenv("DUALMEM_LIVE_TESTS") != "1" {
+		t.Skip("set DUALMEM_LIVE_TESTS=1 to run provider-backed tests")
+	}
+
 	apiKey := getTestAPIKey(t)
 
 	embedder := NewGeminiEmbedder2(apiKey, 768)

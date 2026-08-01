@@ -576,9 +576,12 @@ func TestBenchSupersede(t *testing.T) {
 // --- Live benchmark with real Gemini Embedding 2 ---
 
 // newLiveBenchEngine creates a test engine with real Gemini Embedding 2.
-// Requires GEMINI_API_KEY env var.
+// Requires DUALMEM_LIVE_TESTS=1 and GEMINI_API_KEY.
 func newLiveBenchEngine(t *testing.T) *Engine {
 	t.Helper()
+	if os.Getenv("DUALMEM_LIVE_TESTS") != "1" {
+		t.Skip("set DUALMEM_LIVE_TESTS=1 to run provider-backed tests")
+	}
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	if apiKey == "" {
 		t.Skip("GEMINI_API_KEY not set — skipping live benchmark")
@@ -601,9 +604,12 @@ func newLiveBenchEngine(t *testing.T) *Engine {
 }
 
 // TestBenchLive runs all benchmark scenarios with real Gemini Embedding 2 embeddings.
-// This test requires GEMINI_API_KEY and makes real API calls.
-// Run with: go test ./dualmem/ -v -run TestBenchLive -count=1
+// This test requires DUALMEM_LIVE_TESTS=1 and GEMINI_API_KEY and makes real API calls.
+// Run with: DUALMEM_LIVE_TESTS=1 go test ./dualmem/ -v -run TestBenchLive -count=1
 func TestBenchLive(t *testing.T) {
+	if os.Getenv("DUALMEM_LIVE_TESTS") != "1" {
+		t.Skip("set DUALMEM_LIVE_TESTS=1 to run provider-backed tests")
+	}
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	if apiKey == "" {
 		t.Skip("GEMINI_API_KEY not set — skipping live benchmark")
@@ -662,6 +668,9 @@ func TestBenchLive(t *testing.T) {
 
 // TestBenchLiveMinSimilarity tests the effect of MinSimilarity threshold with real embeddings.
 func TestBenchLiveMinSimilarity(t *testing.T) {
+	if os.Getenv("DUALMEM_LIVE_TESTS") != "1" {
+		t.Skip("set DUALMEM_LIVE_TESTS=1 to run provider-backed tests")
+	}
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	if apiKey == "" {
 		t.Skip("GEMINI_API_KEY not set — skipping live MinSimilarity test")

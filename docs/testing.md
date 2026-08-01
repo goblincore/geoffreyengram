@@ -1,9 +1,12 @@
 # Test Suite
 
 ```bash
+go test ./...
+go test -tags legacy .
+DUALMEM_LIVE_TESTS=1 go test ./dualmem -run TestBenchLive -v
+
 go test ./dualmem/ -v                      # all unit + integration tests
 go test ./dualmem/ -run TestBench -v       # context assembly benchmarks (mock embeddings)
-go test ./dualmem/ -run TestBenchLive -v   # context benchmarks with real Gemini API
 go test ./dualmem/ -run TestSearchBenchmark # HDC+BM25 code search accuracy
 go test ./dualmem/ -run TestSQLite -v      # SQLite persistence regression tests
 go test ./cmd/dualmem/ -run TestTilde -v   # config tilde expansion tests
