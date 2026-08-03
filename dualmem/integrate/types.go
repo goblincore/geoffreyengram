@@ -17,19 +17,47 @@ const (
 
 type Capability string
 
+type deleteProofKind uint8
+
+const (
+	deleteProofNone deleteProofKind = iota
+	deleteProofOwnedAsset
+	deleteProofManagedBlock
+)
+
+// DeleteProof is immutable delete provenance produced only by trusted planners
+// in this package. Its fields are intentionally private so callers cannot turn
+// arbitrary current bytes into deletion authority.
+type DeleteProof struct {
+	kind       deleteProofKind
+	ownedAsset string
+	begin      string
+	end        string
+}
+
 type Detection struct {
 	Harness      string
-	Installed    bool
+	Present      bool
+	Managed      bool
 	Capabilities []Capability
 }
 
 type Change struct {
-	Path       string
-	Action     Action
-	Mode       fs.FileMode
-	Before     []byte
-	After      []byte
-	BackupPath string
+	Path        string
+	Action      Action
+	Mode        fs.FileMode
+	Before      []byte
+	After       []byte
+	BackupPath  string
+	DeleteProof DeleteProof
+}
+
+func ownedAssetDeleteProof(canonical []byte) DeleteProof {
+	return DeleteProof{kind: deleteProofOwnedAsset, ownedAsset: string(canonical)}
+}
+
+func managedBlockDeleteProof(begin, end string) DeleteProof {
+	return DeleteProof{kind: deleteProofManagedBlock, begin: begin, end: end}
 }
 
 type Driver interface {

@@ -586,17 +586,29 @@ type Capability string
 
 type Detection struct {
 	Harness      string
-	Installed    bool
+	Present      bool
+	Managed      bool
 	Capabilities []Capability
 }
 
+// DeleteProof has package-private immutable fields. Built-in planners in the
+// integrate package create it with ownedAssetDeleteProof or
+// managedBlockDeleteProof; generic callers cannot forge deletion authority.
+type DeleteProof struct {
+	kind       deleteProofKind
+	ownedAsset string
+	begin      string
+	end        string
+}
+
 type Change struct {
-	Path       string
-	Action     Action
-	Mode       fs.FileMode
-	Before     []byte
-	After      []byte
-	BackupPath string
+	Path        string
+	Action      Action
+	Mode        fs.FileMode
+	Before      []byte
+	After       []byte
+	BackupPath  string
+	DeleteProof DeleteProof
 }
 
 type Driver interface {
@@ -643,7 +655,7 @@ func ReplaceManagedBlock(input, begin, end, body string) (string, error)
 func RemoveManagedBlock(input, begin, end string) (string, error)
 ```
 
-Test duplicate driver names, unknown harnesses, `all` selecting detected drivers, explicit harness selection, malformed/overlapping markers, idempotence, and delete actions limited to wholly DualMem-owned files. The common planner runs once for any install. During targeted uninstall it keeps shared assets while any managed harness remains and deletes them only after the final managed harness is removed.
+Test duplicate driver names, unknown harnesses, `all` selecting present drivers (including present-but-unmanaged harnesses on a fresh install), explicit harness selection, malformed/overlapping markers, idempotence, and delete actions limited to wholly DualMem-owned files. `Detection.Present` reports native harness presence independently from `Detection.Managed`, which reports installed DualMem integration state. The common planner runs once for any install. Its `RemainingHarnesses` input is the projected managed set after the requested install/uninstall transition, so a present-but-unmanaged harness does not retain shared assets during another harness's uninstall.
 
 - [ ] **Step 2: Run planner tests and confirm RED**
 
@@ -653,7 +665,7 @@ Expected: FAIL because the package does not exist.
 
 - [ ] **Step 3: Implement pure planning and managed blocks**
 
-Planning reads existing state but never writes. Sort drivers and changes by name/path for deterministic output. `all` selects only detected harnesses; explicit names select those drivers even when their config directory must be created. Run the common planner exactly once after harness detection and pass it the unselected/remaining managed harness names. Managed markers are exact and unique; duplicate or unmatched markers return an error before changes are produced.
+Planning reads existing state but never writes. Sort drivers and changes by name/path for deterministic output. `all` selects only `Present` harnesses; explicit names select those drivers even when their config directory must be created. Derive projected management from `Managed` plus the selected install/uninstall transition. Run the common planner exactly once after harness detection and pass it that sorted projected managed set. Managed markers are exact and unique; duplicate or unmatched markers return an error before changes are produced. Built-in owned-asset and managed-block uninstall planners attach package-private immutable `DeleteProof` values; a raw `Before` byte match is never deletion authority.
 
 - [ ] **Step 4: Write atomic apply tests**
 
@@ -665,6 +677,9 @@ Use temporary homes to prove:
 - an injected write failure leaves the original file intact;
 - a second plan after apply contains only `unchanged`;
 - uninstall removes only wholly owned files or marked blocks;
+- arbitrary exact-current user bytes without trusted delete provenance cannot be deleted;
+- managed-block deletion is recomputed from the proof's exact markers and is allowed only when no unrelated content remains;
+- a concurrent create/update/delete path appearance or replacement is never overwritten or removed, and any path displaced into quarantine on abort remains recoverable;
 - dry-run never calls `Apply` and result summaries omit `Before`/`After` bytes.
 
 - [ ] **Step 5: Run apply tests and confirm RED**
@@ -675,7 +690,7 @@ Expected: FAIL because `Apply` is not implemented.
 
 - [ ] **Step 6: Implement atomic writes and backups**
 
-Use same-directory temporary files, restrictive creation modes, `Chmod`, `Sync`, `Close`, and `Rename`. Never follow a planned target through a symlink; return an error before writing. Refuse `ActionDelete` unless `Before` exactly matches the installed owned asset or the file becomes empty after removing a managed block.
+Use same-directory temporary files, restrictive creation modes, `Chmod`, `Sync`, and `Close`. Publish creates with a portable hard-link no-clobber operation. For updates and deletes, atomically move the target into a private same-directory quarantine, verify both the preflight file identity and exact bytes there, then publish the update no-clobber or delete only the verified quarantined inode. If publication/verification aborts, restore the quarantined file no-clobber when the target is absent; otherwise retain it at the reported quarantine path so no displaced bytes are lost. Never follow a planned target through a symlink. Refuse `ActionDelete` unless its unforgeable `DeleteProof` either matches the exact canonical owned-asset bytes or supplies exact managed markers whose removal is recomputed by `Apply` and leaves the file empty; a generic caller-provided `Before` match is insufficient.
 
 - [ ] **Step 7: Run and commit**
 

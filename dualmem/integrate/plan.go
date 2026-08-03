@@ -18,7 +18,8 @@ func Plan(ctx context.Context, opts Options, bundle Bundle) (Result, error) {
 	}
 
 	detections := make([]Detection, 0, len(drivers))
-	installed := make(map[string]bool, len(drivers))
+	present := make(map[string]bool, len(drivers))
+	managed := make(map[string]bool, len(drivers))
 	for _, driver := range drivers {
 		detection, detectErr := driver.Detect(ctx, opts.Home)
 		if detectErr != nil {
@@ -30,15 +31,16 @@ func Plan(ctx context.Context, opts Options, bundle Bundle) (Result, error) {
 			return detection.Capabilities[i] < detection.Capabilities[j]
 		})
 		detections = append(detections, detection)
-		installed[driver.Name()] = detection.Installed
+		present[driver.Name()] = detection.Present
+		managed[driver.Name()] = detection.Managed
 	}
 
 	selected := make(map[string]bool, len(drivers))
 	for _, driver := range drivers {
-		selected[driver.Name()] = selection[driver.Name()] || (all && installed[driver.Name()])
+		selected[driver.Name()] = selection[driver.Name()] || (all && present[driver.Name()])
 	}
 
-	remaining := projectedHarnesses(drivers, installed, selected, opts.Uninstall)
+	remaining := projectedHarnesses(drivers, managed, selected, opts.Uninstall)
 	var changes []Change
 	if bundle.Common != nil {
 		commonChanges, planErr := bundle.Common.PlanCommon(ctx, CommonRequest{
@@ -113,11 +115,11 @@ func requestedHarnesses(names []string, drivers map[string]Driver) (map[string]b
 	return selected, all, nil
 }
 
-func projectedHarnesses(drivers []Driver, installed, selected map[string]bool, uninstall bool) []string {
+func projectedHarnesses(drivers []Driver, currentlyManaged, selected map[string]bool, uninstall bool) []string {
 	remaining := make([]string, 0, len(drivers))
 	for _, driver := range drivers {
 		name := driver.Name()
-		managed := installed[name]
+		managed := currentlyManaged[name]
 		if selected[name] {
 			managed = !uninstall
 		}

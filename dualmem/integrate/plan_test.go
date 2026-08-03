@@ -51,7 +51,7 @@ func TestPlanRejectsDuplicateDriverNames(t *testing.T) {
 }
 
 func TestPlanRejectsUnknownHarnessBeforeDetection(t *testing.T) {
-	driver := &fakeDriver{name: "codex", detection: Detection{Installed: true}}
+	driver := &fakeDriver{name: "codex", detection: Detection{Present: true, Managed: true}}
 	_, err := Plan(context.Background(), Options{Home: t.TempDir(), Harnesses: []string{"unknown"}}, Bundle{Drivers: []Driver{driver}})
 	if err == nil {
 		t.Fatal("Plan accepted an unknown harness")
@@ -61,11 +61,11 @@ func TestPlanRejectsUnknownHarnessBeforeDetection(t *testing.T) {
 	}
 }
 
-func TestPlanAllSelectsOnlyDetectedDriversInDeterministicOrder(t *testing.T) {
+func TestPlanAllSelectsOnlyPresentDriversInDeterministicOrder(t *testing.T) {
 	home := t.TempDir()
-	claude := &fakeDriver{name: "claude", detection: Detection{Installed: true}, changes: []Change{{Path: filepath.Join(home, "z"), Action: ActionCreate, Mode: 0o600, After: []byte("z")}}}
-	codex := &fakeDriver{name: "codex", detection: Detection{Installed: false}, changes: []Change{{Path: filepath.Join(home, "ignored"), Action: ActionCreate, Mode: 0o600, After: []byte("ignored")}}}
-	pi := &fakeDriver{name: "pi", detection: Detection{Installed: true}, changes: []Change{{Path: filepath.Join(home, "a"), Action: ActionCreate, Mode: 0o600, After: []byte("a")}}}
+	claude := &fakeDriver{name: "claude", detection: Detection{Present: true, Managed: false}, changes: []Change{{Path: filepath.Join(home, "z"), Action: ActionCreate, Mode: 0o600, After: []byte("z")}}}
+	codex := &fakeDriver{name: "codex", detection: Detection{Present: false, Managed: false}, changes: []Change{{Path: filepath.Join(home, "ignored"), Action: ActionCreate, Mode: 0o600, After: []byte("ignored")}}}
+	pi := &fakeDriver{name: "pi", detection: Detection{Present: true, Managed: false}, changes: []Change{{Path: filepath.Join(home, "a"), Action: ActionCreate, Mode: 0o600, After: []byte("a")}}}
 	common := &fakeCommonPlanner{changes: []Change{{Path: filepath.Join(home, "m"), Action: ActionCreate, Mode: 0o600, After: []byte("m")}}}
 
 	result, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"all"}}, Bundle{Common: common, Drivers: []Driver{pi, codex, claude}})
@@ -90,7 +90,7 @@ func TestPlanAllSelectsOnlyDetectedDriversInDeterministicOrder(t *testing.T) {
 }
 
 func TestPlanExplicitHarnessSelectsUndetectedDriver(t *testing.T) {
-	driver := &fakeDriver{name: "codex", detection: Detection{Installed: false}}
+	driver := &fakeDriver{name: "codex", detection: Detection{Present: false, Managed: false}}
 	_, err := Plan(context.Background(), Options{Home: t.TempDir(), Harnesses: []string{"codex"}}, Bundle{Drivers: []Driver{driver}})
 	if err != nil {
 		t.Fatal(err)
@@ -100,7 +100,7 @@ func TestPlanExplicitHarnessSelectsUndetectedDriver(t *testing.T) {
 	}
 }
 
-func TestPlanTargetedUninstallRetainsCommonUntilLastHarness(t *testing.T) {
+func TestPlanTargetedUninstallUsesManagedStateNotPresence(t *testing.T) {
 	for _, test := range []struct {
 		name          string
 		claudeManaged bool
@@ -111,8 +111,8 @@ func TestPlanTargetedUninstallRetainsCommonUntilLastHarness(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			common := &fakeCommonPlanner{}
-			codex := &fakeDriver{name: "codex", detection: Detection{Installed: true}}
-			claude := &fakeDriver{name: "claude", detection: Detection{Installed: test.claudeManaged}}
+			codex := &fakeDriver{name: "codex", detection: Detection{Present: true, Managed: true}}
+			claude := &fakeDriver{name: "claude", detection: Detection{Present: true, Managed: test.claudeManaged}}
 			_, err := Plan(context.Background(), Options{Home: t.TempDir(), Harnesses: []string{"codex"}, Uninstall: true}, Bundle{Common: common, Drivers: []Driver{codex, claude}})
 			if err != nil {
 				t.Fatal(err)
@@ -127,10 +127,28 @@ func TestPlanTargetedUninstallRetainsCommonUntilLastHarness(t *testing.T) {
 	}
 }
 
+func TestPlanFreshAllInstallSelectsEveryPresentHarnessAndProjectsManagedState(t *testing.T) {
+	home := t.TempDir()
+	common := &fakeCommonPlanner{}
+	claude := &fakeDriver{name: "claude", detection: Detection{Present: true, Managed: false}}
+	codex := &fakeDriver{name: "codex", detection: Detection{Present: true, Managed: false}}
+	pi := &fakeDriver{name: "pi", detection: Detection{Present: false, Managed: false}}
+	_, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"all"}}, Bundle{Common: common, Drivers: []Driver{pi, codex, claude}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claude.requests) != 1 || len(codex.requests) != 1 || len(pi.requests) != 0 {
+		t.Fatalf("fresh all plan calls: claude=%d codex=%d pi=%d", len(claude.requests), len(codex.requests), len(pi.requests))
+	}
+	if got, want := common.requests[0].RemainingHarnesses, []string{"claude", "codex"}; !slices.Equal(got, want) {
+		t.Fatalf("projected managed harnesses = %v, want %v", got, want)
+	}
+}
+
 func TestPlanReturnsNoChangesWhenAPlannerFails(t *testing.T) {
 	home := t.TempDir()
 	common := &fakeCommonPlanner{changes: []Change{{Path: filepath.Join(home, "common"), Action: ActionCreate}}}
-	driver := &fakeDriver{name: "codex", detection: Detection{Installed: true}, planErr: errors.New("invalid JSON")}
+	driver := &fakeDriver{name: "codex", detection: Detection{Present: true, Managed: true}, planErr: errors.New("invalid JSON")}
 	result, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"codex"}}, Bundle{Common: common, Drivers: []Driver{driver}})
 	if err == nil {
 		t.Fatal("Plan succeeded despite driver planning error")

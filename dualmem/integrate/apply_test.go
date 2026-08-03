@@ -107,6 +107,107 @@ func TestApplyInjectedWriteFailureLeavesOriginalIntact(t *testing.T) {
 	assertFile(t, target, "original", 0o640)
 }
 
+func TestApplyCreatePreservesConcurrentPathAppearance(t *testing.T) {
+	home := t.TempDir()
+	target := filepath.Join(home, "config")
+	originalWriter := atomicWriteFile
+	t.Cleanup(func() { atomicWriteFile = originalWriter })
+	atomicWriteFile = func(path string, data []byte, mode fs.FileMode) error {
+		if path == target {
+			if err := os.WriteFile(target, []byte("concurrent"), 0o640); err != nil {
+				return err
+			}
+		}
+		return originalWriter(path, data, mode)
+	}
+	err := Apply(Result{Changes: []Change{{Path: target, Action: ActionCreate, Mode: 0o600, After: []byte("planned")}}})
+	if err == nil {
+		t.Fatal("Apply overwrote a path that appeared after create preflight")
+	}
+	assertFile(t, target, "concurrent", 0o640)
+}
+
+func TestApplyUpdatePreservesConcurrentReplacementAndOriginalBackup(t *testing.T) {
+	home := t.TempDir()
+	target := filepath.Join(home, "config")
+	if err := os.WriteFile(target, []byte("original"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	originalWriter := atomicWriteFile
+	t.Cleanup(func() { atomicWriteFile = originalWriter })
+	atomicWriteFile = func(path string, data []byte, mode fs.FileMode) error {
+		if path == target {
+			if err := os.WriteFile(target, []byte("concurrent"), 0o644); err != nil {
+				return err
+			}
+		}
+		return originalWriter(path, data, mode)
+	}
+	result := Result{Changes: []Change{{
+		Path: target, Action: ActionUpdate, Mode: 0o600, Before: []byte("original"), After: []byte("planned"),
+	}}}
+	err := Apply(result)
+	if err == nil {
+		t.Fatal("Apply overwrote a concurrent update replacement")
+	}
+	assertFile(t, target, "concurrent", 0o644)
+	if result.Changes[0].BackupPath == "" {
+		t.Fatal("concurrent update abort did not retain the original backup")
+	}
+	assertFile(t, result.Changes[0].BackupPath, "original", 0o600)
+}
+
+func TestApplyDeletePreservesReplacementBeforeQuarantine(t *testing.T) {
+	home := t.TempDir()
+	target := filepath.Join(home, "owned")
+	replacement := filepath.Join(home, "replacement")
+	if err := os.WriteFile(target, []byte("canonical"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(replacement, []byte("concurrent"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	originalHook := beforeQuarantineHook
+	t.Cleanup(func() { beforeQuarantineHook = originalHook })
+	beforeQuarantineHook = func(change Change) {
+		if change.Path == target {
+			if err := os.Rename(replacement, target); err != nil {
+				t.Errorf("inject replacement: %v", err)
+			}
+		}
+	}
+	err := Apply(Result{Changes: []Change{{
+		Path: target, Action: ActionDelete, Before: []byte("canonical"), DeleteProof: ownedAssetDeleteProof([]byte("canonical")),
+	}}})
+	if err == nil {
+		t.Fatal("Apply deleted a replacement that arrived after preflight")
+	}
+	assertFile(t, target, "concurrent", 0o640)
+}
+
+func TestApplyDeletePreservesPathCreatedAfterQuarantine(t *testing.T) {
+	home := t.TempDir()
+	target := filepath.Join(home, "owned")
+	if err := os.WriteFile(target, []byte("canonical"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	originalHook := afterQuarantineHook
+	t.Cleanup(func() { afterQuarantineHook = originalHook })
+	afterQuarantineHook = func(change Change) {
+		if change.Path == target {
+			if err := os.WriteFile(target, []byte("concurrent"), 0o644); err != nil {
+				t.Errorf("inject path appearance: %v", err)
+			}
+		}
+	}
+	if err := Apply(Result{Changes: []Change{{
+		Path: target, Action: ActionDelete, Before: []byte("canonical"), DeleteProof: ownedAssetDeleteProof([]byte("canonical")),
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	assertFile(t, target, "concurrent", 0o644)
+}
+
 func TestApplyRejectsSymlinkTarget(t *testing.T) {
 	home := t.TempDir()
 	realPath := filepath.Join(home, "real")
@@ -158,7 +259,7 @@ func TestApplyUninstallDeletesOnlyExactEmptyPostState(t *testing.T) {
 	if err := os.WriteFile(owned, []byte("owned bytes"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := Apply(Result{Changes: []Change{{Path: owned, Action: ActionDelete, Before: []byte("owned bytes")}}}); err != nil {
+	if err := Apply(Result{Changes: []Change{{Path: owned, Action: ActionDelete, Before: []byte("owned bytes"), DeleteProof: ownedAssetDeleteProof([]byte("owned bytes"))}}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(owned); !errors.Is(err, fs.ErrNotExist) {
@@ -169,14 +270,43 @@ func TestApplyUninstallDeletesOnlyExactEmptyPostState(t *testing.T) {
 	if err := os.WriteFile(stale, []byte("user changed"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := Apply(Result{Changes: []Change{{Path: stale, Action: ActionDelete, Before: []byte("planned owned bytes")}}}); err == nil {
+	if err := Apply(Result{Changes: []Change{{Path: stale, Action: ActionDelete, Before: []byte("planned owned bytes"), DeleteProof: ownedAssetDeleteProof([]byte("planned owned bytes"))}}}); err == nil {
 		t.Fatal("Apply deleted a file whose bytes changed")
 	}
 	assertFile(t, stale, "user changed", 0o600)
-	if err := Apply(Result{Changes: []Change{{Path: stale, Action: ActionDelete, Before: []byte("user changed"), After: []byte("not empty")}}}); err == nil {
+	if err := Apply(Result{Changes: []Change{{Path: stale, Action: ActionDelete, Before: []byte("user changed"), After: []byte("not empty"), DeleteProof: ownedAssetDeleteProof([]byte("user changed"))}}}); err == nil {
 		t.Fatal("Apply accepted a delete with a non-empty post-state")
 	}
 	assertFile(t, stale, "user changed", 0o600)
+}
+
+func TestApplyRejectsExactCurrentDeleteWithoutProvenance(t *testing.T) {
+	home := t.TempDir()
+	target := filepath.Join(home, "user-owned")
+	if err := os.WriteFile(target, []byte("exact user bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(Result{Changes: []Change{{
+		Path: target, Action: ActionDelete, Before: []byte("exact user bytes"),
+	}}}); err == nil {
+		t.Fatal("Apply deleted arbitrary exact-current user bytes without ownership provenance")
+	}
+	assertFile(t, target, "exact user bytes", 0o600)
+}
+
+func TestApplyRejectsManagedBlockDeleteWhenUnrelatedContentRemains(t *testing.T) {
+	home := t.TempDir()
+	target := filepath.Join(home, "instructions")
+	content := "user content\n" + testBegin + "\nmanaged\n" + testEnd + "\n"
+	if err := os.WriteFile(target, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(Result{Changes: []Change{{
+		Path: target, Action: ActionDelete, Before: []byte(content), DeleteProof: managedBlockDeleteProof(testBegin, testEnd),
+	}}}); err == nil {
+		t.Fatal("Apply deleted managed-block file with unrelated content")
+	}
+	assertFile(t, target, content, 0o600)
 }
 
 func TestApplyManagedBlockUninstallPreservesUnrelatedContentAndDeletesEmptyFile(t *testing.T) {
@@ -207,7 +337,7 @@ func TestApplyManagedBlockUninstallPreservesUnrelatedContentAndDeletesEmptyFile(
 	if err := os.WriteFile(onlyManaged, []byte(onlyBefore), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := Apply(Result{Changes: []Change{{Path: onlyManaged, Action: ActionDelete, Before: []byte(onlyBefore), After: []byte(onlyAfter)}}}); err != nil {
+	if err := Apply(Result{Changes: []Change{{Path: onlyManaged, Action: ActionDelete, Before: []byte(onlyBefore), After: []byte(onlyAfter), DeleteProof: managedBlockDeleteProof(testBegin, testEnd)}}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(onlyManaged); !errors.Is(err, fs.ErrNotExist) {
@@ -218,7 +348,7 @@ func TestApplyManagedBlockUninstallPreservesUnrelatedContentAndDeletesEmptyFile(
 func TestApplyDryRunPlanDoesNotWriteAndSummaryOmitsBodies(t *testing.T) {
 	home := t.TempDir()
 	target := filepath.Join(home, "config")
-	driver := &fakeDriver{name: "codex", detection: Detection{Installed: true}, changes: []Change{{
+	driver := &fakeDriver{name: "codex", detection: Detection{Present: true, Managed: true}, changes: []Change{{
 		Path: target, Action: ActionCreate, Mode: 0o600, Before: []byte("credential-before"), After: []byte("credential-after"),
 	}}}
 	result, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"codex"}, DryRun: true}, Bundle{Drivers: []Driver{driver}})
@@ -243,7 +373,7 @@ type fileStateDriver struct {
 func (d *fileStateDriver) Name() string { return d.name }
 
 func (d *fileStateDriver) Detect(context.Context, string) (Detection, error) {
-	return Detection{Installed: true}, nil
+	return Detection{Present: true, Managed: true}, nil
 }
 
 func (d *fileStateDriver) Plan(context.Context, DriverRequest) ([]Change, error) {
