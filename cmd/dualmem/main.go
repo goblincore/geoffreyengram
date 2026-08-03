@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/goblincore/geoffreyengram/dualmem"
+	"github.com/goblincore/geoffreyengram/dualmem/harness"
 	"gopkg.in/yaml.v3"
 )
 
@@ -130,38 +131,20 @@ func positionalArgs(args []string) []string {
 }
 
 func resolveNamespace(flagNS string, cfg CLIConfig) string {
-	if flagNS != "" {
-		return flagNS
-	}
-	if cfg.DefaultNamespace != "" {
-		return cfg.DefaultNamespace
-	}
-
-	// Auto-detect from git root, falling back to cwd basename.
-	// This prevents namespace fragmentation when running from
-	// subdirectories, worktrees, or the root directory.
 	cwd, _ := os.Getwd()
-
-	// Resolve via git common dir so worktrees share their main repo's
-	// namespace. `--show-toplevel` returns the worktree path itself
-	// (basename = worktree name), but `--git-common-dir` always points to
-	// the main repo's .git, whose parent dir is the main worktree — that's
-	// the project name we want regardless of which worktree we're in.
-	if out, err := exec.Command("git", "rev-parse", "--path-format=absolute", "--git-common-dir").Output(); err == nil {
-		commonDir := strings.TrimSpace(string(out))
-		if commonDir != "" {
-			mainRoot := filepath.Dir(commonDir)
-			if mainRoot != "" && mainRoot != "/" {
-				return "claude:" + filepath.Base(mainRoot)
-			}
-		}
+	event := harness.Event{CWD: cwd}
+	if flagNS != "" {
+		event.Project.Namespace = flagNS
+	} else if cfg.DefaultNamespace != "" {
+		event.Project.Namespace = cfg.DefaultNamespace
 	}
-
-	base := filepath.Base(cwd)
-	if base == "/" || base == "." {
+	opts := harness.DefaultResolveOptions()
+	opts.AllowDirectoryFallback = true
+	project, err := harness.ResolveProject(context.Background(), event, opts)
+	if err != nil || project.Namespace == "" {
 		return "claude:default"
 	}
-	return "claude:" + base
+	return project.Namespace
 }
 
 // parseFlagsInterspersed parses fs allowing flags to appear before OR after the
@@ -210,7 +193,7 @@ func newEngine(cfg CLIConfig) (*dualmem.Engine, error) {
 	var classifier dualmem.SectorClassifier
 	ec, err := dualmem.NewEmbeddingClassifier(context.Background(), embedder, sectors)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: EmbeddingClassifier init failed, falling back to LLM classifier: %v\n", err)
+		fmt.Fprintln(os.Stderr, "warning: EmbeddingClassifier unavailable; falling back to LLM classifier")
 		classifier = dualmem.NewGeminiClassifier(apiKey, sectors)
 	} else {
 		classifier = ec
@@ -265,6 +248,10 @@ func main() {
 	cmd := os.Args[1]
 
 	switch cmd {
+	case "event":
+		cmdEvent(cfg)
+	case "hook":
+		cmdHook(cfg)
 	case "add":
 		cmdAdd(cfg)
 	case "search":
@@ -346,6 +333,8 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, `dualmem — dual-path agent memory CLI
 
 Commands:
+  event       Handle a normalized harness lifecycle event from stdin
+  hook        Handle a native lifecycle hook (--adapter claude|codex)
   add         Add a memory
   search      Dual-path search
   context     Assemble token-budget-aware context (includes code map + diff)
@@ -3381,5 +3370,4 @@ func cmdConsultCompare(cfg CLIConfig, namespace, query string, budget int) {
 	fmt.Printf("Flash Lite: ~%d tokens, %.1fs | %s: ~%d tokens, %.1fs\n",
 		flashTokens, flashDur.Seconds(), synthModel, synthTokens, synthDur.Seconds())
 }
-
 
