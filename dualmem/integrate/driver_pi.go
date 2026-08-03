@@ -3,6 +3,7 @@ package integrate
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"path/filepath"
 )
 
@@ -58,6 +59,9 @@ func (driver piDriver) Plan(_ context.Context, request DriverRequest) ([]Change,
 					DeleteProof: ownedAssetDeleteProof(renderedPiExtension(false)),
 				}
 			default:
+				if piExtensionUsesSharedLauncher(current.bytes) {
+					return nil, fmt.Errorf("modified pi extension still depends on the shared DualMem launcher")
+				}
 				extension = unchangedFile(extensionPath, current)
 			}
 			changes = append(changes, extension)
@@ -73,4 +77,8 @@ func (driver piDriver) Plan(_ context.Context, request DriverRequest) ([]Change,
 		changes = append(changes, instructions)
 	}
 	return changes, nil
+}
+
+func piExtensionUsesSharedLauncher(raw []byte) bool {
+	return bytes.Contains(raw, []byte("dualmem-run")) || bytes.Contains(raw, []byte("DUALMEM_RUN"))
 }

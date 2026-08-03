@@ -221,6 +221,205 @@ func TestClaudeDriverRejectsAmbiguousLegacyShellWithoutWrites(t *testing.T) {
 	}
 }
 
+func TestClaudeDriverIgnoresCredentialShapedCommandsOutsideRecognizedHooks(t *testing.T) {
+	setPiPromptSupport(t, true)
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	installed, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"claude"}}, BuiltinBundle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(installed); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	document := readJSONMap(t, settingsPath)
+	document["future"] = map[string]any{
+		"command": recognizedLegacyCommand("claude", fixtureCredential),
+	}
+	writeJSONMap(t, settingsPath, document)
+	beforeSettings := readFile(t, settingsPath)
+	envPath := filepath.Join(home, ".config", "dualmem", "env")
+	beforeEnv := readFile(t, envPath)
+
+	result, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"claude"}}, BuiltinBundle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertUnchangedBytes(t, mustChange(t, result.Changes, settingsPath), beforeSettings)
+	assertUnchangedBytes(t, mustChange(t, result.Changes, envPath), beforeEnv)
+}
+
+func TestClaudeDriverIgnoresUnrelatedHookCommandContainingDualmemWord(t *testing.T) {
+	setPiPromptSupport(t, true)
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	installed, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"claude"}}, BuiltinBundle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(installed); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	document := readJSONMap(t, settingsPath)
+	hooks := document["hooks"].(map[string]any)
+	groups := hooks["SessionStart"].([]any)
+	unrelated := []any{
+		map[string]any{"hooks": []any{map[string]any{
+			"type": "command", "command": "export GEMINI_API_KEY='" + fixtureCredential + "' && printf dualmem", "timeout": float64(5),
+		}}},
+		map[string]any{"hooks": []any{map[string]any{
+			"type": "command", "command": recognizedLegacyCommand("codex", fixtureCredential), "timeout": float64(5),
+		}}},
+		map[string]any{"hooks": []any{map[string]any{
+			"type": "prompt", "command": recognizedLegacyCommand("claude", fixtureCredential), "timeout": float64(5),
+		}}},
+	}
+	hooks["SessionStart"] = append(unrelated, groups...)
+	writeJSONMap(t, settingsPath, document)
+	beforeSettings := readFile(t, settingsPath)
+	envPath := filepath.Join(home, ".config", "dualmem", "env")
+	beforeEnv := readFile(t, envPath)
+
+	result, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"claude"}}, BuiltinBundle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertUnchangedBytes(t, mustChange(t, result.Changes, settingsPath), beforeSettings)
+	assertUnchangedBytes(t, mustChange(t, result.Changes, envPath), beforeEnv)
+}
+
+func TestClaudeDriverRejectsCredentialConflictsBeforeProducingChanges(t *testing.T) {
+	setPiPromptSupport(t, true)
+	tests := []struct {
+		name       string
+		commands   []string
+		envContent string
+	}{
+		{
+			name: "within one command",
+			commands: []string{
+				"export GEMINI_API_KEY='fixture-value-one' && export GEMINI_API_KEY='fixture-value-two' && \"$HOME/go/bin/dualmem\" hook --adapter claude",
+			},
+		},
+		{
+			name: "across recognized hooks",
+			commands: []string{
+				recognizedLegacyCommand("claude", "fixture-value-one"),
+				recognizedLegacyCommand("claude", "fixture-value-two"),
+			},
+		},
+		{
+			name:       "against protected env",
+			commands:   []string{recognizedLegacyCommand("claude", "fixture-value-two")},
+			envContent: "GEMINI_API_KEY='fixture-value-one'\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			settingsPath := filepath.Join(home, ".claude", "settings.json")
+			writeLegacyHookCommands(t, settingsPath, test.commands, nil)
+			watched := map[string][]byte{settingsPath: readFile(t, settingsPath)}
+			if test.envContent != "" {
+				envPath := filepath.Join(home, ".config", "dualmem", "env")
+				if err := os.MkdirAll(filepath.Dir(envPath), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(envPath, []byte(test.envContent), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				watched[envPath] = readFile(t, envPath)
+			}
+
+			result, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"claude"}}, BuiltinBundle())
+			if err == nil {
+				t.Fatal("credential conflict was accepted")
+			}
+			if len(result.Changes) != 0 {
+				t.Fatalf("conflicting plan exposed %d changes", len(result.Changes))
+			}
+			for path, before := range watched {
+				if after := readFile(t, path); !slices.Equal(after, before) {
+					t.Fatalf("conflicting plan changed %s", path)
+				}
+			}
+		})
+	}
+}
+
+func TestClaudeDriverDeduplicatesIdenticalCredentialAssignments(t *testing.T) {
+	setPiPromptSupport(t, true)
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	command := "export GEMINI_API_KEY='" + fixtureCredential + "' && export GEMINI_API_KEY='" + fixtureCredential + "' && \"$HOME/go/bin/dualmem\" hook --adapter claude"
+	writeLegacyHookCommands(t, settingsPath, []string{command, recognizedLegacyCommand("claude", fixtureCredential)}, nil)
+	envPath := filepath.Join(home, ".config", "dualmem", "env")
+	if err := os.MkdirAll(filepath.Dir(envPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(envPath, []byte("GEMINI_API_KEY='"+fixtureCredential+"'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"claude"}}, BuiltinBundle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	envChange := mustChange(t, result.Changes, envPath)
+	if envChange.Action != ActionUnchanged || strings.Count(string(envChange.After), "GEMINI_API_KEY=") != 1 {
+		t.Fatalf("identical assignments were not deduplicated: action=%s", envChange.Action)
+	}
+}
+
+func TestClaudeDriverMigrationPreservesGroupMetadataWithEmptyHooks(t *testing.T) {
+	setPiPromptSupport(t, true)
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	writeLegacyHookCommands(t, settingsPath, []string{recognizedLegacyCommand("claude", fixtureCredential)}, map[string]any{
+		"description": "preserve group metadata",
+	})
+
+	result, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"claude"}}, BuiltinBundle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := mustChange(t, result.Changes, settingsPath)
+	var document map[string]any
+	if err := json.Unmarshal(settings.After, &document); err != nil {
+		t.Fatal(err)
+	}
+	groups := document["hooks"].(map[string]any)["SessionStart"].([]any)
+	found := false
+	for _, rawGroup := range groups {
+		group := rawGroup.(map[string]any)
+		if group["description"] != "preserve group metadata" {
+			continue
+		}
+		found = true
+		if hooks, ok := group["hooks"].([]any); !ok || len(hooks) != 0 {
+			t.Fatalf("metadata group hooks = %#v, want retained empty array", group["hooks"])
+		}
+	}
+	if !found {
+		t.Fatal("migration removed unrelated group metadata")
+	}
+}
+
 func TestCodexDriverTargetedUninstallKeepsCommonAssetsForManagedPi(t *testing.T) {
 	setPiPromptSupport(t, true)
 	home := populatedHarnessHome(t)
@@ -321,6 +520,96 @@ func TestCodexDriverUninstallRemovesExactManagedHookAndPreservesSibling(t *testi
 	}
 }
 
+func TestHarnessUninstallPreservesUnrelatedEmptyManagedEventArrays(t *testing.T) {
+	setPiPromptSupport(t, true)
+	tests := []struct {
+		name       string
+		harness    string
+		directory  string
+		configName string
+		event      string
+	}{
+		{name: "Claude", harness: "claude", directory: ".claude", configName: "settings.json", event: "PreToolUse"},
+		{name: "Codex", harness: "codex", directory: ".codex", configName: "hooks.json", event: "PostToolUse"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(home, test.directory), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			installed, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{test.harness}}, BuiltinBundle())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := Apply(installed); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(home, test.directory, test.configName)
+			document := readJSONMap(t, configPath)
+			hooks := document["hooks"].(map[string]any)
+			hooks[test.event] = []any{}
+			writeJSONMap(t, configPath, document)
+
+			uninstall, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{test.harness}, Uninstall: true}, BuiltinBundle())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := Apply(uninstall); err != nil {
+				t.Fatal(err)
+			}
+			after := readJSONMap(t, configPath)
+			afterHooks, ok := after["hooks"].(map[string]any)
+			if !ok {
+				t.Fatalf("uninstall removed hooks object while preserving empty %s array", test.event)
+			}
+			rawEvent, exists := afterHooks[test.event]
+			if !exists {
+				t.Fatalf("uninstall removed unrelated empty %s array", test.event)
+			}
+			if groups, ok := rawEvent.([]any); !ok || len(groups) != 0 {
+				t.Fatalf("%s = %#v, want empty array", test.event, rawEvent)
+			}
+		})
+	}
+}
+
+func TestPiDriverRefusesUninstallWhenModifiedExtensionStillUsesSharedLauncher(t *testing.T) {
+	setPiPromptSupport(t, true)
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".pi", "agent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	installed, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"pi"}}, BuiltinBundle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(installed); err != nil {
+		t.Fatal(err)
+	}
+	extensionPath := filepath.Join(home, ".pi", "agent", "extensions", "dualmem.ts")
+	launcherPath := filepath.Join(home, ".config", "dualmem", "bin", "dualmem-run")
+	modified := append(readFile(t, extensionPath), []byte("\n// retained local customization\n")...)
+	if err := os.WriteFile(extensionPath, modified, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	beforeLauncher := readFile(t, launcherPath)
+
+	result, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"pi"}, Uninstall: true}, BuiltinBundle())
+	if err == nil {
+		t.Fatal("unsafe pi uninstall was accepted")
+	}
+	if len(result.Changes) != 0 {
+		t.Fatalf("unsafe pi uninstall exposed %d partial changes", len(result.Changes))
+	}
+	if after := readFile(t, extensionPath); !slices.Equal(after, modified) {
+		t.Fatal("unsafe uninstall rewrote the modified pi extension")
+	}
+	if after := readFile(t, launcherPath); !slices.Equal(after, beforeLauncher) {
+		t.Fatal("unsafe uninstall removed or changed the shared launcher")
+	}
+}
+
 func TestPiDriverOmitsUnsupportedPromptHookAndCapability(t *testing.T) {
 	setPiPromptSupport(t, false)
 	home := t.TempDir()
@@ -407,6 +696,69 @@ func writeLegacyHookDocument(t *testing.T, path, command string) {
 	}
 	if err := os.WriteFile(path, append(encoded, '\n'), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func writeLegacyHookCommands(t *testing.T, path string, commands []string, groupMetadata map[string]any) {
+	t.Helper()
+	groups := make([]any, 0, len(commands))
+	for _, command := range commands {
+		group := map[string]any{
+			"hooks": []any{map[string]any{
+				"type": "command", "command": command, "timeout": float64(5),
+			}},
+		}
+		for key, value := range groupMetadata {
+			group[key] = value
+		}
+		groups = append(groups, group)
+	}
+	document := map[string]any{
+		"unrelated": "preserved",
+		"hooks": map[string]any{
+			"SessionStart": groups,
+		},
+	}
+	writeJSONMap(t, path, document)
+}
+
+func recognizedLegacyCommand(adapter, value string) string {
+	return "export GEMINI_API_KEY='" + value + "' && \"$HOME/go/bin/dualmem\" hook --adapter " + adapter
+}
+
+func readJSONMap(t *testing.T, path string) map[string]any {
+	t.Helper()
+	var document map[string]any
+	if err := json.Unmarshal(readFile(t, path), &document); err != nil {
+		t.Fatal(err)
+	}
+	return document
+}
+
+func writeJSONMap(t *testing.T, path string, document map[string]any) {
+	t.Helper()
+	raw, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readFile(t *testing.T, path string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func assertUnchangedBytes(t *testing.T, change Change, want []byte) {
+	t.Helper()
+	if change.Action != ActionUnchanged || !slices.Equal(change.Before, want) || !slices.Equal(change.After, want) {
+		t.Fatalf("change for %s = %s with changed bytes, want unchanged", change.Path, change.Action)
 	}
 }
 

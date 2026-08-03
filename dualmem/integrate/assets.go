@@ -95,6 +95,10 @@ func (builtinCommonPlanner) PlanCommon(_ context.Context, request CommonRequest)
 	if !envState.exists {
 		envBytes = []byte{}
 	}
+	credentials, err = deduplicateEnvCredentials(envBytes, credentials)
+	if err != nil {
+		return nil, err
+	}
 	envBytes = appendCredentialAssignments(envBytes, credentials)
 	envChange := changeForContent(envPath, envState, envBytes, 0o600)
 
@@ -227,11 +231,17 @@ func collectLegacyCredentials(home string, harnesses []string) (map[string]strin
 	credentials := make(map[string]string)
 	for _, harness := range harnesses {
 		var path string
+		var specs []hookSpec
+		var adapter string
 		switch harness {
 		case "claude":
 			path = filepath.Join(home, ".claude", "settings.json")
+			specs = claudeHookSpecs
+			adapter = "claude"
 		case "codex":
 			path = filepath.Join(home, ".codex", "hooks.json")
+			specs = codexHookSpecs
+			adapter = "codex"
 		default:
 			continue
 		}
@@ -242,12 +252,12 @@ func collectLegacyCredentials(home string, harnesses []string) (map[string]strin
 		if !state.exists {
 			continue
 		}
-		commands, err := JSONHookCommands(state.bytes)
+		commands, err := JSONHookCommands(state.bytes, hookEvents(specs)...)
 		if err != nil {
 			return nil, fmt.Errorf("inspect legacy %s hooks: %w", harness, err)
 		}
 		for _, command := range commands {
-			assignments, legacy, err := parseLegacyCredentialCommand(command)
+			assignments, legacy, err := parseLegacyCredentialCommand(command, adapter)
 			if err != nil {
 				return nil, fmt.Errorf("legacy credential migration for %s is ambiguous", harness)
 			}
@@ -265,42 +275,63 @@ func collectLegacyCredentials(home string, harnesses []string) (map[string]strin
 	return credentials, nil
 }
 
-func JSONHookCommands(raw []byte) ([]string, error) {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
+func hookEvents(specs []hookSpec) []string {
+	events := make([]string, 0, len(specs))
+	seen := make(map[string]bool, len(specs))
+	for _, spec := range specs {
+		if !seen[spec.event] {
+			events = append(events, spec.event)
+			seen[spec.event] = true
+		}
+	}
+	return events
+}
+
+func JSONHookCommands(raw []byte, events ...string) ([]string, error) {
+	var document struct {
+		Hooks map[string]json.RawMessage `json:"hooks"`
+	}
+	if err := json.Unmarshal(raw, &document); err != nil {
 		return nil, err
 	}
 	var commands []string
-	var visit func(any)
-	visit = func(value any) {
-		switch typed := value.(type) {
-		case map[string]any:
-			for key, child := range typed {
-				if key == "command" {
-					if command, ok := child.(string); ok {
-						commands = append(commands, command)
-					}
-					continue
-				}
-				visit(child)
+	for _, event := range events {
+		groups, err := decodeHookGroups(document.Hooks[event])
+		if err != nil {
+			return nil, fmt.Errorf("decode %s hooks: %w", event, err)
+		}
+		for _, rawGroup := range groups {
+			var group struct {
+				Hooks []json.RawMessage `json:"hooks"`
 			}
-		case []any:
-			for _, child := range typed {
-				visit(child)
+			if err := json.Unmarshal(rawGroup, &group); err != nil {
+				return nil, err
+			}
+			for _, rawHook := range group.Hooks {
+				var hook struct {
+					Type    string `json:"type"`
+					Command string `json:"command"`
+				}
+				if err := json.Unmarshal(rawHook, &hook); err != nil {
+					return nil, err
+				}
+				if hook.Type == "command" && hook.Command != "" {
+					commands = append(commands, hook.Command)
+				}
 			}
 		}
 	}
-	visit(value)
 	return commands, nil
 }
 
-func parseLegacyCredentialCommand(command string) (map[string]string, bool, error) {
+func parseLegacyCredentialCommand(command, expectedAdapter string) (map[string]string, bool, error) {
 	trimmed := strings.TrimSpace(command)
-	if !strings.Contains(strings.ToLower(trimmed), "dualmem") || !strings.Contains(trimmed, "export") {
+	invocationStart := lastShellCommandStart(trimmed)
+	if invocationStart <= 0 || !recognizedLegacyInvocation(strings.TrimSpace(trimmed[invocationStart:]), expectedAdapter) {
 		return nil, false, nil
 	}
+	trimmed = strings.TrimSpace(trimmed[:invocationStart])
+	trimmed = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(trimmed, "&&"), ";"))
 	if !strings.HasPrefix(trimmed, "export ") {
 		return nil, false, fmt.Errorf("ambiguous legacy shell prefix")
 	}
@@ -321,8 +352,14 @@ func parseLegacyCredentialCommand(command string) (map[string]string, bool, erro
 		if err != nil || value == "" {
 			return nil, false, fmt.Errorf("ambiguous credential value")
 		}
+		if prior, exists := assignments[name]; exists && prior != value {
+			return nil, false, fmt.Errorf("conflicting credential assignment")
+		}
 		assignments[name] = value
 		rest = strings.TrimSpace(tail)
+		if rest == "" {
+			return assignments, true, nil
+		}
 		switch {
 		case strings.HasPrefix(rest, "&&"):
 			rest = strings.TrimSpace(rest[2:])
@@ -334,12 +371,127 @@ func parseLegacyCredentialCommand(command string) (map[string]string, bool, erro
 		if strings.HasPrefix(rest, "export ") {
 			continue
 		}
-		if !strings.Contains(strings.ToLower(rest), "dualmem") {
-			return nil, false, fmt.Errorf("export is not attached to a DualMem command")
-		}
-		break
+		return nil, false, fmt.Errorf("unexpected command before DualMem invocation")
 	}
-	return assignments, true, nil
+}
+
+func lastShellCommandStart(command string) int {
+	start := 0
+	var quote byte
+	escaped := false
+	for i := 0; i < len(command); i++ {
+		current := command[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if current == '\\' && quote != '\'' {
+			escaped = true
+			continue
+		}
+		if quote != 0 {
+			if current == quote {
+				quote = 0
+			}
+			continue
+		}
+		if current == '\'' || current == '"' {
+			quote = current
+			continue
+		}
+		if current == ';' {
+			start = i + 1
+			continue
+		}
+		if current == '&' && i+1 < len(command) && command[i+1] == '&' {
+			start = i + 2
+			i++
+		}
+	}
+	return start
+}
+
+func recognizedLegacyInvocation(command, adapter string) bool {
+	if strings.ContainsAny(command, "`;|&<>") || strings.Contains(command, "$(") {
+		return false
+	}
+	fields := strings.Fields(command)
+	if len(fields) != 4 && len(fields) != 3 {
+		return false
+	}
+	executable, ok := staticExecutable(fields[0])
+	if !ok {
+		return false
+	}
+	if strings.Contains(executable, "$") && !strings.HasPrefix(executable, "$HOME/") && !strings.HasPrefix(executable, "${HOME}/") {
+		return false
+	}
+	base := executable
+	if slash := strings.LastIndexByte(base, '/'); slash >= 0 {
+		base = base[slash+1:]
+	}
+	if base != "dualmem" && base != "dualmem-run" || fields[1] != "hook" {
+		return false
+	}
+	if len(fields) == 4 {
+		return fields[2] == "--adapter" && fields[3] == adapter
+	}
+	return fields[2] == "--adapter="+adapter
+}
+
+func staticExecutable(field string) (string, bool) {
+	if field == "" {
+		return "", false
+	}
+	if field[0] == '\'' || field[0] == '"' {
+		if len(field) < 2 || field[len(field)-1] != field[0] {
+			return "", false
+		}
+		field = field[1 : len(field)-1]
+	}
+	return field, !strings.ContainsAny(field, "\"'`")
+}
+
+func deduplicateEnvCredentials(raw []byte, credentials map[string]string) (map[string]string, error) {
+	pending := make(map[string]string, len(credentials))
+	for name, value := range credentials {
+		pending[name] = value
+	}
+	if len(pending) == 0 {
+		return pending, nil
+	}
+	existing := make(map[string]string)
+	for _, rawLine := range strings.Split(string(raw), "\n") {
+		line := strings.TrimSpace(rawLine)
+		if strings.HasPrefix(line, "export ") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		}
+		equals := strings.IndexByte(line, '=')
+		if equals <= 0 {
+			continue
+		}
+		name := strings.TrimSpace(line[:equals])
+		if _, migrating := pending[name]; !migrating {
+			continue
+		}
+		value, tail, err := parseStaticShellValue(strings.TrimSpace(line[equals+1:]))
+		if err != nil || strings.TrimSpace(tail) != "" {
+			return nil, fmt.Errorf("protected env has ambiguous assignment for %s", name)
+		}
+		if prior, exists := existing[name]; exists && prior != value {
+			return nil, fmt.Errorf("protected env has conflicting assignment for %s", name)
+		}
+		existing[name] = value
+	}
+	for name, value := range pending {
+		if prior, exists := existing[name]; exists {
+			if prior != value {
+				return nil, fmt.Errorf("legacy credential migration conflicts with protected env assignment for %s", name)
+			}
+			delete(pending, name)
+		}
+	}
+	return pending, nil
 }
 
 func parseStaticShellValue(input string) (string, string, error) {

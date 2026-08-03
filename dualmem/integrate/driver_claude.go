@@ -128,6 +128,7 @@ func mergeHookDocument(raw []byte, specs []hookSpec, uninstall bool) ([]byte, bo
 	}
 	changed := false
 	for _, spec := range specs {
+		eventChanged := false
 		groups, err := decodeHookGroups(hooks[spec.event])
 		if err != nil {
 			return nil, false, fmt.Errorf("decode %s hooks: %w", spec.event, err)
@@ -141,15 +142,17 @@ func mergeHookDocument(raw []byte, specs []hookSpec, uninstall bool) ([]byte, bo
 			}
 			if strippedManaged {
 				changed = true
+				eventChanged = true
 			}
 			if !uninstall && keep {
-				legacyStripped, legacyKeep, strippedLegacy, err := stripLegacyCredentialHooks(stripped)
+				legacyStripped, legacyKeep, strippedLegacy, err := stripLegacyCredentialHooks(stripped, spec.adapter)
 				if err != nil {
 					return nil, false, err
 				}
 				stripped, keep = legacyStripped, legacyKeep
 				if strippedLegacy {
 					changed = true
+					eventChanged = true
 				}
 				if keep {
 					filtered = append(filtered, stripped)
@@ -161,11 +164,14 @@ func mergeHookDocument(raw []byte, specs []hookSpec, uninstall bool) ([]byte, bo
 			}
 		}
 		if uninstall {
+			if !eventChanged {
+				continue
+			}
 			if len(filtered) == 0 {
 				if _, exists := hooks[spec.event]; exists {
 					delete(hooks, spec.event)
 				}
-			} else if changed {
+			} else {
 				hooks[spec.event] = mustMarshalRaw(filtered)
 			}
 			continue
@@ -321,7 +327,7 @@ func groupHasOnlyHookFields(object map[string]json.RawMessage) bool {
 	return true
 }
 
-func stripLegacyCredentialHooks(group json.RawMessage) (json.RawMessage, bool, bool, error) {
+func stripLegacyCredentialHooks(group json.RawMessage, adapter string) (json.RawMessage, bool, bool, error) {
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(group, &object); err != nil {
 		return nil, false, false, err
@@ -338,12 +344,17 @@ func stripLegacyCredentialHooks(group json.RawMessage) (json.RawMessage, bool, b
 	stripped := false
 	for _, rawHook := range hooks {
 		var hook struct {
+			Type    string `json:"type"`
 			Command string `json:"command"`
 		}
 		if err := json.Unmarshal(rawHook, &hook); err != nil {
 			return nil, false, false, err
 		}
-		_, legacy, err := parseLegacyCredentialCommand(hook.Command)
+		if hook.Type != "command" {
+			filtered = append(filtered, rawHook)
+			continue
+		}
+		_, legacy, err := parseLegacyCredentialCommand(hook.Command, adapter)
 		if err != nil {
 			return nil, false, false, fmt.Errorf("legacy credential hook is ambiguous")
 		}
@@ -356,7 +367,7 @@ func stripLegacyCredentialHooks(group json.RawMessage) (json.RawMessage, bool, b
 	if !stripped {
 		return group, true, false, nil
 	}
-	if len(filtered) == 0 {
+	if len(filtered) == 0 && groupHasOnlyHookFields(object) {
 		return nil, false, true, nil
 	}
 	object["hooks"] = mustMarshalRaw(filtered)
