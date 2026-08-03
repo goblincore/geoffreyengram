@@ -107,6 +107,63 @@ func TestRunHookEncodesClaudeAndCodexResponsesForTheirNativeEvents(t *testing.T)
 	}
 }
 
+func TestLifecycleOutputsBoundEscapeHeavyContextAsValidJSON(t *testing.T) {
+	const maxPayloadBytes = 24 * 1024
+	escapeHeavyContext := strings.Repeat("\\\"\n\t", 16*1024)
+	runtime := lifecycleRuntime(lifecycleMemory{contextText: escapeHeavyContext})
+	registry := harness.BuiltinAdapters()
+
+	tests := []struct {
+		name string
+		run  func(*bytes.Buffer, *bytes.Buffer) int
+	}{
+		{
+			name: "neutral event",
+			run: func(out, errOut *bytes.Buffer) int {
+				input := `{"schema_version":"1.0","kind":"prompt","harness":"future","cwd":"/repo","prompt":"inspect encoding"}`
+				return runEvent(context.Background(), runtime, strings.NewReader(input), out, errOut)
+			},
+		},
+		{
+			name: "Claude native hook",
+			run: func(out, errOut *bytes.Buffer) int {
+				input := `{"session_id":"claude-1","cwd":"/repo","hook_event_name":"UserPromptSubmit","prompt":"inspect encoding"}`
+				return runHook(context.Background(), runtime, registry, "claude", strings.NewReader(input), out, errOut)
+			},
+		},
+		{
+			name: "Codex native hook",
+			run: func(out, errOut *bytes.Buffer) int {
+				input := `{"session_id":"codex-1","cwd":"/repo","hook_event_name":"UserPromptSubmit","prompt":"inspect encoding"}`
+				return runHook(context.Background(), runtime, registry, "codex", strings.NewReader(input), out, errOut)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			if status := tt.run(&out, &errOut); status != 0 {
+				t.Fatalf("runner status = %d, want 0; stderr=%q", status, errOut.String())
+			}
+			if out.Len() > maxPayloadBytes {
+				t.Fatalf("encoded payload = %d bytes, want <= %d", out.Len(), maxPayloadBytes)
+			}
+			if !json.Valid(out.Bytes()) {
+				t.Fatalf("encoded payload is invalid JSON: %q", out.String())
+			}
+
+			var encoded map[string]any
+			if err := json.Unmarshal(out.Bytes(), &encoded); err != nil {
+				t.Fatal(err)
+			}
+			if len(encoded) == 0 {
+				t.Fatal("bounded payload dropped all native/neutral response fields")
+			}
+		})
+	}
+}
+
 func TestRunHookRejectsUnknownAdapter(t *testing.T) {
 	var out, errOut bytes.Buffer
 

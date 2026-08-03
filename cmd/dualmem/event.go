@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -13,7 +14,10 @@ import (
 	"github.com/goblincore/geoffreyengram/dualmem/harness"
 )
 
-const lifecycleInputLimit int64 = 64 << 10
+const (
+	lifecycleInputLimit  int64 = 64 << 10
+	lifecycleOutputLimit       = 24 << 10
+)
 
 func cmdEvent(cfg CLIConfig) {
 	if len(os.Args) != 2 {
@@ -72,12 +76,12 @@ func runEvent(ctx context.Context, runtime *harness.Runtime, in io.Reader, out, 
 	event, err := harness.DecodeEvent(in, lifecycleInputLimit)
 	if err != nil {
 		writeLifecycleDiagnostic(errOut, "input")
-		writeNeutralResponse(out, lifecycleFailureResponse())
+		writeNeutralResponse(out, errOut, lifecycleFailureResponse())
 		return 0
 	}
 	if runtime == nil {
 		writeLifecycleDiagnostic(errOut, "runtime")
-		writeNeutralResponse(out, lifecycleFailureResponse())
+		writeNeutralResponse(out, errOut, lifecycleFailureResponse())
 		return 0
 	}
 
@@ -85,7 +89,7 @@ func runEvent(ctx context.Context, runtime *harness.Runtime, in io.Reader, out, 
 	if len(response.Diagnostics) > 0 {
 		writeLifecycleDiagnostic(errOut, "processing")
 	}
-	writeNeutralResponse(out, response)
+	writeNeutralResponse(out, errOut, response)
 	return 0
 }
 
@@ -140,17 +144,66 @@ func readLifecycleInput(in io.Reader) ([]byte, error) {
 	return raw, nil
 }
 
-func writeNeutralResponse(out io.Writer, response harness.Response) {
-	_ = harness.EncodeResponse(out, response)
+func writeNeutralResponse(out, errOut io.Writer, response harness.Response) {
+	payload, err := boundedEncodedResponse(response, func(candidate harness.Response) ([]byte, error) {
+		return json.Marshal(candidate)
+	})
+	if err != nil {
+		writeLifecycleDiagnostic(errOut, "output")
+		payload = []byte("{}\n")
+	}
+	_, _ = out.Write(payload)
 }
 
 func writeNativeResponse(adapter harness.Adapter, event harness.Event, response harness.Response, out, errOut io.Writer) {
-	encoded, err := adapter.Encode(event, response)
+	payload, err := boundedEncodedResponse(response, func(candidate harness.Response) ([]byte, error) {
+		return adapter.Encode(event, candidate)
+	})
 	if err != nil {
 		writeLifecycleDiagnostic(errOut, "output")
-		encoded = []byte("{}")
+		payload = []byte("{}\n")
 	}
-	_, _ = out.Write(append(encoded, '\n'))
+	_, _ = out.Write(payload)
+}
+
+func boundedEncodedResponse(response harness.Response, encode func(harness.Response) ([]byte, error)) ([]byte, error) {
+	encoded, err := encode(response)
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded)+1 <= lifecycleOutputLimit {
+		return withTrailingNewline(encoded), nil
+	}
+
+	contextRunes := []rune(response.Context)
+	low, high := 0, len(contextRunes)
+	var best []byte
+	for low <= high {
+		mid := low + (high-low)/2
+		candidate := response
+		candidate.Context = string(contextRunes[:mid])
+		encoded, err = encode(candidate)
+		if err != nil {
+			return nil, err
+		}
+		if len(encoded)+1 <= lifecycleOutputLimit {
+			best = append(best[:0], encoded...)
+			low = mid + 1
+		} else {
+			high = mid - 1
+		}
+	}
+	if best == nil {
+		return nil, fmt.Errorf("encoded lifecycle response exceeds limit")
+	}
+	return withTrailingNewline(best), nil
+}
+
+func withTrailingNewline(encoded []byte) []byte {
+	payload := make([]byte, len(encoded)+1)
+	copy(payload, encoded)
+	payload[len(encoded)] = '\n'
+	return payload
 }
 
 func lifecycleFailureResponse() harness.Response {
