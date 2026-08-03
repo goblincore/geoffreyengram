@@ -140,6 +140,51 @@ func TestIntegrateRejectsInvalidArgumentsBeforeWrites(t *testing.T) {
 	}
 }
 
+func TestDocumentedIntegrateCommands(t *testing.T) {
+	documented := [][]string{
+		{"integrate", "--harness", "all", "--dry-run", "--home", "/tmp/home"},
+		{"integrate", "--harness", "pi", "--home", "/tmp/home"},
+		{"integrate", "doctor", "--home", "/tmp/home", "--project", "/tmp/repo", "--json"},
+		{"integrate", "--harness", "codex", "--uninstall", "--dry-run", "--home", "/tmp/home"},
+	}
+
+	for _, command := range documented {
+		command := append([]string(nil), command...)
+		home := t.TempDir()
+		project, err := filepath.Abs(filepath.Join("..", ".."))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, arg := range command {
+			switch arg {
+			case "/tmp/home":
+				command[i] = home
+			case "/tmp/repo":
+				command[i] = project
+			}
+		}
+		var out, errOut bytes.Buffer
+		if status := runIntegrate(command[1:], &out, &errOut); status != 0 {
+			t.Fatalf("documented command %q status = %d; stderr=%q", command, status, errOut.String())
+		}
+	}
+
+	readme, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, claim := range []string{
+		"Claude Code, Codex, and pi",
+		"dualmem integrate --harness all",
+		"DualMem Event v1",
+		"Deprecated:",
+	} {
+		if !strings.Contains(string(readme), claim) {
+			t.Errorf("README missing documented integration claim %q", claim)
+		}
+	}
+}
+
 func assertIntegrateMode(t *testing.T, path string, want fs.FileMode) {
 	t.Helper()
 	info, err := os.Stat(path)

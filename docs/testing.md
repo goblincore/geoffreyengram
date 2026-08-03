@@ -1,42 +1,53 @@
-# Test Suite
+# Testing
+
+The default suite is offline and uses fixtures or deterministic test doubles. It must not require a provider key or modify a real home directory.
 
 ```bash
+# Default repository suite
 go test ./...
-go test -tags legacy .
-DUALMEM_LIVE_TESTS=1 go test ./dualmem -run TestBenchLive -v
 
-go test ./dualmem/ -v                      # all unit + integration tests
-go test ./dualmem/ -run TestBench -v       # context assembly benchmarks (mock embeddings)
-go test ./dualmem/ -run TestSearchBenchmark # HDC+BM25 code search accuracy
-go test ./dualmem/ -run TestSQLite -v      # SQLite persistence regression tests
-go test ./cmd/dualmem/ -run TestTilde -v   # config tilde expansion tests
+# Harness protocol, installer, and documented command contract
+go test ./dualmem/harness ./dualmem/integrate ./cmd/dualmem
+go test ./cmd/dualmem -run TestDocumentedIntegrateCommands -v
+
+# Focused engine and benchmark-style fixture tests
+go test ./dualmem -v
+go test ./dualmem -run TestBench -v
+go test ./dualmem -run TestSearchBenchmark -v
 ```
+
+## Legacy compatibility tier
+
+The legacy tier exercises the retained root `engram` compatibility surface. It is separate from the default DualMem suite because new work must target `dualmem`.
+
+```bash
+go test -tags legacy .
+```
+
+## Live-provider tier
+
+Live tests are opt-in and require configured provider credentials. They may make network requests and therefore must never be part of an unreviewed default run.
+
+```bash
+DUALMEM_LIVE_TESTS=1 go test ./dualmem -run TestBenchLive -v
+```
+
+`dualmem integrate doctor` is not a live test: it reads local integration state only and does not construct a provider client or contact the network. For installer changes, use a disposable home path and verify both planning and output:
+
+```bash
+mkdir -p /tmp/dualmem-test-home
+dualmem integrate --harness all --dry-run --home /tmp/dualmem-test-home
+dualmem integrate doctor --home /tmp/dualmem-test-home --project "$PWD" --json
+```
+
+The second command can return exit status `1` when it correctly reports missing integration or drift; `2` indicates an argument or inspection error.
 
 ## Test categories
 
-| Category | Files | What it covers |
-|----------|-------|----------------|
-| **Core engine** | `dualmem_test.go` | Add, search, context assembly, dual-path routing |
-| **Benchmarks** | `bench_test.go`, `bench_scenarios.go` | Precision, recall, NDCG, token utilization across 20+ queries |
-| **Code search** | `search_bench_test.go` | HDC vs Hybrid vs Grep accuracy on 8 natural language queries |
-| **Codemap** | `codemap_test.go` | Tree-sitter parsing, module extraction, budget-aware rendering |
-| **Co-change** | `cochange_test.go` | File relationship graph, decay, path normalization |
-| **Embedding** | `classify_embedding_test.go` | Sector classification from embedding vectors |
-| **Structural** | `structural_graph_test.go` | Call/import/containment edges from tree-sitter AST |
-| **Clustering** | `cluster_test.go` | Import graph construction, community detection |
-| **SQLite** | `store_sqlite_regression_test.go` | Persistence across close/reopen, PRAGMA handling |
-| **Config** | `cmd/dualmem/config_test.go` | Tilde expansion, absolute path passthrough |
-| **vs claude-mem** | `benchmarks/` | Head-to-head comparison scripts (Python) |
-
-## vs claude-mem benchmarks
-
-```bash
-# Seed both systems with shared corpus and run all benchmarks
-python3 benchmarks/seed_and_bench.py all
-
-# LLM-as-judge quality comparison (requires API key)
-python3 benchmarks/judge_quality.py --judge glm      # GLM 5.1 (ZAI_API_KEY)
-python3 benchmarks/judge_quality.py --judge opus     # Claude Opus (ANTHROPIC_API_KEY)
-python3 benchmarks/judge_quality.py --judge sonnet   # Claude Sonnet (ANTHROPIC_API_KEY)
-python3 benchmarks/judge_quality.py --judge gemini   # Gemini Flash (GEMINI_API_KEY)
-```
+| Category | Primary package | Coverage |
+| --- | --- | --- |
+| Engine | `./dualmem` | memory storage, ranking, facts, code maps, and offline fixtures |
+| Harness protocol | `./dualmem/harness` | project identity, event normalization, native adapters, runtime behavior |
+| Integration safety | `./dualmem/integrate` | ownership, no-clobber writes, backups, migrations, and diagnostics |
+| CLI | `./cmd/dualmem` | argument parsing, lifecycle fail-open behavior, and documented command examples |
+| Legacy | root package with `legacy` tag | deprecated `engram` compatibility only |

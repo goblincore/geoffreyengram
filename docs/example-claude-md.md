@@ -1,11 +1,18 @@
 # Example CLAUDE.md — DualMem Integration
 
-Copy the section below into your `~/.claude/CLAUDE.md` (global) or `.claude/CLAUDE.md` (per-project) to give Claude Code cross-session memory via DualMem.
+Prefer the managed installer for Claude Code hooks and the global instruction block:
 
-**Prerequisites**: Install the CLI and set your API key:
+```bash
+dualmem integrate --harness claude --dry-run
+dualmem integrate --harness claude
+```
+
+It writes only marked DualMem content to `~/.claude/CLAUDE.md`, preserves unrelated instructions, and keeps credentials in `~/.config/dualmem/env` rather than in hook configuration. The section below is reference material for a project-local CLAUDE.md, not a replacement for the installer’s hooks.
+
+**Prerequisites**: Install the CLI and configure provider credentials in the protected shared environment file (do not paste a key into CLAUDE.md):
 ```bash
 go install github.com/goblincore/geoffreyengram/cmd/dualmem@latest
-export GEMINI_API_KEY=your-key  # add to ~/.zshrc or equivalent
+dualmem integrate --harness claude --dry-run
 ```
 
 > **Important**: Use the full path `~/go/bin/dualmem` in CLAUDE.md — Claude Code's GUI does not inherit your shell PATH.
@@ -73,7 +80,7 @@ For simple notes, `--type continuity` still works:
 ### Type priority
 Warnings and decisions are surfaced first in context assembly. When you load context at session start, pay special attention to Warning entries — these flag code that should NOT be changed.
 
-**Namespace**: Auto-detected from cwd (directory name → `claude:<dirname>`). Override with `--ns "claude:<project>"` if needed.
+**Namespace**: Let the shared runtime resolve project identity. Git common-directory resolution gives a repository and linked worktrees the same hidden compatibility key (`claude:<project>`), including when Codex or pi writes the memory. Use `--ns` only when you intentionally need an explicit override.
 
 ### When to search explicitly
 Before grepping/globbing for files related to a feature, search memory first — a previous session may have already mapped the relevant files:
