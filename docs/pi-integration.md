@@ -39,4 +39,4 @@ dualmem integrate --harness pi --uninstall --dry-run
 dualmem integrate --harness pi --uninstall
 ```
 
-If you edited `dualmem.ts` and it still refers to the shared launcher, uninstall refuses to remove the launcher. Remove or update that dependency intentionally, then rerun the plan.
+If you target pi itself and a modified `dualmem.ts` still refers to the shared launcher, uninstall refuses the plan. During a targeted Claude or Codex uninstall, a retained noncanonical pi extension that mentions `dualmem-run` or `DUALMEM_RUN` keeps both the shared launcher and environment file even when pi's managed instruction block is missing. Remove or update that dependency intentionally before expecting common assets to be removed.

@@ -453,6 +453,69 @@ func TestCodexDriverTargetedUninstallKeepsCommonAssetsForManagedPi(t *testing.T)
 	}
 }
 
+func TestTargetedUninstallRetainsCommonAssetsForModifiedPiLauncherDependency(t *testing.T) {
+	setPiPromptSupport(t, true)
+	for _, test := range []struct {
+		name       string
+		harness    string
+		dependency string
+	}{
+		{name: "Codex with launcher path", harness: "codex", dependency: `const command = "dualmem-run";`},
+		{name: "Claude with launcher override", harness: "claude", dependency: `const command = process.env.DUALMEM_RUN;`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			installed, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{test.harness}}, BuiltinBundle())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := Apply(installed); err != nil {
+				t.Fatal(err)
+			}
+
+			extensionPath := filepath.Join(home, ".pi", "agent", "extensions", "dualmem.ts")
+			if err := os.MkdirAll(filepath.Dir(extensionPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			modified := []byte("// retained local pi integration\n" + test.dependency + "\n")
+			if err := os.WriteFile(extensionPath, modified, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			piDetection := detectionByName(t, mustPlan(t, home, test.harness).Detections, "pi")
+			if piDetection.Managed {
+				t.Fatal("noncanonical pi extension without managed instructions was detected as managed")
+			}
+
+			envPath := filepath.Join(home, ".config", "dualmem", "env")
+			launcherPath := filepath.Join(home, ".config", "dualmem", "bin", "dualmem-run")
+			beforeEnv := readFile(t, envPath)
+			beforeLauncher := readFile(t, launcherPath)
+
+			uninstall, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{test.harness}, Uninstall: true}, BuiltinBundle())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range []string{envPath, launcherPath} {
+				if got := mustChange(t, uninstall.Changes, path).Action; got != ActionUnchanged {
+					t.Fatalf("targeted uninstall planned %s for pi dependency %s", got, path)
+				}
+			}
+			if err := Apply(uninstall); err != nil {
+				t.Fatal(err)
+			}
+			if after := readFile(t, envPath); !slices.Equal(after, beforeEnv) {
+				t.Fatal("targeted uninstall changed the shared env needed by retained pi")
+			}
+			if after := readFile(t, launcherPath); !slices.Equal(after, beforeLauncher) {
+				t.Fatal("targeted uninstall changed the shared launcher needed by retained pi")
+			}
+			if after := readFile(t, extensionPath); !slices.Equal(after, modified) {
+				t.Fatal("targeted uninstall changed the retained pi extension")
+			}
+		})
+	}
+}
+
 func TestCodexDriverUninstallRemovesExactManagedHookAndPreservesSibling(t *testing.T) {
 	setPiPromptSupport(t, true)
 	home := t.TempDir()

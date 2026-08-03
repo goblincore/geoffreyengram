@@ -58,7 +58,9 @@ Input is limited to 64 KiB. Metadata is limited to 32 entries and each value to 
 
 Version 1 accepts any `1.x` major version. Unknown JSON fields and unknown event kinds are accepted for forward compatibility; the current runtime returns `none` for an event kind it does not implement. A new incompatible protocol requires a new major version.
 
-Lifecycle execution is fail-open. Invalid input, unavailable memory, or output encoding trouble produces a valid no-action fallback (with redacted diagnostics) and exits successfully so the calling harness is not blocked. Native Claude and Codex adapters emit their native empty response when no context can be supplied. Command-line argument errors are different: they exit with status `2`.
+Lifecycle execution is fail-open. Invalid input or unavailable memory normally produces a versioned no-action response with redacted diagnostics and exits successfully so the calling harness is not blocked. Native Claude and Codex adapters emit their native empty response when no context can be supplied.
+
+If the normal response itself cannot be encoded within the output bound, the emergency fallback is the bare JSON object `{}` plus a redacted diagnostic on standard error; it is not a normal response envelope. Command-line argument errors are different: they exit with status `2`.
 
 ## Shell-free invocation
 

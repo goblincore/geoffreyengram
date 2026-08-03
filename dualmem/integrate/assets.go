@@ -58,6 +58,13 @@ func (builtinCommonPlanner) PlanCommon(_ context.Context, request CommonRequest)
 	launcherPath := filepath.Join(request.Home, ".config", "dualmem", "bin", "dualmem-run")
 
 	if request.Uninstall && len(request.RemainingHarnesses) == 0 {
+		retainedPiDependency, err := retainedPiUsesSharedLauncher(request.Home)
+		if err != nil {
+			return nil, err
+		}
+		if retainedPiDependency {
+			return planRetainedCommonAssets(envPath, launcherPath)
+		}
 		var changes []Change
 		envChange, ok, err := planEmptyOwnedRemoval(envPath)
 		if err != nil {
@@ -108,6 +115,31 @@ func (builtinCommonPlanner) PlanCommon(_ context.Context, request CommonRequest)
 	}
 	launcherChange := changeForContent(launcherPath, launcherState, launcherAsset, 0o700)
 	return []Change{envChange, launcherChange}, nil
+}
+
+func retainedPiUsesSharedLauncher(home string) (bool, error) {
+	extension, err := readFileState(filepath.Join(home, ".pi", "agent", "extensions", "dualmem.ts"))
+	if err != nil || !extension.exists {
+		return false, err
+	}
+	if bytes.Equal(extension.bytes, renderedPiExtension(true)) || bytes.Equal(extension.bytes, renderedPiExtension(false)) {
+		return false, nil
+	}
+	return piExtensionUsesSharedLauncher(extension.bytes), nil
+}
+
+func planRetainedCommonAssets(paths ...string) ([]Change, error) {
+	changes := make([]Change, 0, len(paths))
+	for _, path := range paths {
+		current, err := readFileState(path)
+		if err != nil {
+			return nil, err
+		}
+		if current.exists {
+			changes = append(changes, unchangedFile(path, current))
+		}
+	}
+	return changes, nil
 }
 
 func readFileState(path string) (fileState, error) {

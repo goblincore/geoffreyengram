@@ -13,7 +13,13 @@ dualmem archive-v1
 dualmem migrate-v2
 ```
 
-`archive-v1` writes a JSON archive of the v1 store; `migrate-v2` curates supported v1 detail memories and knowledge documents into durable facts. Review the output before removing any older tooling.
+`archive-v1` writes a JSON archive of the v1 store. The first `migrate-v2` invocation is a dry run: it curates supported v1 detail memories and knowledge documents and prints the proposed durable facts. Review that preview, then commit the reviewed migration explicitly:
+
+```bash
+dualmem migrate-v2 --commit
+```
+
+Do not treat the dry run as a completed migration or remove older tooling before the committed run succeeds.
 
 ## 2. Plan the harness migration
 

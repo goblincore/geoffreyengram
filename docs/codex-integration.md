@@ -20,10 +20,10 @@ It uses `~/.config/dualmem/bin/dualmem-run` so credentials stay in `~/.config/du
 | Codex signal | DualMem behavior |
 | --- | --- |
 | Session start | Injects project and shared-infrastructure context when available. |
-| User prompt | Injects task-relevant context; trivial and duplicate prompts are suppressed. |
+| User prompt | Injects task-relevant context; trivial acknowledgements are suppressed. |
 | `apply_patch` completion | Records changed paths parsed from the patch. |
 
-Codex does not currently provide a general file-read lifecycle integration here, and edits outside `apply_patch` are not observed by the installed adapter. Codex transcript distillation is Phase 2; this integration does not read or distill Codex conversation transcripts.
+Each Codex hook launches a separate DualMem process, so the runtime's in-memory duplicate-prompt cache does not persist across hook invocations. Do not rely on duplicate suppression in the installed integration. Codex also does not currently provide a general file-read lifecycle integration here, and edits outside `apply_patch` are not observed by the installed adapter. Codex transcript distillation is Phase 2; this integration does not read or distill Codex conversation transcripts.
 
 ## Restart and trust
 

@@ -39,7 +39,7 @@ dualmem integrate --harness codex --uninstall --dry-run
 dualmem integrate --harness codex --uninstall
 ```
 
-The shared launcher remains while another managed harness needs it. If a pi extension was modified but still references that launcher, uninstall stops rather than leaving a broken extension.
+The shared launcher remains while another managed harness needs it. A targeted pi uninstall stops if a modified extension still references that launcher. When removing Claude or Codex, the planner retains both shared assets if a noncanonical pi extension still names `dualmem-run` or `DUALMEM_RUN`, even if pi's managed instruction block is gone.
 
 ### Credentials and rotation
 
