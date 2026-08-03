@@ -54,8 +54,8 @@ func (s *sectorPassthrough) Classify(content string) string { return "decision" 
 
 // idTagMap maps detail memory IDs to benchmark tags.
 type idTagMap struct {
-	idToTag  map[string]string // detail ID → tag
-	tagToID  map[string]string // tag → detail ID
+	idToTag   map[string]string // detail ID → tag
+	tagToID   map[string]string // tag → detail ID
 	tagToText map[string]string // tag → original text
 }
 
