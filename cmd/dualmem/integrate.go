@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -20,6 +21,9 @@ func cmdIntegrate() {
 }
 
 func runIntegrate(args []string, out, errOut io.Writer) int {
+	if len(args) > 0 && args[0] == "doctor" {
+		return runIntegrateDoctor(args[1:], out, errOut)
+	}
 	defaultHome, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintln(errOut, "dualmem integrate: home directory unavailable")
@@ -61,6 +65,70 @@ func runIntegrate(args []string, out, errOut io.Writer) int {
 			integrateChangeOwner(*home, change.Path), change.Path, change.Action, change.Mode.Perm(), change.BackupPath)
 	}
 	return 0
+}
+
+func runIntegrateDoctor(args []string, out, errOut io.Writer) int {
+	defaultHome, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintln(errOut, "dualmem integrate doctor: home directory unavailable")
+		return 2
+	}
+	defaultProject, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintln(errOut, "dualmem integrate doctor: project directory unavailable")
+		return 2
+	}
+	fs := flag.NewFlagSet("integrate doctor", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	home := fs.String("home", defaultHome, "home directory to inspect")
+	project := fs.String("project", defaultProject, "project directory to resolve")
+	jsonOutput := fs.Bool("json", false, "write findings as JSON")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 || strings.TrimSpace(*home) == "" || strings.TrimSpace(*project) == "" {
+		fmt.Fprintln(errOut, "dualmem integrate doctor: invalid arguments")
+		return 2
+	}
+	findings, err := harnessintegrate.Doctor(context.Background(), harnessintegrate.DoctorOptions{
+		Home: *home, ProjectDir: *project,
+	}, harnessintegrate.BuiltinBundle())
+	if err != nil {
+		fmt.Fprintf(errOut, "dualmem integrate doctor: inspection failed: %v\n", err)
+		return 2
+	}
+	if *jsonOutput {
+		if err := json.NewEncoder(out).Encode(findings); err != nil {
+			fmt.Fprintf(errOut, "dualmem integrate doctor: encode findings: %v\n", err)
+			return 2
+		}
+	} else {
+		writeDoctorFindings(out, findings)
+	}
+	for _, finding := range findings {
+		if finding.Severity == harnessintegrate.SeverityWarning || finding.Severity == harnessintegrate.SeverityError {
+			return 1
+		}
+	}
+	return 0
+}
+
+func writeDoctorFindings(out io.Writer, findings []harnessintegrate.Finding) {
+	group := ""
+	for _, finding := range findings {
+		owner := finding.Harness
+		if owner == "" {
+			owner = "project"
+		}
+		if owner != group {
+			if group != "" {
+				fmt.Fprintln(out)
+			}
+			fmt.Fprintf(out, "%s:\n", owner)
+			group = owner
+		}
+		fmt.Fprintf(out, "  %s %s: %s\n", finding.Severity, finding.Code, finding.Message)
+		if finding.Fix != "" {
+			fmt.Fprintf(out, "    fix: %s\n", finding.Fix)
+		}
+	}
 }
 
 func validIntegrateHarness(harness string) bool {

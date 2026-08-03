@@ -2,12 +2,59 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	harnessintegrate "github.com/goblincore/geoffreyengram/dualmem/integrate"
 )
+
+func TestIntegrateDoctorJSONExitCodesAndArgumentErrors(t *testing.T) {
+	home := t.TempDir()
+	project, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	if status := runIntegrate([]string{"doctor", "--home", home, "--project", project, "--json"}, &out, &errOut); status != 0 {
+		t.Fatalf("clean doctor status = %d; stderr=%q", status, errOut.String())
+	}
+	var findings []harnessintegrate.Finding
+	if err := json.Unmarshal(out.Bytes(), &findings); err != nil {
+		t.Fatalf("doctor JSON is not a finding array: %v; output=%q", err, out.String())
+	}
+	if len(findings) == 0 {
+		t.Fatal("doctor returned no project finding")
+	}
+
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if status := runIntegrate([]string{"doctor", "--home", home, "--project", project, "--json"}, &out, &errOut); status != 1 {
+		t.Fatalf("drifted doctor status = %d, want 1; stderr=%q", status, errOut.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if status := runIntegrate([]string{"doctor", "--unknown"}, &out, &errOut); status != 2 {
+		t.Fatalf("invalid doctor status = %d, want 2; stderr=%q", status, errOut.String())
+	}
+
+	brokenHome := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(brokenHome, ".claude", "settings.json"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if status := runIntegrate([]string{"doctor", "--home", brokenHome, "--project", project}, &out, &errOut); status != 2 {
+		t.Fatalf("unreadable configuration status = %d, want 2; stderr=%q", status, errOut.String())
+	}
+}
 
 func TestIntegrateDryRunPrintsMetadataOnlyAndMakesNoWrites(t *testing.T) {
 	home := t.TempDir()
