@@ -28,7 +28,6 @@ type hookDocument struct {
 }
 
 func TestBuiltinDriversInstallPreservesHarnessStateAndIsIdempotent(t *testing.T) {
-	setPiPromptSupport(t, true)
 	home := populatedHarnessHome(t)
 
 	result, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"all"}}, BuiltinBundle())
@@ -36,12 +35,12 @@ func TestBuiltinDriversInstallPreservesHarnessStateAndIsIdempotent(t *testing.T)
 		t.Fatal(err)
 	}
 	wantPaths := []string{
+		filepath.Join(home, ".config", "dualmem", "bin", "dualmem-run"),
+		filepath.Join(home, ".config", "dualmem", "env"),
 		filepath.Join(home, ".claude", "CLAUDE.md"),
 		filepath.Join(home, ".claude", "settings.json"),
 		filepath.Join(home, ".codex", "AGENTS.md"),
 		filepath.Join(home, ".codex", "hooks.json"),
-		filepath.Join(home, ".config", "dualmem", "bin", "dualmem-run"),
-		filepath.Join(home, ".config", "dualmem", "env"),
 		filepath.Join(home, ".pi", "agent", "AGENTS.md"),
 		filepath.Join(home, ".pi", "agent", "extensions", "dualmem.ts"),
 	}
@@ -67,10 +66,8 @@ func TestBuiltinDriversInstallPreservesHarnessStateAndIsIdempotent(t *testing.T)
 		t.Fatalf("Claude unrelated JSON was not preserved: %#v", claude)
 	}
 	assertManagedMatchers(t, claude, "claude", map[string][]string{
-		"SessionStart":     {""},
-		"UserPromptSubmit": {""},
-		"PreToolUse":       {"Read"},
-		"PostToolUse":      {"Edit|Write"},
+		"PreToolUse":  {"Read"},
+		"PostToolUse": {"Edit|Write"},
 	})
 
 	codex := readHookDocument(t, filepath.Join(home, ".codex", "hooks.json"))
@@ -78,9 +75,7 @@ func TestBuiltinDriversInstallPreservesHarnessStateAndIsIdempotent(t *testing.T)
 		t.Fatalf("Codex unrelated JSON was not preserved: %#v", codex.Future)
 	}
 	assertManagedMatchers(t, codex, "codex", map[string][]string{
-		"SessionStart":     {""},
-		"UserPromptSubmit": {""},
-		"PostToolUse":      {"apply_patch"},
+		"PostToolUse": {"apply_patch"},
 	})
 	for _, group := range codex.Hooks["PostToolUse"] {
 		for _, hook := range group.Hooks {
@@ -112,7 +107,7 @@ func TestBuiltinDriversInstallPreservesHarnessStateAndIsIdempotent(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertPiExtensionContract(t, string(piBytes), true)
+	assertPiExtensionContract(t, string(piBytes))
 	piChange := mustChange(t, result.Changes, piPath)
 	if piChange.Action != ActionUpdate || piChange.BackupPath == "" {
 		t.Fatalf("pi extension change = %#v, want backed-up update", piChange)
@@ -120,9 +115,9 @@ func TestBuiltinDriversInstallPreservesHarnessStateAndIsIdempotent(t *testing.T)
 	assertFile(t, piChange.BackupPath, string(readFixture(t, "pi-extension-existing.ts")), 0o600)
 
 	wantCapabilities := map[string][]Capability{
-		"claude": {"file_read", "file_write", "prompt", "session_start"},
-		"codex":  {"file_write", "prompt", "session_start"},
-		"pi":     {"file_read", "file_write", "prompt", "session_end", "session_start", "tool"},
+		"claude": {"file_read", "file_write"},
+		"codex":  {"file_write"},
+		"pi":     {"file_read", "file_write", "session_end", "tool"},
 	}
 	for _, detection := range result.Detections {
 		if !detection.Present {
@@ -147,8 +142,47 @@ func TestBuiltinDriversInstallPreservesHarnessStateAndIsIdempotent(t *testing.T)
 	}
 }
 
+func TestBuiltinDriversRemoveDeprecatedProviderDependentHooks(t *testing.T) {
+	home := populatedHarnessHome(t)
+	for _, test := range []struct {
+		path    string
+		adapter string
+	}{
+		{path: filepath.Join(home, ".claude", "settings.json"), adapter: "claude"},
+		{path: filepath.Join(home, ".codex", "hooks.json"), adapter: "codex"},
+	} {
+		document := readJSONMap(t, test.path)
+		hooks := document["hooks"].(map[string]any)
+		for _, event := range []string{"SessionStart", "UserPromptSubmit"} {
+			spec := hookSpec{event: event, adapter: test.adapter}
+			hooks[event] = []any{decodeJSONMap(t, managedHookGroup(spec))}
+		}
+		writeJSONMap(t, test.path, document)
+	}
+
+	result, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"all"}}, BuiltinBundle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		filepath.Join(home, ".claude", "settings.json"),
+		filepath.Join(home, ".codex", "hooks.json"),
+	} {
+		change := mustChange(t, result.Changes, path)
+		var document map[string]any
+		if err := json.Unmarshal(change.After, &document); err != nil {
+			t.Fatal(err)
+		}
+		hooks := document["hooks"].(map[string]any)
+		for _, event := range []string{"SessionStart", "UserPromptSubmit"} {
+			if _, exists := hooks[event]; exists {
+				t.Fatalf("%s retained deprecated automatic %s hook", path, event)
+			}
+		}
+	}
+}
+
 func TestClaudeDriverMigratesOnlyRecognizedLegacyCredentialAssignments(t *testing.T) {
-	setPiPromptSupport(t, true)
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
 		t.Fatal(err)
@@ -188,7 +222,6 @@ func TestClaudeDriverMigratesOnlyRecognizedLegacyCredentialAssignments(t *testin
 }
 
 func TestClaudeDriverRejectsAmbiguousLegacyShellWithoutWrites(t *testing.T) {
-	setPiPromptSupport(t, true)
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
 		t.Fatal(err)
@@ -222,7 +255,6 @@ func TestClaudeDriverRejectsAmbiguousLegacyShellWithoutWrites(t *testing.T) {
 }
 
 func TestClaudeDriverIgnoresCredentialShapedCommandsOutsideRecognizedHooks(t *testing.T) {
-	setPiPromptSupport(t, true)
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
 		t.Fatal(err)
@@ -253,7 +285,6 @@ func TestClaudeDriverIgnoresCredentialShapedCommandsOutsideRecognizedHooks(t *te
 }
 
 func TestClaudeDriverIgnoresUnrelatedHookCommandContainingDualmemWord(t *testing.T) {
-	setPiPromptSupport(t, true)
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
 		t.Fatal(err)
@@ -268,7 +299,6 @@ func TestClaudeDriverIgnoresUnrelatedHookCommandContainingDualmemWord(t *testing
 	settingsPath := filepath.Join(home, ".claude", "settings.json")
 	document := readJSONMap(t, settingsPath)
 	hooks := document["hooks"].(map[string]any)
-	groups := hooks["SessionStart"].([]any)
 	unrelated := []any{
 		map[string]any{"hooks": []any{map[string]any{
 			"type": "command", "command": "export GEMINI_API_KEY='" + fixtureCredential + "' && printf dualmem", "timeout": float64(5),
@@ -280,7 +310,7 @@ func TestClaudeDriverIgnoresUnrelatedHookCommandContainingDualmemWord(t *testing
 			"type": "prompt", "command": recognizedLegacyCommand("claude", fixtureCredential), "timeout": float64(5),
 		}}},
 	}
-	hooks["SessionStart"] = append(unrelated, groups...)
+	hooks["SessionStart"] = unrelated
 	writeJSONMap(t, settingsPath, document)
 	beforeSettings := readFile(t, settingsPath)
 	envPath := filepath.Join(home, ".config", "dualmem", "env")
@@ -295,7 +325,6 @@ func TestClaudeDriverIgnoresUnrelatedHookCommandContainingDualmemWord(t *testing
 }
 
 func TestClaudeDriverRejectsCredentialConflictsBeforeProducingChanges(t *testing.T) {
-	setPiPromptSupport(t, true)
 	tests := []struct {
 		name       string
 		commands   []string
@@ -357,7 +386,6 @@ func TestClaudeDriverRejectsCredentialConflictsBeforeProducingChanges(t *testing
 }
 
 func TestClaudeDriverDeduplicatesIdenticalCredentialAssignments(t *testing.T) {
-	setPiPromptSupport(t, true)
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
 		t.Fatal(err)
@@ -384,7 +412,6 @@ func TestClaudeDriverDeduplicatesIdenticalCredentialAssignments(t *testing.T) {
 }
 
 func TestClaudeDriverMigrationPreservesGroupMetadataWithEmptyHooks(t *testing.T) {
-	setPiPromptSupport(t, true)
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
 		t.Fatal(err)
@@ -421,7 +448,6 @@ func TestClaudeDriverMigrationPreservesGroupMetadataWithEmptyHooks(t *testing.T)
 }
 
 func TestCodexDriverTargetedUninstallKeepsCommonAssetsForManagedPi(t *testing.T) {
-	setPiPromptSupport(t, true)
 	home := populatedHarnessHome(t)
 	installed, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"all"}}, BuiltinBundle())
 	if err != nil {
@@ -454,7 +480,6 @@ func TestCodexDriverTargetedUninstallKeepsCommonAssetsForManagedPi(t *testing.T)
 }
 
 func TestTargetedUninstallRetainsCommonAssetsForModifiedPiLauncherDependency(t *testing.T) {
-	setPiPromptSupport(t, true)
 	for _, test := range []struct {
 		name       string
 		harness    string
@@ -516,8 +541,114 @@ func TestTargetedUninstallRetainsCommonAssetsForModifiedPiLauncherDependency(t *
 	}
 }
 
+func TestTargetedUninstallRetainsCommonAssetsForModifiedHookLauncherDependency(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		harness    string
+		directory  string
+		configName string
+		adapter    string
+	}{
+		{name: "Claude", harness: "claude", directory: ".claude", configName: "settings.json", adapter: "claude"},
+		{name: "Codex", harness: "codex", directory: ".codex", configName: "hooks.json", adapter: "codex"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(home, test.directory), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			installed, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{test.harness}}, BuiltinBundle())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := Apply(installed); err != nil {
+				t.Fatal(err)
+			}
+
+			configPath := filepath.Join(home, test.directory, test.configName)
+			document := readJSONMap(t, configPath)
+			hooks := document["hooks"].(map[string]any)
+			modified := false
+			for _, rawGroups := range hooks {
+				for _, rawGroup := range rawGroups.([]any) {
+					group := rawGroup.(map[string]any)
+					for _, rawHook := range group["hooks"].([]any) {
+						hook := rawHook.(map[string]any)
+						command, _ := hook["command"].(string)
+						if strings.Contains(command, "--adapter "+test.adapter) {
+							hook["command"] = command + " --retained-local-option"
+							modified = true
+							break
+						}
+					}
+					if modified {
+						break
+					}
+				}
+				if modified {
+					break
+				}
+			}
+			if !modified {
+				t.Fatal("managed hook command was not found")
+			}
+			writeJSONMap(t, configPath, document)
+
+			envPath := filepath.Join(home, ".config", "dualmem", "env")
+			launcherPath := filepath.Join(home, ".config", "dualmem", "bin", "dualmem-run")
+			uninstall, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{test.harness}, Uninstall: true}, BuiltinBundle())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range []string{envPath, launcherPath} {
+				if got := mustChange(t, uninstall.Changes, path).Action; got != ActionUnchanged {
+					t.Fatalf("targeted uninstall planned %s for shared dependency %s", got, path)
+				}
+			}
+			if err := Apply(uninstall); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(readFile(t, configPath)), "--retained-local-option") {
+				t.Fatal("targeted uninstall removed the modified dependent hook")
+			}
+			assertFile(t, launcherPath, string(launcherAsset), 0o700)
+		})
+	}
+}
+
+func TestTargetedUninstallRetainsCommonAssetsForHookLauncherEnvironmentDependency(t *testing.T) {
+	home := t.TempDir()
+	installed, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"codex"}}, BuiltinBundle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(installed); err != nil {
+		t.Fatal(err)
+	}
+
+	configPath := filepath.Join(home, ".codex", "hooks.json")
+	document := readJSONMap(t, configPath)
+	hooks := document["hooks"].(map[string]any)
+	groups := hooks["PostToolUse"].([]any)
+	group := groups[0].(map[string]any)
+	hook := group["hooks"].([]any)[0].(map[string]any)
+	hook["command"] = `"$DUALMEM_RUN" hook --adapter codex`
+	writeJSONMap(t, configPath, document)
+
+	envPath := filepath.Join(home, ".config", "dualmem", "env")
+	launcherPath := filepath.Join(home, ".config", "dualmem", "bin", "dualmem-run")
+	uninstall, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"codex"}, Uninstall: true}, BuiltinBundle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{envPath, launcherPath} {
+		if got := mustChange(t, uninstall.Changes, path).Action; got != ActionUnchanged {
+			t.Fatalf("targeted uninstall planned %s for DUALMEM_RUN dependency %s", got, path)
+		}
+	}
+}
+
 func TestCodexDriverUninstallRemovesExactManagedHookAndPreservesSibling(t *testing.T) {
-	setPiPromptSupport(t, true)
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
 		t.Fatal(err)
@@ -584,7 +715,6 @@ func TestCodexDriverUninstallRemovesExactManagedHookAndPreservesSibling(t *testi
 }
 
 func TestHarnessUninstallPreservesUnrelatedEmptyManagedEventArrays(t *testing.T) {
-	setPiPromptSupport(t, true)
 	tests := []struct {
 		name       string
 		harness    string
@@ -638,7 +768,6 @@ func TestHarnessUninstallPreservesUnrelatedEmptyManagedEventArrays(t *testing.T)
 }
 
 func TestPiDriverRefusesUninstallWhenModifiedExtensionStillUsesSharedLauncher(t *testing.T) {
-	setPiPromptSupport(t, true)
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".pi", "agent"), 0o700); err != nil {
 		t.Fatal(err)
@@ -673,8 +802,7 @@ func TestPiDriverRefusesUninstallWhenModifiedExtensionStillUsesSharedLauncher(t 
 	}
 }
 
-func TestPiDriverOmitsUnsupportedPromptHookAndCapability(t *testing.T) {
-	setPiPromptSupport(t, false)
+func TestPiDriverOmitsProviderDependentPromptHookAndCapability(t *testing.T) {
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".pi", "agent"), 0o700); err != nil {
 		t.Fatal(err)
@@ -688,7 +816,7 @@ func TestPiDriverOmitsUnsupportedPromptHookAndCapability(t *testing.T) {
 		t.Fatalf("unsupported prompt capability was advertised: %v", piDetection.Capabilities)
 	}
 	extension := mustChange(t, result.Changes, filepath.Join(home, ".pi", "agent", "extensions", "dualmem.ts"))
-	assertPiExtensionContract(t, string(extension.After), false)
+	assertPiExtensionContract(t, string(extension.After))
 }
 
 func populatedHarnessHome(t *testing.T) string {
@@ -716,13 +844,6 @@ func populatedHarnessHome(t *testing.T) string {
 		}
 	}
 	return home
-}
-
-func setPiPromptSupport(t *testing.T, supported bool) {
-	t.Helper()
-	original := piPromptSupportProbe
-	piPromptSupportProbe = func() bool { return supported }
-	t.Cleanup(func() { piPromptSupportProbe = original })
 }
 
 func readFixture(t *testing.T, name string) []byte {
@@ -862,13 +983,12 @@ func assertManagedMatchers(t *testing.T, document hookDocument, adapter string, 
 	}
 }
 
-func assertPiExtensionContract(t *testing.T, source string, promptSupported bool) {
+func assertPiExtensionContract(t *testing.T, source string) {
 	t.Helper()
 	for _, required := range []string{
 		"process.env.DUALMEM_RUN",
 		".config\", \"dualmem\", \"bin\", \"dualmem-run",
 		"execFile(DUALMEM_RUN, args",
-		"session_start",
 		"file_read",
 		"file_write",
 		"session_end",
@@ -886,9 +1006,18 @@ func assertPiExtensionContract(t *testing.T, source string, promptSupported bool
 			t.Fatalf("pi extension contains forbidden text %q", forbidden)
 		}
 	}
-	if got := strings.Contains(source, "before_agent_start"); got != promptSupported {
-		t.Fatalf("pi prompt hook present = %t, want %t", got, promptSupported)
+	if strings.Contains(source, `submitEvent("session_start"`) || strings.Contains(source, "before_agent_start") {
+		t.Fatal("pi extension registers provider-dependent automatic context hooks")
 	}
+}
+
+func decodeJSONMap(t *testing.T, raw []byte) map[string]any {
+	t.Helper()
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	return decoded
 }
 
 func mustChange(t *testing.T, changes []Change, path string) Change {

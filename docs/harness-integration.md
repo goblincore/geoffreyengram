@@ -23,7 +23,7 @@ Send one JSON object on standard input to `dualmem event`:
 
 | Field | Required | Meaning |
 | --- | --- | --- |
-| `schema_version` | yes | A `1.x` protocol version. |
+| `schema_version` | yes | A numeric `MAJOR.MINOR` protocol version such as `1.0`; major version `1` is supported. |
 | `kind` | yes for useful runtime work | `session_start`, `prompt`, `file_read`, `file_write`, or `session_end`. |
 | `harness` | yes | The caller’s stable harness name. |
 | `cwd` | yes | Directory used for project resolution and relative paths. |
@@ -56,7 +56,7 @@ Input is limited to 64 KiB. Metadata is limited to 32 entries and each value to 
 
 ## Versioning and failure behavior
 
-Version 1 accepts any `1.x` major version. Unknown JSON fields and unknown event kinds are accepted for forward compatibility; the current runtime returns `none` for an event kind it does not implement. A new incompatible protocol requires a new major version.
+Version 1 accepts numeric versions whose major component is `1` (for example `1.0` or `1.12`). Values such as `1.bogus` are invalid. Unknown JSON fields and unknown event kinds are accepted for forward compatibility; the current runtime returns `none` for an event kind it does not implement. A new incompatible protocol requires a new major version.
 
 Lifecycle execution is fail-open. Invalid input or unavailable memory normally produces a versioned no-action response with redacted diagnostics and exits successfully so the calling harness is not blocked. Native Claude and Codex adapters emit their native empty response when no context can be supplied.
 
@@ -79,7 +79,15 @@ child.stdin.end(JSON.stringify({
 }));
 ```
 
-The bundled launcher, `~/.config/dualmem/bin/dualmem-run`, loads the protected shared environment file before executing the configured `dualmem` binary. A future harness should call that launcher if it needs the same credential environment.
+The bundled launcher, `~/.config/dualmem/bin/dualmem-run`, loads the protected shared environment file before executing the configured `dualmem` binary. A future harness may use it for explicit user-initiated DualMem commands. Automatic lifecycle calls must not treat repository configuration as authority to select providers, endpoints, credential variable names, or storage paths.
+
+## Automatic lifecycle security boundary
+
+The first-party installer registers only lifecycle signals that the subprocess can handle locally: file reads/writes and session-end activity where the harness exposes them. It does not register provider-backed session-start or prompt hooks. Although those kinds remain reserved by Event v1, the automatic CLI runner returns a redacted fail-open response for them; task-aware provider retrieval remains an explicit `dualmem context`, search, consult, or tool action.
+
+For automatic calls, the CLI loads trusted user configuration and accepts only `default_namespace` from a repository `.dualmem.yaml`. File reads use the configured local SQLite store without initializing an embedding or synthesis provider. File writes and session end record bounded metadata-only activity. These paths make no provider network request.
+
+Prompt duplicate suppression, when a trusted in-process caller supplies a memory implementation, is an in-memory runtime optimization only. Its cache lasts for that `Runtime` process. Separately launched hook subprocesses do not share it and must not claim cross-invocation deduplication.
 
 ## Project identity
 

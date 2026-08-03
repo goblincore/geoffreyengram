@@ -191,6 +191,24 @@ func TestRuntimeFileReadFormatsFileMemoriesAndRecordsMetadata(t *testing.T) {
 	}
 }
 
+func TestRuntimeFileReadPreservesRetrievedContextWhenActivityFails(t *testing.T) {
+	memory := &fakeRuntimeMemory{file: func(_ context.Context, _, _ string, _ int) ([]dualmem.DetailMemory, error) {
+		return []dualmem.DetailMemory{{Type: "warning", Text: "Preserve this warning"}}, nil
+	}}
+	runtime := testRuntime(memory, &fakeActivitySink{err: errors.New("activity unavailable")})
+	event := testRuntimeEvent(EventFileRead)
+	event.Files = []string{"/projects/repo/runtime.go"}
+
+	response := runtime.Handle(context.Background(), event)
+
+	if response.Action != ActionInjectContext || !strings.Contains(response.Context, "Preserve this warning") {
+		t.Fatalf("Handle() discarded retrieved context: %#v", response)
+	}
+	if len(response.Diagnostics) != 1 || response.Diagnostics[0].Code != "activity_unavailable" {
+		t.Fatalf("Handle() diagnostics = %#v, want redacted activity warning", response.Diagnostics)
+	}
+}
+
 func TestRuntimeRecordsFileWritesAndSessionEndArtifacts(t *testing.T) {
 	activity := &fakeActivitySink{}
 	runtime := testRuntime(&fakeRuntimeMemory{}, activity)

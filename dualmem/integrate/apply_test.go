@@ -83,6 +83,88 @@ func TestApplyBackupFailurePreventsAllTargetMutations(t *testing.T) {
 	assertFile(t, updated, "original", 0o600)
 }
 
+func TestApplyPublishesPrerequisitesBeforeDependentHookMigration(t *testing.T) {
+	home := t.TempDir()
+	hookPath := filepath.Join(home, ".claude", "settings.json")
+	envPath := filepath.Join(home, ".config", "dualmem", "env")
+	launcherPath := filepath.Join(home, ".config", "dualmem", "bin", "dualmem-run")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const legacyHook = "legacy hook with credential"
+	if err := os.WriteFile(hookPath, []byte(legacyHook), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	originalWriter := atomicWriteFile
+	t.Cleanup(func() { atomicWriteFile = originalWriter })
+	var publications []string
+	atomicWriteFile = func(path string, data []byte, mode fs.FileMode) error {
+		if !strings.Contains(path, ".dualmem-backup-") {
+			publications = append(publications, path)
+		}
+		if path == hookPath {
+			return errors.New("injected dependent hook failure")
+		}
+		return originalWriter(path, data, mode)
+	}
+
+	err := Apply(Result{Changes: []Change{
+		{Path: hookPath, Action: ActionUpdate, Phase: PhaseIntegration, Mode: 0o600, Before: []byte(legacyHook), After: []byte("protected hook")},
+		{Path: envPath, Action: ActionCreate, Phase: PhasePrerequisite, Mode: 0o600, After: []byte("migrated credential")},
+		{Path: launcherPath, Action: ActionCreate, Phase: PhasePrerequisite, Mode: 0o700, After: []byte("launcher")},
+	}})
+	if err == nil {
+		t.Fatal("Apply succeeded despite injected dependent hook failure")
+	}
+	if len(publications) != 3 || publications[0] != launcherPath || publications[1] != envPath || publications[2] != hookPath {
+		t.Fatalf("publication order = %v, want prerequisites before hook", publications)
+	}
+	assertFile(t, launcherPath, "launcher", 0o700)
+	assertFile(t, envPath, "migrated credential", 0o600)
+	assertFile(t, hookPath, legacyHook, 0o600)
+}
+
+func TestApplyKeepsSharedAssetsWhenUninstallingHookFails(t *testing.T) {
+	home := t.TempDir()
+	hookPath := filepath.Join(home, ".codex", "hooks.json")
+	envPath := filepath.Join(home, ".config", "dualmem", "env")
+	launcherPath := filepath.Join(home, ".config", "dualmem", "bin", "dualmem-run")
+	for path, content := range map[string]string{
+		hookPath:     "managed hook",
+		envPath:      "",
+		launcherPath: "managed launcher",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	originalWriter := atomicWriteFile
+	t.Cleanup(func() { atomicWriteFile = originalWriter })
+	atomicWriteFile = func(path string, data []byte, mode fs.FileMode) error {
+		if path == hookPath {
+			return errors.New("injected hook uninstall failure")
+		}
+		return originalWriter(path, data, mode)
+	}
+
+	err := Apply(Result{Changes: []Change{
+		{Path: launcherPath, Action: ActionDelete, Phase: PhaseCleanup, Mode: 0o600, Before: []byte("managed launcher"), DeleteProof: ownedAssetDeleteProof([]byte("managed launcher"))},
+		{Path: envPath, Action: ActionDelete, Phase: PhaseCleanup, Mode: 0o600, Before: []byte(""), DeleteProof: ownedAssetDeleteProof([]byte(""))},
+		{Path: hookPath, Action: ActionUpdate, Phase: PhaseIntegration, Mode: 0o600, Before: []byte("managed hook"), After: []byte("unrelated hook")},
+	}})
+	if err == nil {
+		t.Fatal("Apply succeeded despite injected hook uninstall failure")
+	}
+	assertFile(t, hookPath, "managed hook", 0o600)
+	assertFile(t, envPath, "", 0o600)
+	assertFile(t, launcherPath, "managed launcher", 0o600)
+}
+
 func TestApplyInjectedWriteFailureLeavesOriginalIntact(t *testing.T) {
 	home := t.TempDir()
 	target := filepath.Join(home, "config")

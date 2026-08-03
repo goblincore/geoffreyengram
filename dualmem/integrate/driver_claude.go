@@ -13,14 +13,15 @@ import (
 type claudeDriver struct{}
 
 type hookSpec struct {
-	event   string
-	matcher string
-	adapter string
+	event      string
+	matcher    string
+	adapter    string
+	deprecated bool
 }
 
 var claudeHookSpecs = []hookSpec{
-	{event: "SessionStart", adapter: "claude"},
-	{event: "UserPromptSubmit", adapter: "claude"},
+	{event: "SessionStart", adapter: "claude", deprecated: true},
+	{event: "UserPromptSubmit", adapter: "claude", deprecated: true},
 	{event: "PreToolUse", matcher: "Read", adapter: "claude"},
 	{event: "PostToolUse", matcher: "Edit|Write", adapter: "claude"},
 }
@@ -42,7 +43,7 @@ func (claudeDriver) Detect(_ context.Context, home string) (Detection, error) {
 	managed = managed || instructions.exists && containsManagedInstructions(instructions.bytes)
 	return Detection{
 		Present: present, Managed: managed,
-		Capabilities: []Capability{"session_start", "prompt", "file_read", "file_write"},
+		Capabilities: []Capability{"file_read", "file_write"},
 	}, nil
 }
 
@@ -176,8 +177,14 @@ func mergeHookDocument(raw []byte, specs []hookSpec, uninstall bool) ([]byte, bo
 			}
 			continue
 		}
-		filtered = append(filtered, managed)
-		hooks[spec.event] = mustMarshalRaw(filtered)
+		if !spec.deprecated {
+			filtered = append(filtered, managed)
+		}
+		if len(filtered) == 0 {
+			delete(hooks, spec.event)
+		} else {
+			hooks[spec.event] = mustMarshalRaw(filtered)
+		}
 		changed = true
 	}
 	if !changed {

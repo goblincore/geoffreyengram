@@ -29,7 +29,7 @@ Do not paste credentials into hooks. First inspect the plan:
 dualmem integrate --harness all --dry-run
 ```
 
-For an existing Claude setup, the installer recognizes only actual old DualMem hook invocations for the Claude adapter. It can move static, unambiguous provider assignments into `~/.config/dualmem/env` (mode `0600`) and replaces the old hook with the shared launcher. It leaves unrelated hooks and instruction content intact.
+For an existing Claude setup, the installer recognizes only actual old DualMem hook invocations for the Claude adapter. It can move static, unambiguous provider assignments into `~/.config/dualmem/env` (mode `0600`). Provider-dependent session-start and prompt hooks are removed rather than replaced; locally executable file-read/write hooks use the shared launcher. Unrelated hooks and instruction content remain intact.
 
 The installer stops if it sees an ambiguous command, an unsupported shell expression, or conflicting credentials within a hook, across hooks, or against the shared environment. Resolve the conflict manually in the protected environment file; do not force a key value into a hook command.
 

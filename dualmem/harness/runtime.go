@@ -138,13 +138,12 @@ func (r *Runtime) handleFileRead(ctx context.Context, namespace string, event Ev
 	}
 
 	recorded := r.recordActivity(ctx, namespace, eventWithFiles(event, paths))
-	if len(recorded.Diagnostics) > 0 {
-		return recorded
-	}
 	if len(sections) == 0 {
 		return recorded
 	}
-	return r.contextResponse(strings.Join(sections, "\n\n"))
+	response := r.contextResponse(strings.Join(sections, "\n\n"))
+	response.Diagnostics = append(response.Diagnostics, recorded.Diagnostics...)
+	return response
 }
 
 func (r *Runtime) recordActivity(ctx context.Context, namespace string, event Event) Response {

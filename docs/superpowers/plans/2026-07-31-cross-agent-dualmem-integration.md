@@ -17,6 +17,7 @@
 - Preserve unrelated harness configuration. Back up a file before its first material rewrite and use stable managed markers for instruction text.
 - Installation is idempotent. A second identical plan contains only `unchanged` entries.
 - Hooks fail open with bounded, redacted diagnostics. Invalid installer arguments and unsafe configuration fail before writes.
+- Automatic hooks never initialize a provider or transmit prompts/stored memory. Repository configuration may supply only `default_namespace`; user configuration owns storage and provider settings.
 - Never execute or reinterpret shell/patch text. Extract only structured paths or `apply_patch` envelope headers.
 - Phase 1 retains `claude:<git-common-root-name>` and `claude:infra` as compatibility storage keys; adapters never concatenate these prefixes.
 - Default tests are offline and hermetic. Provider-backed tests require `DUALMEM_LIVE_TESTS=1`; deprecated root-package tests require `-tags legacy`.
@@ -169,7 +170,7 @@ git commit -m "test: separate active legacy and live suites"
 
 - [ ] **Step 1: Write failing protocol tests**
 
-Test exact JSON names, size limits, event validation, unknown optional fields, unknown kinds, unsupported major versions, and metadata restrictions:
+Test exact JSON names, size limits, event validation, unknown optional fields, unknown kinds, unsupported major versions, malformed nonnumeric `MAJOR.MINOR` values, and metadata restrictions:
 
 ```go
 func TestDecodeEventV1(t *testing.T) {
@@ -497,7 +498,7 @@ Defaults are exact:
 - Input event limit: 64 KiB.
 - Activity root: `filepath.Join(os.UserCacheDir(), "dualmem", "activity")`, partitioned by a filename-safe namespace and session ID.
 
-Implement an in-memory per-session prompt-hash cache. Add `JSONLActivitySink` using append-only JSON lines with mode `0600`; record metadata only, not prompts, patches, file contents, or command text.
+Implement an in-memory per-session prompt-hash cache. Its deduplication scope is one `Runtime` process only; separately launched hooks do not share it. Add `JSONLActivitySink` using append-only JSON lines with mode `0600`; record metadata only, not prompts, patches, file contents, or command text.
 
 - [ ] **Step 4: Write CLI tests**
 
@@ -531,7 +532,7 @@ dualmem event
 dualmem hook --adapter claude|codex
 ```
 
-Construct the engine only after arguments and input are valid. Reuse `resolveNamespace` behavior only through the new `harness.ResolveProject`; update existing CLI namespace auto-detection to delegate to the shared resolver so worktree behavior has one implementation.
+Decode and classify lifecycle input before opening resources. Automatic file reads open a local SQLite-only engine without an embedder; file writes and session end use only the activity sink; session start and prompt fail open without provider initialization. Load user lifecycle configuration, accepting only repository `default_namespace` as a project identity override. Reuse `resolveNamespace` behavior only through the new `harness.ResolveProject`; update existing CLI namespace auto-detection to delegate to the shared resolver so worktree behavior has one implementation.
 
 - [ ] **Step 7: Run tests and commit**
 
@@ -584,6 +585,14 @@ const (
 
 type Capability string
 
+type ChangePhase uint8
+
+const (
+	PhaseIntegration ChangePhase = iota
+	PhasePrerequisite
+	PhaseCleanup
+)
+
 type Detection struct {
 	Harness      string
 	Present      bool
@@ -604,6 +613,7 @@ type DeleteProof struct {
 type Change struct {
 	Path        string
 	Action      Action
+	Phase       ChangePhase
 	Mode        fs.FileMode
 	Before      []byte
 	After       []byte
@@ -665,7 +675,7 @@ Expected: FAIL because the package does not exist.
 
 - [ ] **Step 3: Implement pure planning and managed blocks**
 
-Planning reads existing state but never writes. Sort drivers and changes by name/path for deterministic output. `all` selects only `Present` harnesses; explicit names select those drivers even when their config directory must be created. Derive projected management from `Managed` plus the selected install/uninstall transition. Run the common planner exactly once after harness detection and pass it that sorted projected managed set. Managed markers are exact and unique; duplicate or unmatched markers return an error before changes are produced. Built-in owned-asset and managed-block uninstall planners attach package-private immutable `DeleteProof` values; a raw `Before` byte match is never deletion authority.
+Planning reads existing state but never writes. Sort drivers and changes by dependency phase, then path: prerequisites, harness integrations, shared cleanup. `all` selects only `Present` harnesses; explicit names select those drivers even when their config directory must be created. Derive projected management from `Managed` plus the selected install/uninstall transition. Run the common planner exactly once after harness detection and pass it that sorted projected managed set. Managed markers are exact and unique; duplicate or unmatched markers return an error before changes are produced. Built-in owned-asset and managed-block uninstall planners attach package-private immutable `DeleteProof` values; a raw `Before` byte match is never deletion authority.
 
 - [ ] **Step 4: Write atomic apply tests**
 
@@ -681,6 +691,8 @@ Use temporary homes to prove:
 - managed-block deletion is recomputed from the proof's exact markers and is allowed only when no unrelated content remains;
 - a concurrent create/update/delete path appearance or replacement is never overwritten or removed, and any path displaced into quarantine on abort remains recoverable;
 - dry-run never calls `Apply` and result summaries omit `Before`/`After` bytes.
+- a failed hook migration happens only after the protected environment and launcher exist;
+- a failed hook uninstall leaves shared launcher/environment cleanup unapplied.
 
 - [ ] **Step 5: Run apply tests and confirm RED**
 
@@ -771,20 +783,20 @@ Implement `BuiltinBundle() Bundle`; its common planner owns the env and launcher
 
 - [ ] **Step 4: Implement Claude and Codex drivers**
 
-Use `encoding/json` structural merges. Claude hooks invoke `dualmem-run hook --adapter claude`. Codex hooks use the installed Codex schema and invoke `dualmem-run hook --adapter codex`; do not copy Claude-only matcher names. Both managed instruction blocks describe harness-neutral project memory and instruct explicit saves/checkpoints without exposing the legacy prefix as harness ownership.
+Use `encoding/json` structural merges. Claude installs only local Read and Edit/Write hooks through `dualmem-run hook --adapter claude`. Codex installs only its structured `apply_patch` completion hook through `dualmem-run hook --adapter codex`; do not copy Claude-only matcher names. Both drivers remove previously managed session-start/prompt hooks, advertise only active local capabilities, and preserve unrelated hooks. Managed instruction blocks describe harness-neutral project memory and instruct explicit retrieval/saves/checkpoints without exposing the legacy prefix as harness ownership.
 
 - [ ] **Step 5: Implement the pi adapter extension and driver**
 
 The generated TypeScript extension must:
 
 - use `DUALMEM_RUN` or `$HOME/.config/dualmem/bin/dualmem-run`, never a user-specific absolute path;
-- submit `session_start`, structured `file_read`, `file_write`, and `session_end` events through `dualmem event`;
+- submit structured `file_read`, `file_write`, and `session_end` events through `dualmem event`;
 - retain a native `dualmem` tool for search, add, checkpoint, cochange, unfold, context, consult, and related supported commands;
 - pass command arguments as arrays through `execFile`, not shell strings;
 - cap timeout and output size;
 - surface redacted fail-open diagnostics;
 - let the shared resolver choose namespaces;
-- skip prompt integration when the installed pi API lacks a supported prompt hook and advertise that capability accurately.
+- omit automatic session/prompt retrieval and advertise only local lifecycle/tool capabilities.
 
 The driver backs up an existing hand-written extension before installing the owned asset.
 
@@ -872,7 +884,7 @@ Expected: FAIL because `Doctor` does not exist.
 
 - [ ] **Step 3: Implement offline doctor**
 
-Doctor reads local configuration, planned state, modes, and project identity only. It never constructs `dualmem.Engine` or contacts a provider. Secret detection reports file and code but never the matched value. Capability findings are compared against each driver's advertised detection.
+Doctor reads local configuration, planned state, modes, and project identity only. It never constructs `dualmem.Engine` or contacts a provider. Secret detection uses the same generic credential-name policy as migration (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`), recursively inspects decoded JSON string values, excludes environment references, and never reports the matched value. Capability findings are compared against each driver's active advertised detection.
 
 - [ ] **Step 4: Add CLI output and exit codes**
 
@@ -948,6 +960,7 @@ The README must:
 - lead with harness-neutral per-project memory;
 - list Claude Code, Codex, and pi as first-party integrations;
 - explain capability differences without claiming false parity;
+- explain the automatic local-only security boundary and explicit provider-backed retrieval path;
 - document `DualMem Event v1` as the future-harness boundary;
 - explain the hidden legacy `claude:<project>` compatibility key and worktree resolution;
 - show install, dry-run, doctor, and targeted-uninstall commands;

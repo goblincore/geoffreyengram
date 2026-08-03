@@ -38,7 +38,7 @@ type DoctorOptions struct {
 	ProjectDir string
 }
 
-var credentialAssignmentPattern = regexp.MustCompile(`(?i)\b(GEMINI_API_KEY|GOOGLE_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|ZAI_API_KEY)\s*(?:=|:)\s*("[^"\r\n]*"|'[^'\r\n]*'|[^\s;,&]+)`)
+var credentialAssignmentPattern = regexp.MustCompile(`\b([A-Z][A-Z0-9_]*)[ \t]*(?:=|:)[ \t]*("[^"\r\n]*"|'[^'\r\n]*'|[^\s;,&]+)?`)
 var shellEnvironmentReferencePattern = regexp.MustCompile(`^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$`)
 var processEnvironmentReferencePattern = regexp.MustCompile(`^process\.env\.[A-Za-z_][A-Za-z0-9_]*$`)
 
@@ -186,7 +186,7 @@ func missingIntegrationParts(home, name string) ([]string, error) {
 			return nil, err
 		}
 		missing := make([]string, 0, 2)
-		if !extension.exists || (!bytes.Equal(extension.bytes, renderedPiExtension(true)) && !bytes.Equal(extension.bytes, renderedPiExtension(false))) {
+		if !extension.exists || !bytes.Equal(extension.bytes, renderedPiExtension()) {
 			missing = append(missing, "extension")
 		}
 		if !instructions.exists || !containsManagedInstructions(instructions.bytes) {
@@ -228,6 +228,9 @@ func missingManagedHooks(path string, specs []hookSpec) ([]string, error) {
 	}
 	missing := make([]string, 0, len(specs))
 	for _, spec := range specs {
+		if spec.deprecated {
+			continue
+		}
 		groups, err := decodeHookGroups(hooks[spec.event])
 		if err != nil {
 			return nil, err
@@ -251,9 +254,11 @@ func missingManagedHooks(path string, specs []hookSpec) ([]string, error) {
 }
 
 func hookSpecLabels(specs []hookSpec) []string {
-	labels := make([]string, len(specs))
-	for i, spec := range specs {
-		labels[i] = hookSpecLabel(spec)
+	labels := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		if !spec.deprecated {
+			labels = append(labels, hookSpecLabel(spec))
+		}
 	}
 	return labels
 }
@@ -367,20 +372,59 @@ func appendHarnessConfigurationFindings(findings []Finding, home string) ([]Find
 }
 
 func containsLiteralCredential(raw []byte) bool {
-	for _, match := range credentialAssignmentPattern.FindAllSubmatch(raw, -1) {
+	var decoded any
+	if json.Unmarshal(raw, &decoded) == nil {
+		return decodedContainsLiteralCredential(decoded)
+	}
+	return stringContainsLiteralCredential(string(raw))
+}
+
+func decodedContainsLiteralCredential(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if recognizedCredentialName(key) {
+				if text, ok := child.(string); ok && credentialValueIsLiteral(text) {
+					return true
+				}
+			}
+			if decodedContainsLiteralCredential(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if decodedContainsLiteralCredential(child) {
+				return true
+			}
+		}
+	case string:
+		return stringContainsLiteralCredential(typed)
+	}
+	return false
+}
+
+func stringContainsLiteralCredential(input string) bool {
+	for _, match := range credentialAssignmentPattern.FindAllStringSubmatch(input, -1) {
 		if len(match) != 3 {
 			continue
 		}
-		value := strings.TrimSpace(string(match[2]))
-		if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
-			value = value[1 : len(value)-1]
-		}
-		if value == "" || shellEnvironmentReferencePattern.MatchString(value) || processEnvironmentReferencePattern.MatchString(value) {
+		if !recognizedCredentialName(match[1]) {
 			continue
 		}
-		return true
+		if credentialValueIsLiteral(match[2]) {
+			return true
+		}
 	}
 	return false
+}
+
+func credentialValueIsLiteral(input string) bool {
+	value := strings.TrimSpace(input)
+	if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
+		value = value[1 : len(value)-1]
+	}
+	return value != "" && !shellEnvironmentReferencePattern.MatchString(value) && !processEnvironmentReferencePattern.MatchString(value)
 }
 
 func isLinkedWorktree(ctx context.Context, directory, identityRoot string) bool {

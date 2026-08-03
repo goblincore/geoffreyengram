@@ -10,7 +10,6 @@ import (
 )
 
 func TestDoctorReportsInstalledCapabilitiesAndPhaseTwoGaps(t *testing.T) {
-	setPiPromptSupport(t, true)
 	home := populatedHarnessHome(t)
 	installed, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"all"}}, BuiltinBundle())
 	if err != nil {
@@ -38,7 +37,6 @@ func TestDoctorReportsInstalledCapabilitiesAndPhaseTwoGaps(t *testing.T) {
 }
 
 func TestDoctorRequiresEveryManagedHookAndDoesNotOverclaimCapabilities(t *testing.T) {
-	setPiPromptSupport(t, true)
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
 		t.Fatal(err)
@@ -131,8 +129,73 @@ func TestDoctorCredentialClassificationIgnoresEmptyAndGenericEnvironmentReferenc
 	}
 }
 
+func TestDoctorCredentialClassificationSharesMigrationNamePolicy(t *testing.T) {
+	for _, input := range []string{
+		"INTERNAL_SERVICE_TOKEN='fixture-static-token'",
+		"DEPLOY_PASSWORD=fixture-static-password",
+		"ACME_SIGNING_SECRET: \"fixture-static-secret\"",
+	} {
+		if !containsLiteralCredential([]byte(input)) {
+			t.Fatalf("arbitrary credential name was not detected in %q", input)
+		}
+	}
+	for _, input := range []string{
+		"INTERNAL_SERVICE_TOKEN=$PROVIDER_TOKEN",
+		"DEPLOY_PASSWORD=\"${DEPLOY_PASSWORD}\"",
+		"ACME_SIGNING_SECRET=process.env.PROVIDER_SECRET",
+	} {
+		if containsLiteralCredential([]byte(input)) {
+			t.Fatalf("environment indirection was classified as literal in %q", input)
+		}
+	}
+}
+
+func TestDoctorInspectsDecodedJSONCommandStringsAndRedactsArbitraryCredentials(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const credential = "fixture-decoded-command-value"
+	writeJSONMap(t, filepath.Join(home, ".codex", "hooks.json"), map[string]any{
+		"hooks": map[string]any{
+			"SessionStart": []any{map[string]any{
+				"hooks": []any{map[string]any{
+					"type": "command", "command": "export INTERNAL_SERVICE_TOKEN=\"" + credential + "\" && printf safe",
+				}},
+			}},
+		},
+	})
+
+	findings, err := Doctor(context.Background(), DoctorOptions{Home: home, ProjectDir: repositoryForDoctor(t)}, BuiltinBundle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDoctorFinding(t, findings, "literal_credential", SeverityError, "codex")
+	for _, finding := range findings {
+		if strings.Contains(finding.Message+finding.Fix, credential) {
+			t.Fatalf("doctor leaked decoded credential value: %#v", finding)
+		}
+	}
+
+	writeJSONMap(t, filepath.Join(home, ".codex", "hooks.json"), map[string]any{
+		"hooks": map[string]any{
+			"SessionStart": []any{map[string]any{
+				"hooks": []any{map[string]any{
+					"type": "command", "command": `export INTERNAL_SERVICE_TOKEN="$PROVIDER_TOKEN" && printf safe`,
+				}},
+			}},
+		},
+	})
+	findings, err = Doctor(context.Background(), DoctorOptions{Home: home, ProjectDir: repositoryForDoctor(t)}, BuiltinBundle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasDoctorFinding(findings, "literal_credential", "codex") {
+		t.Fatalf("decoded environment indirection was classified as literal: %#v", findings)
+	}
+}
+
 func TestDoctorSharedDriftUsesValidRepairHarness(t *testing.T) {
-	setPiPromptSupport(t, true)
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
 		t.Fatal(err)
@@ -165,7 +228,6 @@ func TestDoctorSharedDriftUsesValidRepairHarness(t *testing.T) {
 }
 
 func TestDoctorFindsUnsafeAndDriftedHarnessStateWithoutLeakingCredential(t *testing.T) {
-	setPiPromptSupport(t, true)
 	home := populatedHarnessHome(t)
 	installed, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"all"}}, BuiltinBundle())
 	if err != nil {

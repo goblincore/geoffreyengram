@@ -88,7 +88,10 @@ func DecodeEvent(r io.Reader, maxBytes int64) (Event, error) {
 	if event.SchemaVersion == "" {
 		return event, fmt.Errorf("event schema_version is required")
 	}
-	major, _, _ := strings.Cut(event.SchemaVersion, ".")
+	major, minor, found := strings.Cut(event.SchemaVersion, ".")
+	if !found || !decimalVersionComponent(major) || !decimalVersionComponent(minor) {
+		return event, fmt.Errorf("event schema_version must use numeric MAJOR.MINOR form")
+	}
 	if major != "1" {
 		return event, fmt.Errorf("%w: %q", ErrUnsupportedVersion, event.SchemaVersion)
 	}
@@ -111,6 +114,18 @@ func DecodeEvent(r io.Reader, maxBytes int64) (Event, error) {
 	}
 
 	return event, nil
+}
+
+func decimalVersionComponent(component string) bool {
+	if component == "" {
+		return false
+	}
+	for _, character := range component {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func EncodeResponse(w io.Writer, response Response) error {

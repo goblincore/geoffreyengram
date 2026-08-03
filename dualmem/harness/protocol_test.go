@@ -27,6 +27,13 @@ func TestDecodeEventRejectsUnsupportedMajor(t *testing.T) {
 	}
 }
 
+func TestDecodeEventRejectsMalformedNumericVersion(t *testing.T) {
+	raw := `{"schema_version":"1.bogus","kind":"session_start","harness":"future","cwd":"/repo"}`
+	if _, err := DecodeEvent(strings.NewReader(raw), 64<<10); err == nil {
+		t.Fatal("DecodeEvent accepted a non-numeric minor version")
+	}
+}
+
 func TestDecodeEventAcceptsUnknownFieldsAndKinds(t *testing.T) {
 	raw := `{"schema_version":"1.7","kind":"future_event","harness":"future","cwd":"/repo","future_option":{"enabled":true}}`
 	event, err := DecodeEvent(strings.NewReader(raw), 64<<10)

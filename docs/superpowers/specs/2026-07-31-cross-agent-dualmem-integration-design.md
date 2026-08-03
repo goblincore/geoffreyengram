@@ -1,7 +1,7 @@
 # Harness-Agnostic DualMem Integration Design
 
-**Date:** 2026-07-31  
-**Status:** Approved design  
+**Date:** 2026-07-31
+**Status:** Approved design; safety interface revision 2026-08-03
 **Scope:** A harness-neutral DualMem protocol with first-party Claude Code, Codex, and pi integrations using one database and one project identity
 
 ## Summary
@@ -11,6 +11,8 @@ DualMem already stores useful project knowledge independently of any model harne
 The integration will be reorganized around a versioned, harness-neutral event protocol. Claude Code, Codex, and pi become first-party adapters that translate native lifecycle data into the same semantic events and invoke one runtime. Unknown future harnesses can emit the normalized protocol directly without changing memory semantics. Harness drivers handle installation and diagnostics separately from the protocol.
 
 Phase 1 delivers the protocol, project identity boundary, three adapters, three installation drivers, security repair, diagnostics, documentation, and a trustworthy default test suite. Phase 2 adds Codex and pi transcript readers. Phase 3 improves project identity and memory quality without changing the adapter contract.
+
+The 2026-08-03 safety revision narrows automatic lifecycle execution: repository-controlled configuration cannot select a provider, endpoint, credential variable, or storage path; automatic subprocesses never initialize a provider. The installer therefore registers only local file/activity hooks and removes the earlier provider-dependent session-start/prompt hooks. Explicit CLI/tool retrieval remains available.
 
 ## Investigation Findings
 
@@ -191,11 +193,11 @@ Projectless sessions do not borrow a guessed repository namespace. They may rece
 
 ### Session start
 
-Load a bounded project context plus optional infrastructure context. Pre-warm the file-memory index. Retrieval failure is non-blocking.
+The protocol reserves this request for trusted in-process runtimes. The automatic CLI runner does not initialize a provider and fails open with a redacted diagnostic. First-party installers do not register this automatic hook; explicit `dualmem context` remains the supported provider-backed path.
 
 ### Prompt-aware retrieval
 
-Use substantive prompt text as a task-aware query. Skip acknowledgements and duplicate prompt hashes. Cache by session, project identity, and query hash to avoid duplicate injection and provider calls.
+For trusted in-process runtimes, use substantive prompt text as a task-aware query, skip acknowledgements, and cache by session, project identity, and query hash. This cache is process-local only. The automatic CLI runner does not transmit prompt text to a provider, and first-party installers do not register prompt hooks.
 
 ### File-scoped retrieval
 
@@ -215,8 +217,8 @@ Drivers advertise supported capabilities so installation and doctor output do no
 
 | Capability | Claude Code | Codex | pi |
 |---|---:|---:|---:|
-| Session start | Yes | Yes | Yes |
-| Prompt-aware context | Yes | Yes | Extension-dependent |
+| Automatic session start | No | No | No |
+| Automatic prompt context | No | No | No |
 | Pre-read context | Yes | Limited | Yes |
 | Structured writes | Yes | `apply_patch` | Yes |
 | Native DualMem tool | Instructions/CLI | Skill/CLI | Yes |
@@ -250,8 +252,10 @@ The common installer:
 6. Never displays credential values in dry-run output, diffs, logs, or errors.
 7. Reports harness-specific trust, reload, or restart steps.
 8. Produces no filesystem changes on a second identical run.
+9. Publishes the protected environment and launcher before any dependent hook, and removes harness hooks before shared cleanup during uninstall.
+10. Retains shared assets whenever a noncanonical Claude, Codex, or pi integration still references the launcher.
 
-For pi, the driver replaces the current hardcoded extension with a generated thin extension. The extension emits normalized events, delegates namespace and policy to the runtime, and retains pi's useful native DualMem tool. Command execution uses argument arrays, shared configuration, bounded timeouts, and redacted errors.
+For pi, the driver replaces the current hardcoded extension with a generated thin extension. The extension emits local file/activity events, delegates namespace and policy to the runtime, and retains pi's useful native DualMem tool for explicit retrieval. Command execution uses argument arrays, shared configuration, bounded timeouts, and redacted errors. Response diagnostics and successful-exit standard error are surfaced only as a generic warning.
 
 Migration may read an existing credential-bearing hook once to move values into the protected env file, but it must never print them. If extraction is ambiguous, installation stops before modification and reports a manual step. After verified migration, the old hook is replaced and exposed provider keys are rotated by the user.
 
@@ -281,6 +285,8 @@ Provider reachability remains part of the existing engine health command, not in
 - Hook output is model-visible and never includes environment dumps or credential-bearing command text.
 - Adapter metadata is bounded and filtered through an allowlist.
 - Arbitrary adapter code is not dynamically loaded in Phase 1.
+- Automatic lifecycle configuration trusts user-level configuration and only the repository's `default_namespace`; it ignores repository storage/provider/endpoint/credential settings.
+- Automatic file reads open only the local SQLite store, while writes/session end use a metadata-only activity sink. Session/prompt events fail open without provider initialization.
 - The current Gemini and Z.AI credentials must be rotated because literal values appeared in an imported hook and diagnostic output.
 
 ## Legacy Package and Test Suite Policy
@@ -322,7 +328,7 @@ Acceptance requires:
 - Generated files contain credential variable names but no credential values.
 - Permission modes are correct.
 - All three harnesses resolve the Geoffrey Engram repository to `claude:geoffreyengram` through the shared resolver.
-- Equivalent session, prompt, read, and write fixtures yield equivalent runtime calls where each harness advertises the capability.
+- Equivalent session, prompt, read, and write fixtures yield equivalent calls for trusted injected runtimes; installed automatic capabilities advertise only local file/activity behavior.
 - Unsupported events and unsupported protocol major versions fail open with deterministic diagnostics.
 - Doctor distinguishes missing optional transcript support from a broken Phase 1 installation.
 
@@ -337,6 +343,7 @@ Phase 2 fixture checks require Claude, Codex, and pi transcripts describing equi
 - Add `DualMem Event v1`, the shared runtime, and project identity resolver.
 - Add first-party Claude, Codex, and pi adapters.
 - Add Claude, Codex, and pi integration drivers plus normalized-event documentation for future harnesses.
+- Restrict automatic lifecycle execution to local store/activity behavior and deprecate installed provider-dependent session/prompt hooks.
 - Replace credential-bearing and hardcoded hooks/extensions with shared runtime configuration.
 - Add offline integration doctor, dry-run, and targeted uninstall.
 - Refresh the README around harness-neutral project memory, deprecation, installation, capabilities, and test tiers.

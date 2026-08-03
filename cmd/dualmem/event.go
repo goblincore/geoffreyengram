@@ -24,17 +24,7 @@ func cmdEvent(cfg CLIConfig) {
 		lifecycleArgumentError("event")
 		return
 	}
-	raw, err := readLifecycleInput(os.Stdin)
-	if err != nil || !validNormalizedLifecycleInput(raw) {
-		runEvent(context.Background(), nil, bytes.NewReader(raw), os.Stdout, os.Stderr)
-		return
-	}
-	engine, err := newEngine(cfg)
-	if err != nil {
-		runEvent(context.Background(), nil, bytes.NewReader(raw), os.Stdout, os.Stderr)
-		return
-	}
-	runEvent(context.Background(), newHarnessRuntime(engine), bytes.NewReader(raw), os.Stdout, os.Stderr)
+	runAutomaticEvent(context.Background(), cfg, os.Stdin, os.Stdout, os.Stderr)
 }
 
 func cmdHook(cfg CLIConfig) {
@@ -52,17 +42,71 @@ func cmdHook(cfg CLIConfig) {
 		fmt.Fprintln(os.Stderr, "dualmem hook: unknown adapter")
 		os.Exit(2)
 	}
-	raw, err := readLifecycleInput(os.Stdin)
-	if err != nil || !validNativeLifecycleInput(adapter, raw) {
-		runHook(context.Background(), nil, registry, *adapterName, bytes.NewReader(raw), os.Stdout, os.Stderr)
-		return
-	}
-	engine, err := newEngine(cfg)
+	runAutomaticHook(context.Background(), cfg, registry, *adapterName, adapter, os.Stdin, os.Stdout, os.Stderr)
+}
+
+func runAutomaticEvent(ctx context.Context, cfg CLIConfig, in io.Reader, out, errOut io.Writer) int {
+	raw, err := readLifecycleInput(in)
 	if err != nil {
-		runHook(context.Background(), nil, registry, *adapterName, bytes.NewReader(raw), os.Stdout, os.Stderr)
-		return
+		return runEvent(ctx, nil, bytes.NewReader(raw), out, errOut)
 	}
-	runHook(context.Background(), newHarnessRuntime(engine), registry, *adapterName, bytes.NewReader(raw), os.Stdout, os.Stderr)
+	event, err := harness.DecodeEvent(bytes.NewReader(raw), lifecycleInputLimit)
+	if err != nil {
+		return runEvent(ctx, nil, bytes.NewReader(raw), out, errOut)
+	}
+	runtime, closeRuntime, err := lifecycleRuntimeForEvents(cfg, []harness.Event{event})
+	if err != nil {
+		return runEvent(ctx, nil, bytes.NewReader(raw), out, errOut)
+	}
+	defer closeRuntime()
+	return runEvent(ctx, runtime, bytes.NewReader(raw), out, errOut)
+}
+
+func runAutomaticHook(ctx context.Context, cfg CLIConfig, registry harness.Registry, adapterName string, adapter harness.Adapter, in io.Reader, out, errOut io.Writer) int {
+	raw, err := readLifecycleInput(in)
+	if err != nil {
+		return runHook(ctx, nil, registry, adapterName, bytes.NewReader(raw), out, errOut)
+	}
+	events, err := adapter.Decode(raw)
+	if err != nil {
+		return runHook(ctx, nil, registry, adapterName, bytes.NewReader(raw), out, errOut)
+	}
+	runtime, closeRuntime, err := lifecycleRuntimeForEvents(cfg, events)
+	if err != nil {
+		return runHook(ctx, nil, registry, adapterName, bytes.NewReader(raw), out, errOut)
+	}
+	defer closeRuntime()
+	return runHook(ctx, runtime, registry, adapterName, bytes.NewReader(raw), out, errOut)
+}
+
+func lifecycleRuntimeForEvents(cfg CLIConfig, events []harness.Event) (*harness.Runtime, func(), error) {
+	resolveOptions := harness.DefaultResolveOptions()
+	resolveOptions.ConfiguredNamespace = strings.TrimSpace(cfg.DefaultNamespace)
+	runtime := &harness.Runtime{
+		Activity:       &harness.JSONLActivitySink{},
+		ResolveOptions: resolveOptions,
+	}
+	requiresLocalStore := false
+	for _, event := range events {
+		switch event.Kind {
+		case harness.EventSessionStart, harness.EventPrompt:
+			// Automatic hooks never transmit repository prompts or stored memory
+			// to an external provider. Provider-backed retrieval remains available
+			// through explicit interactive commands; hooks fail open here.
+			return nil, func() {}, fmt.Errorf("lifecycle provider unavailable")
+		case harness.EventFileRead:
+			requiresLocalStore = true
+		}
+	}
+	if !requiresLocalStore {
+		return runtime, func() {}, nil
+	}
+	engine, err := dualmem.NewForCodeSearch(dualmem.Config{SQLitePath: cfg.Storage.SQLitePath})
+	if err != nil {
+		return nil, func() {}, err
+	}
+	runtime.Memory = engine
+	return runtime, func() { _ = engine.Close() }, nil
 }
 
 func lifecycleArgumentError(command string) {
@@ -222,22 +266,4 @@ func writeLifecycleDiagnostic(errOut io.Writer, stage string) {
 		stage = "processing"
 	}
 	fmt.Fprintf(errOut, "dualmem lifecycle: %s unavailable\n", stage)
-}
-
-func newHarnessRuntime(engine *dualmem.Engine) *harness.Runtime {
-	return &harness.Runtime{
-		Memory:         engine,
-		Activity:       &harness.JSONLActivitySink{},
-		ResolveOptions: harness.DefaultResolveOptions(),
-	}
-}
-
-func validNormalizedLifecycleInput(raw []byte) bool {
-	_, err := harness.DecodeEvent(bytes.NewReader(raw), lifecycleInputLimit)
-	return err == nil
-}
-
-func validNativeLifecycleInput(adapter harness.Adapter, raw []byte) bool {
-	_, err := adapter.Decode(raw)
-	return err == nil
 }

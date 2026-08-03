@@ -131,7 +131,14 @@ func projectedHarnesses(drivers []Driver, currentlyManaged, selected map[string]
 }
 
 func validateAndSortChanges(changes []Change) error {
-	sort.SliceStable(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
+	sort.SliceStable(changes, func(i, j int) bool {
+		left, right := changePhaseRank(changes[i].Phase), changePhaseRank(changes[j].Phase)
+		if left != right {
+			return left < right
+		}
+		return changes[i].Path < changes[j].Path
+	})
+	seenPaths := make(map[string]struct{}, len(changes))
 	for i := range changes {
 		if changes[i].Path == "" {
 			return fmt.Errorf("integration change has an empty path")
@@ -141,11 +148,28 @@ func validateAndSortChanges(changes []Change) error {
 		default:
 			return fmt.Errorf("integration change for %q has invalid action %q", changes[i].Path, changes[i].Action)
 		}
-		if i > 0 && changes[i-1].Path == changes[i].Path {
+		if changePhaseRank(changes[i].Phase) < 0 {
+			return fmt.Errorf("integration change for %q has invalid phase %d", changes[i].Path, changes[i].Phase)
+		}
+		if _, exists := seenPaths[changes[i].Path]; exists {
 			return fmt.Errorf("multiple integration changes target %q", changes[i].Path)
 		}
+		seenPaths[changes[i].Path] = struct{}{}
 	}
 	return nil
+}
+
+func changePhaseRank(phase ChangePhase) int {
+	switch phase {
+	case PhasePrerequisite:
+		return 0
+	case PhaseIntegration:
+		return 1
+	case PhaseCleanup:
+		return 2
+	default:
+		return -1
+	}
 }
 
 func (result Result) String() string {

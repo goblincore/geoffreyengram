@@ -19,15 +19,15 @@ It uses `~/.config/dualmem/bin/dualmem-run` so credentials stay in `~/.config/du
 
 | Codex signal | DualMem behavior |
 | --- | --- |
-| Session start | Injects project and shared-infrastructure context when available. |
-| User prompt | Injects task-relevant context; trivial acknowledgements are suppressed. |
 | `apply_patch` completion | Records changed paths parsed from the patch. |
 
-Each Codex hook launches a separate DualMem process, so the runtime's in-memory duplicate-prompt cache does not persist across hook invocations. Do not rely on duplicate suppression in the installed integration. Codex also does not currently provide a general file-read lifecycle integration here, and edits outside `apply_patch` are not observed by the installed adapter. Codex transcript distillation is Phase 2; this integration does not read or distill Codex conversation transcripts.
+Automatic session-start and prompt hooks are deliberately not installed: they would require sending repository prompts or stored memory to a provider from an automatic subprocess. Use the managed instructions and explicit `dualmem context`, search, or consult commands when task-aware retrieval is wanted. The Event v1 runtime's prompt cache is process-local only and does not provide cross-subprocess deduplication.
+
+Codex does not currently provide a general file-read lifecycle integration here, and edits outside `apply_patch` are not observed by the installed adapter. Codex transcript distillation is Phase 2; this integration does not read or distill Codex conversation transcripts.
 
 ## Restart and trust
 
-After applying the plan, restart Codex so it reloads `hooks.json` and `AGENTS.md`. On the next session start, confirm that the launcher path is trusted by your local Codex configuration and that `dualmem integrate doctor --json` reports installed capabilities rather than missing integration. If your installation prompts before running a new hook command, approve only the reviewed launcher path—not a copied command containing provider credentials.
+After applying the plan, restart Codex so it reloads `hooks.json` and `AGENTS.md`. Confirm that the launcher path is trusted by your local Codex configuration and that `dualmem integrate doctor --json` reports `file_write` rather than missing integration. If your installation prompts before running a new hook command, approve only the reviewed launcher path—not a copied command containing provider credentials.
 
 For removal, review the targeted plan first:
 
@@ -36,4 +36,4 @@ dualmem integrate --harness codex --uninstall --dry-run
 dualmem integrate --harness codex --uninstall
 ```
 
-The installer removes only its managed hooks and marked instructions. It keeps the shared launcher if Claude Code or pi still uses it.
+The installer removes only its managed hooks and marked instructions. It also removes obsolete managed session-start/prompt hooks from earlier DualMem installs. It keeps the shared launcher if Claude Code or pi still uses it, or if a modified noncanonical hook still references it.

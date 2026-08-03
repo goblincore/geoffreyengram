@@ -14,6 +14,7 @@ const FAILURE = "dualmem lifecycle unavailable";
 type DualMemResponse = {
   action?: "inject_context" | "recorded" | "none";
   context?: string;
+  diagnostics?: Array<{ code?: string; message?: string }>;
 };
 
 type RunResult = {
@@ -34,7 +35,7 @@ function run(args: string[], cwd: string, input?: string, timeout = COMMAND_TIME
       timeout,
       maxBuffer: OUTPUT_LIMIT,
       windowsHide: true,
-    }, (error, stdout) => {
+    }, (error, stdout, stderr) => {
       if (error) {
         finish({ stdout: "", diagnostic: FAILURE });
         return;
@@ -43,7 +44,10 @@ function run(args: string[], cwd: string, input?: string, timeout = COMMAND_TIME
         finish({ stdout: "", diagnostic: FAILURE });
         return;
       }
-      finish({ stdout: stdout.trim() });
+      finish({
+        stdout: stdout.trim(),
+        diagnostic: stderr.trim() ? FAILURE : undefined,
+      });
     });
     child.on("error", () => finish({ stdout: "", diagnostic: FAILURE }));
     if (input !== undefined) child.stdin?.end(input);
@@ -51,7 +55,7 @@ function run(args: string[], cwd: string, input?: string, timeout = COMMAND_TIME
 }
 
 async function submitEvent(
-  kind: "session_start" | "prompt" | "file_read" | "file_write" | "session_end",
+  kind: "file_read" | "file_write" | "session_end",
   cwd: string,
   fields: Record<string, unknown> = {},
 ): Promise<{ response?: DualMemResponse; diagnostic?: string }> {
@@ -63,9 +67,13 @@ async function submitEvent(
     ...fields,
   });
   const result = await run(["event"], cwd, payload, EVENT_TIMEOUT_MS);
-  if (result.diagnostic) return { diagnostic: result.diagnostic };
+  if (!result.stdout) return { diagnostic: result.diagnostic ?? FAILURE };
   try {
-    return { response: JSON.parse(result.stdout) as DualMemResponse };
+    const response = JSON.parse(result.stdout) as DualMemResponse;
+    return {
+      response,
+      diagnostic: result.diagnostic ?? (response.diagnostics?.length ? FAILURE : undefined),
+    };
   } catch {
     return { diagnostic: FAILURE };
   }
@@ -81,37 +89,6 @@ function filePath(input: Record<string, unknown>): string | undefined {
 }
 
 export default function dualmemExtension(pi: ExtensionAPI) {
-  pi.on("session_start", async (_event, ctx) => {
-    const result = await submitEvent("session_start", ctx.cwd);
-    reportFailure(ctx, result.diagnostic);
-    if (result.response?.action === "inject_context" && result.response.context) {
-      pi.sendMessage({
-        customType: "dualmem-context",
-        content: result.response.context,
-        display: false,
-        details: { source: "dualmem-session-start" },
-      });
-    }
-  });
-
-  // BEGIN DUALMEM PI PROMPT HOOK
-  pi.on("before_agent_start", async (event, ctx) => {
-    const result = await submitEvent("prompt", ctx.cwd, { prompt: event.prompt });
-    reportFailure(ctx, result.diagnostic);
-    if (result.response?.action === "inject_context" && result.response.context) {
-      return {
-        message: {
-          customType: "dualmem-prompt-context",
-          content: result.response.context,
-          display: false,
-          details: { source: "dualmem-prompt" },
-        },
-      };
-    }
-    return undefined;
-  });
-  // END DUALMEM PI PROMPT HOOK
-
   pi.on("tool_call", async (event, ctx) => {
     if (event.toolName !== "read") return;
     const path = filePath(event.input as Record<string, unknown>);

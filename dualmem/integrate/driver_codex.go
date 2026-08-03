@@ -8,8 +8,8 @@ import (
 type codexDriver struct{}
 
 var codexHookSpecs = []hookSpec{
-	{event: "SessionStart", adapter: "codex"},
-	{event: "UserPromptSubmit", adapter: "codex"},
+	{event: "SessionStart", adapter: "codex", deprecated: true},
+	{event: "UserPromptSubmit", adapter: "codex", deprecated: true},
 	{event: "PostToolUse", matcher: "apply_patch", adapter: "codex"},
 }
 
@@ -30,7 +30,7 @@ func (codexDriver) Detect(_ context.Context, home string) (Detection, error) {
 	managed = managed || instructions.exists && containsManagedInstructions(instructions.bytes)
 	return Detection{
 		Present: present, Managed: managed,
-		Capabilities: []Capability{"session_start", "prompt", "file_write"},
+		Capabilities: []Capability{"file_write"},
 	}, nil
 }
 

@@ -11,6 +11,7 @@ import (
 type ResolveOptions struct {
 	LegacyPrefix           string
 	ConfiguredProject      string
+	ConfiguredNamespace    string
 	AllowDirectoryFallback bool
 	GitCommonDir           func(context.Context, string) (string, error)
 }
@@ -69,6 +70,13 @@ func ResolveProject(ctx context.Context, event Event, opts ResolveOptions) (Proj
 			Root:      root,
 			Name:      name,
 			Namespace: opts.LegacyPrefix + name,
+		}, nil
+	}
+
+	if namespace := strings.TrimSpace(opts.ConfiguredNamespace); namespace != "" {
+		return ProjectIdentity{
+			Name:      strings.TrimPrefix(namespace, opts.LegacyPrefix),
+			Namespace: namespace,
 		}, nil
 	}
 

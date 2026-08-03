@@ -19,14 +19,12 @@ The extension calls `~/.config/dualmem/bin/dualmem-run` by default, or the `DUAL
 
 | pi signal | DualMem behavior |
 | --- | --- |
-| `session_start` | Injects project and shared-infrastructure context. |
 | `tool_call` read | Supplies file-scoped context when available. |
 | `tool_result` edit/write | Records file activity. |
 | `session_shutdown` | Records session-end activity. |
-| `before_agent_start` | Injects prompt context only when the installed pi exposes this hook. |
 | Registered `dualmem` tool | Runs approved DualMem subcommands through an argument vector. |
 
-Prompt support is probed from the installed pi type definitions during planning; it is not guaranteed across pi versions. pi transcript distillation is Phase 2, so session-end activity does not imply transcript ingestion.
+Automatic session-start and prompt handlers are deliberately omitted: they would require provider-backed retrieval from an automatic subprocess. The registered tool remains the explicit route for `context`, search, consult, add, and checkpoint operations. Local lifecycle failures, response diagnostics, and successful-exit stderr are surfaced only as the redacted warning `dualmem lifecycle unavailable`; raw diagnostic text is never shown. pi transcript distillation is Phase 2, so session-end activity does not imply transcript ingestion.
 
 ## Restart and trust
 

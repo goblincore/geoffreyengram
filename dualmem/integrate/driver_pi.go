@@ -7,9 +7,7 @@ import (
 	"path/filepath"
 )
 
-type piDriver struct {
-	promptSupported bool
-}
+type piDriver struct{}
 
 func (piDriver) Name() string { return "pi" }
 
@@ -21,16 +19,13 @@ func (driver piDriver) Detect(_ context.Context, home string) (Detection, error)
 	if err != nil {
 		return Detection{}, err
 	}
-	managed := extension.exists && (bytes.Equal(extension.bytes, renderedPiExtension(true)) || bytes.Equal(extension.bytes, renderedPiExtension(false)))
+	managed := extension.exists && bytes.Equal(extension.bytes, renderedPiExtension())
 	instructions, err := readFileState(instructionsPath)
 	if err != nil {
 		return Detection{}, err
 	}
 	managed = managed || instructions.exists && containsManagedInstructions(instructions.bytes)
-	capabilities := []Capability{"session_start", "file_read", "file_write", "session_end", "tool"}
-	if driver.promptSupported {
-		capabilities = append(capabilities, "prompt")
-	}
+	capabilities := []Capability{"file_read", "file_write", "session_end", "tool"}
 	return Detection{Present: present, Managed: managed, Capabilities: capabilities}, nil
 }
 
@@ -46,17 +41,11 @@ func (driver piDriver) Plan(_ context.Context, request DriverRequest) ([]Change,
 		if current.exists {
 			var extension Change
 			switch {
-			case bytes.Equal(current.bytes, renderedPiExtension(true)):
+			case bytes.Equal(current.bytes, renderedPiExtension()):
 				extension = Change{
 					Path: extensionPath, Action: ActionDelete, Mode: current.mode.Perm(),
 					Before:      append([]byte(nil), current.bytes...),
-					DeleteProof: ownedAssetDeleteProof(renderedPiExtension(true)),
-				}
-			case bytes.Equal(current.bytes, renderedPiExtension(false)):
-				extension = Change{
-					Path: extensionPath, Action: ActionDelete, Mode: current.mode.Perm(),
-					Before:      append([]byte(nil), current.bytes...),
-					DeleteProof: ownedAssetDeleteProof(renderedPiExtension(false)),
+					DeleteProof: ownedAssetDeleteProof(renderedPiExtension()),
 				}
 			default:
 				if piExtensionUsesSharedLauncher(current.bytes) {
@@ -67,7 +56,7 @@ func (driver piDriver) Plan(_ context.Context, request DriverRequest) ([]Change,
 			changes = append(changes, extension)
 		}
 	} else {
-		changes = append(changes, changeForContent(extensionPath, current, renderedPiExtension(driver.promptSupported), 0o700))
+		changes = append(changes, changeForContent(extensionPath, current, renderedPiExtension(), 0o700))
 	}
 	instructions, ok, err := planManagedInstructions(instructionsPath, request.Uninstall)
 	if err != nil {

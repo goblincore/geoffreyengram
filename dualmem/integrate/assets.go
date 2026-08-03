@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -18,8 +17,6 @@ import (
 const (
 	managedInstructionsBegin = "<!-- BEGIN DUALMEM -->"
 	managedInstructionsEnd   = "<!-- END DUALMEM -->"
-	piPromptHookBegin        = "  // BEGIN DUALMEM PI PROMPT HOOK\n"
-	piPromptHookEnd          = "  // END DUALMEM PI PROMPT HOOK\n"
 )
 
 //go:embed assets/launcher.sh
@@ -31,8 +28,6 @@ var piExtensionAsset []byte
 //go:embed assets/instructions.md
 var instructionsAsset []byte
 
-var piPromptSupportProbe = installedPiSupportsPromptHook
-
 type builtinCommonPlanner struct{}
 
 type fileState struct {
@@ -42,13 +37,12 @@ type fileState struct {
 }
 
 func BuiltinBundle() Bundle {
-	promptSupported := piPromptSupportProbe()
 	return Bundle{
 		Common: builtinCommonPlanner{},
 		Drivers: []Driver{
 			claudeDriver{},
 			codexDriver{},
-			piDriver{promptSupported: promptSupported},
+			piDriver{},
 		},
 	}
 }
@@ -58,12 +52,13 @@ func (builtinCommonPlanner) PlanCommon(_ context.Context, request CommonRequest)
 	launcherPath := filepath.Join(request.Home, ".config", "dualmem", "bin", "dualmem-run")
 
 	if request.Uninstall && len(request.RemainingHarnesses) == 0 {
-		retainedPiDependency, err := retainedPiUsesSharedLauncher(request.Home)
+		retainedDependency, err := retainedIntegrationUsesSharedLauncher(request.Home)
 		if err != nil {
 			return nil, err
 		}
-		if retainedPiDependency {
-			return planRetainedCommonAssets(envPath, launcherPath)
+		if retainedDependency {
+			changes, err := planRetainedCommonAssets(envPath, launcherPath)
+			return changesWithPhase(changes, PhaseCleanup), err
 		}
 		var changes []Change
 		envChange, ok, err := planEmptyOwnedRemoval(envPath)
@@ -71,6 +66,7 @@ func (builtinCommonPlanner) PlanCommon(_ context.Context, request CommonRequest)
 			return nil, err
 		}
 		if ok {
+			envChange.Phase = PhaseCleanup
 			changes = append(changes, envChange)
 		}
 		launcherChange, ok, err := planOwnedRemoval(launcherPath, launcherAsset)
@@ -78,6 +74,7 @@ func (builtinCommonPlanner) PlanCommon(_ context.Context, request CommonRequest)
 			return nil, err
 		}
 		if ok {
+			launcherChange.Phase = PhaseCleanup
 			changes = append(changes, launcherChange)
 		}
 		return changes, nil
@@ -108,24 +105,112 @@ func (builtinCommonPlanner) PlanCommon(_ context.Context, request CommonRequest)
 	}
 	envBytes = appendCredentialAssignments(envBytes, credentials)
 	envChange := changeForContent(envPath, envState, envBytes, 0o600)
+	envChange.Phase = PhasePrerequisite
 
 	launcherState, err := readFileState(launcherPath)
 	if err != nil {
 		return nil, err
 	}
 	launcherChange := changeForContent(launcherPath, launcherState, launcherAsset, 0o700)
+	launcherChange.Phase = PhasePrerequisite
 	return []Change{envChange, launcherChange}, nil
 }
 
-func retainedPiUsesSharedLauncher(home string) (bool, error) {
+func changesWithPhase(changes []Change, phase ChangePhase) []Change {
+	for i := range changes {
+		changes[i].Phase = phase
+	}
+	return changes
+}
+
+func retainedIntegrationUsesSharedLauncher(home string) (bool, error) {
 	extension, err := readFileState(filepath.Join(home, ".pi", "agent", "extensions", "dualmem.ts"))
-	if err != nil || !extension.exists {
+	if err != nil {
 		return false, err
 	}
-	if bytes.Equal(extension.bytes, renderedPiExtension(true)) || bytes.Equal(extension.bytes, renderedPiExtension(false)) {
-		return false, nil
+	if extension.exists && !bytes.Equal(extension.bytes, renderedPiExtension()) && piExtensionUsesSharedLauncher(extension.bytes) {
+		return true, nil
 	}
-	return piExtensionUsesSharedLauncher(extension.bytes), nil
+
+	for _, candidate := range []struct {
+		path  string
+		specs []hookSpec
+	}{
+		{path: filepath.Join(home, ".claude", "settings.json"), specs: claudeHookSpecs},
+		{path: filepath.Join(home, ".codex", "hooks.json"), specs: codexHookSpecs},
+	} {
+		state, err := readFileState(candidate.path)
+		if err != nil {
+			return false, err
+		}
+		if !state.exists {
+			continue
+		}
+		dependent, err := retainedHookDocumentUsesSharedLauncher(state.bytes, candidate.specs)
+		if err != nil {
+			return false, fmt.Errorf("inspect retained hook dependency %q: %w", candidate.path, err)
+		}
+		if dependent {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func retainedHookDocumentUsesSharedLauncher(raw []byte, specs []hookSpec) (bool, error) {
+	_, hooks, err := decodeHookDocument(raw)
+	if err != nil {
+		return false, err
+	}
+	for event, rawGroups := range hooks {
+		groups, err := decodeHookGroups(rawGroups)
+		if err != nil {
+			return false, err
+		}
+		for _, rawGroup := range groups {
+			var group map[string]json.RawMessage
+			if err := json.Unmarshal(rawGroup, &group); err != nil {
+				return false, err
+			}
+			matcher, err := groupMatcher(group)
+			if err != nil {
+				return false, err
+			}
+			var hooks []json.RawMessage
+			if rawHooks, exists := group["hooks"]; exists {
+				if err := json.Unmarshal(rawHooks, &hooks); err != nil {
+					return false, err
+				}
+			}
+			for _, rawHook := range hooks {
+				var hook struct {
+					Type    string `json:"type"`
+					Command string `json:"command"`
+				}
+				if err := json.Unmarshal(rawHook, &hook); err != nil {
+					return false, err
+				}
+				if hook.Type != "command" || !hookCommandUsesSharedLauncher(hook.Command) {
+					continue
+				}
+				removable := false
+				for _, spec := range specs {
+					if spec.event == event && spec.matcher == matcher && jsonSemanticEqual(rawHook, managedCommandHook(spec)) {
+						removable = true
+						break
+					}
+				}
+				if !removable {
+					return true, nil
+				}
+			}
+		}
+	}
+	return false, nil
+}
+
+func hookCommandUsesSharedLauncher(command string) bool {
+	return strings.Contains(command, "dualmem-run") || strings.Contains(command, "DUALMEM_RUN")
 }
 
 func planRetainedCommonAssets(paths ...string) ([]Change, error) {
@@ -594,34 +679,6 @@ func appendCredentialAssignments(existing []byte, credentials map[string]string)
 	return output
 }
 
-func installedPiSupportsPromptHook() bool {
-	piPath, err := exec.LookPath("pi")
-	if err != nil {
-		return false
-	}
-	resolved, err := filepath.EvalSymlinks(piPath)
-	if err != nil {
-		return false
-	}
-	packageRoot := filepath.Dir(filepath.Dir(resolved))
-	typesPath := filepath.Join(packageRoot, "dist", "core", "extensions", "types.d.ts")
-	raw, err := os.ReadFile(typesPath)
-	if err != nil {
-		return false
-	}
-	return bytes.Contains(raw, []byte(`on(event: "before_agent_start"`))
-}
-
-func renderedPiExtension(promptSupported bool) []byte {
-	asset := append([]byte(nil), piExtensionAsset...)
-	if promptSupported {
-		return asset
-	}
-	begin := bytes.Index(asset, []byte(piPromptHookBegin))
-	end := bytes.Index(asset, []byte(piPromptHookEnd))
-	if begin < 0 || end < begin {
-		return asset
-	}
-	end += len(piPromptHookEnd)
-	return append(asset[:begin], asset[end:]...)
+func renderedPiExtension() []byte {
+	return append([]byte(nil), piExtensionAsset...)
 }

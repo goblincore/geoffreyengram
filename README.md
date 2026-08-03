@@ -6,11 +6,11 @@ The first-party integrations use the same lifecycle runtime but do not claim ide
 
 | Harness | Installed lifecycle coverage | Limitation |
 | --- | --- | --- |
-| Claude Code | session start, prompt, file read, file write | Native Claude hooks only. |
-| Codex | session start, prompt, `apply_patch` file writes | No general file-read hook; only `apply_patch` writes are observed. |
-| pi | session start, file read/write, session end, tool access; prompt when the installed pi supports `before_agent_start` | Prompt injection is feature-detected, not assumed. |
+| Claude Code | file read and file write | Automatic provider-backed session/prompt retrieval is not installed. |
+| Codex | `apply_patch` file writes | No general file-read hook; edits outside `apply_patch` are not observed. |
+| pi | file read/write, session end, and explicit tool access | Automatic provider-backed session/prompt retrieval is not installed. |
 
-Codex and pi transcript distillation are Phase 2 work. Lifecycle context and activity recording are available now; do not expect a transcript reader for those harnesses.
+Codex and pi transcript distillation are Phase 2 work. Local file context and activity recording are available now; use the explicit `dualmem context` or harness tool workflow for task-aware retrieval.
 
 ## Install safely
 
@@ -30,7 +30,7 @@ dualmem integrate --harness codex --dry-run
 dualmem integrate --harness codex
 ```
 
-The installer writes a shared launcher at `~/.config/dualmem/bin/dualmem-run` and a credential environment file at `~/.config/dualmem/env` (mode `0600`). It adds only its own hooks or managed instruction blocks, creates backups before updates, refuses symlink targets and changed-after-planning files, and removes only content it can prove it owns. Always review a dry run. `dualmem integrate doctor` is offline-only: it checks local paths, modes, credentials-shaped literals, project identity, and integration drift without constructing a provider or contacting a network.
+The installer writes a shared launcher at `~/.config/dualmem/bin/dualmem-run` and a credential environment file at `~/.config/dualmem/env` (mode `0600`). Shared prerequisites are published before dependent harness configuration; uninstall removes harness entries before shared cleanup. It adds only its own hooks or managed instruction blocks, creates backups before updates, refuses symlink targets and changed-after-planning files, and removes only content it can prove it owns. Always review a dry run. `dualmem integrate doctor` is offline-only: it checks local paths, modes, credentials-shaped literals, project identity, and integration drift without constructing a provider or contacting a network.
 
 Targeted uninstall is equally deliberate:
 
@@ -39,7 +39,7 @@ dualmem integrate --harness codex --uninstall --dry-run
 dualmem integrate --harness codex --uninstall
 ```
 
-The shared launcher remains while another managed harness needs it. A targeted pi uninstall stops if a modified extension still references that launcher. When removing Claude or Codex, the planner retains both shared assets if a noncanonical pi extension still names `dualmem-run` or `DUALMEM_RUN`, even if pi's managed instruction block is gone.
+The shared launcher remains while another managed harness needs it. A targeted pi uninstall stops if a modified extension still references that launcher. Modified noncanonical Claude, Codex, or pi integrations that still name `dualmem-run` or `DUALMEM_RUN` retain both shared assets until that dependency is removed intentionally.
 
 ### Credentials and rotation
 
@@ -54,6 +54,8 @@ DualMem resolves a Git repository’s common directory, so its main checkout and
 ## DualMem Event v1
 
 `DualMem Event v1` is the boundary for future harnesses: adapters translate native hook payloads into a normalized event, or a harness invokes `dualmem event` directly. The protocol supports session start, prompt, file read/write, and session end events; the runtime returns injected context, recorded activity, or no action. See [the harness protocol](docs/harness-integration.md) for the JSON schema, size limits, versioning, and fail-open contract.
+
+Automatic `event` and `hook` subprocesses have a narrower security boundary than interactive commands. They accept only repository `default_namespace` configuration, never initialize a provider, serve file context from local SQLite, and record metadata-only activity. Session-start and prompt events fail open with redacted diagnostics; provider-backed retrieval requires an explicit user or agent command.
 
 ## Everyday memory commands
 
@@ -79,7 +81,7 @@ Existing Claude-only users should follow [migration from legacy engram](docs/mig
 | [Harness protocol](docs/harness-integration.md) | `DualMem Event v1`, responses, limits, and future adapters |
 | [Claude Code](docs/example-claude-md.md) | Claude integration and managed instructions |
 | [Codex](docs/codex-integration.md) | Codex hooks, trust/restart, and coverage limits |
-| [pi](docs/pi-integration.md) | pi extension, feature detection, and coverage limits |
+| [pi](docs/pi-integration.md) | pi extension, local lifecycle coverage, and explicit tool access |
 | [Legacy migration](docs/migration-from-legacy-engram.md) | Safe move from `engram` and inline hooks |
 | [Testing](docs/testing.md) | Default, legacy, and live-provider test commands |
 

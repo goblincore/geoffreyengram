@@ -17,6 +17,17 @@ const (
 
 type Capability string
 
+// ChangePhase expresses dependency ordering between independently planned
+// filesystem changes. The zero value is a normal harness integration change;
+// shared prerequisites publish first and shared cleanup runs last.
+type ChangePhase uint8
+
+const (
+	PhaseIntegration ChangePhase = iota
+	PhasePrerequisite
+	PhaseCleanup
+)
+
 type deleteProofKind uint8
 
 const (
@@ -45,6 +56,7 @@ type Detection struct {
 type Change struct {
 	Path        string
 	Action      Action
+	Phase       ChangePhase
 	Mode        fs.FileMode
 	Before      []byte
 	After       []byte

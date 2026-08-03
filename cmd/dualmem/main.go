@@ -58,17 +58,54 @@ type CLIConfig struct {
 }
 
 func loadConfig() CLIConfig {
-	var cfg CLIConfig
-
-	// Defaults
-	cfg.Storage.Backend = "sqlite"
 	home, _ := os.UserHomeDir()
+	cfg := defaultCLIConfig(home)
+	loadUserCLIConfig(&cfg)
+
+	// Interactive commands retain the historical project-local override
+	// behavior. Automatic lifecycle commands use loadLifecycleConfig instead.
+	if data, err := os.ReadFile(".dualmem.yaml"); err == nil {
+		_ = yaml.Unmarshal(data, &cfg)
+	}
+	expandCLIConfigPaths(&cfg, home)
+	return cfg
+}
+
+func defaultCLIConfig(home string) CLIConfig {
+	var cfg CLIConfig
+	cfg.Storage.Backend = "sqlite"
 	cfg.Storage.SQLitePath = filepath.Join(home, ".local", "share", "dualmem", "memories.db")
 	cfg.Providers.EmbeddingAPIKeyEnv = "GEMINI_API_KEY"
 	cfg.Providers.EmbeddingDimension = 768
 	cfg.Pipeline.EpisodeInterval = "5m"
 	cfg.Pipeline.ArcInterval = "24h"
 	cfg.Pipeline.ProfileInterval = "168h"
+	return cfg
+}
+
+func loadLifecycleConfig() CLIConfig {
+	home, _ := os.UserHomeDir()
+	cfg := defaultCLIConfig(home)
+	loadUserCLIConfig(&cfg)
+
+	// Repository configuration is untrusted in automatic hooks. Only the
+	// project identity is accepted; storage locations, provider selection,
+	// credential environment names, endpoints, and pipeline settings remain
+	// controlled by the user's global configuration.
+	var project struct {
+		DefaultNamespace string `yaml:"default_namespace"`
+	}
+	if data, err := os.ReadFile(".dualmem.yaml"); err == nil {
+		_ = yaml.Unmarshal(data, &project)
+		if strings.TrimSpace(project.DefaultNamespace) != "" {
+			cfg.DefaultNamespace = project.DefaultNamespace
+		}
+	}
+	expandCLIConfigPaths(&cfg, home)
+	return cfg
+}
+
+func loadUserCLIConfig(cfg *CLIConfig) {
 
 	// Try loading config file (check XDG + macOS paths)
 	configDir, _ := os.UserConfigDir()
@@ -81,21 +118,15 @@ func loadConfig() CLIConfig {
 		data, err = os.ReadFile(configPath)
 	}
 	if err == nil {
-		yaml.Unmarshal(data, &cfg)
+		_ = yaml.Unmarshal(data, cfg)
 	}
+}
 
-	// Also check project-local .dualmem.yaml
-	if data, err := os.ReadFile(".dualmem.yaml"); err == nil {
-		yaml.Unmarshal(data, &cfg)
-	}
-
+func expandCLIConfigPaths(cfg *CLIConfig, home string) {
 	// Expand ~ in SQLite path (YAML doesn't expand shell vars)
 	if strings.HasPrefix(cfg.Storage.SQLitePath, "~/") {
-		home, _ := os.UserHomeDir()
 		cfg.Storage.SQLitePath = filepath.Join(home, cfg.Storage.SQLitePath[2:])
 	}
-
-	return cfg
 }
 
 // filterFlags returns only flag arguments (--flag value) from args, for flag.Parse.
@@ -249,7 +280,12 @@ func main() {
 		cmdIntegrate()
 		return
 	}
-	cfg := loadConfig()
+	var cfg CLIConfig
+	if cmd == "event" || cmd == "hook" {
+		cfg = loadLifecycleConfig()
+	} else {
+		cfg = loadConfig()
+	}
 
 	switch cmd {
 	case "event":
