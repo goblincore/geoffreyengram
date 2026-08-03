@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -37,7 +38,7 @@ type DoctorOptions struct {
 	ProjectDir string
 }
 
-var literalCredentialPattern = regexp.MustCompile(`(?i)\b(?:GEMINI_API_KEY|GOOGLE_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|ZAI_API_KEY)\s*(?:=|:)\s*(?:['\"])?[^\s'\";,&}]+`)
+var credentialAssignmentPattern = regexp.MustCompile(`(?i)\b(GEMINI_API_KEY|GOOGLE_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|ZAI_API_KEY)\s*(?:=|:)\s*("[^"\r\n]*"|'[^'\r\n]*'|[^\s;,&]+)`)
 
 // Doctor inspects only local integration state. It deliberately does not
 // construct a DualMem engine, load a provider, or contact the network.
@@ -88,7 +89,7 @@ func Doctor(ctx context.Context, opts DoctorOptions, bundle Bundle) ([]Finding, 
 			Message: fmt.Sprintf("%q is not a Git project; its directory name determines the namespace", projectDir),
 			Fix:     "Run from a repository or supply an explicit project namespace in the event.",
 		})
-	} else if identity.Root != "" && filepath.Clean(identity.Root) != projectDir {
+	} else if identity.Root != "" && isLinkedWorktree(ctx, projectDir, identity.Root) {
 		findings = append(findings, Finding{
 			Code: "worktree_identity", Severity: SeverityInfo,
 			Message: fmt.Sprintf("worktree %q shares project identity rooted at %q", projectDir, identity.Root),
@@ -99,17 +100,23 @@ func Doctor(ctx context.Context, opts DoctorOptions, bundle Bundle) ([]Finding, 
 		if !detection.Present {
 			continue
 		}
-		findings = append(findings, Finding{
-			Code:     "capabilities",
-			Severity: SeverityOK,
-			Harness:  detection.Harness,
-			Message:  fmt.Sprintf("installed capabilities: %s", joinCapabilities(detection.Capabilities)),
-		})
 		missing, err := missingIntegrationParts(home, detection.Harness)
 		if err != nil {
 			return nil, err
 		}
-		if !detection.Managed || len(missing) > 0 {
+		complete := detection.Managed && len(missing) == 0
+		if complete {
+			findings = append(findings, Finding{
+				Code: "installed_capabilities", Severity: SeverityOK, Harness: detection.Harness,
+				Message: fmt.Sprintf("available capabilities: %s", joinCapabilities(detection.Capabilities)),
+			})
+		} else {
+			findings = append(findings, Finding{
+				Code: "supported_capabilities", Severity: SeverityInfo, Harness: detection.Harness,
+				Message: fmt.Sprintf("driver-supported capabilities after complete installation: %s", joinCapabilities(detection.Capabilities)),
+			})
+		}
+		if !complete {
 			detail := integrationArtifact(detection.Harness)
 			if len(missing) > 0 {
 				detail = strings.Join(missing, " and ")
@@ -141,10 +148,14 @@ func Doctor(ctx context.Context, opts DoctorOptions, bundle Bundle) ([]Finding, 
 			continue
 		}
 		owner := integrateChangeOwner(home, change.Path)
+		repairHarness := owner
+		if repairHarness == "shared" || repairHarness == "unknown" {
+			repairHarness = "all"
+		}
 		findings = append(findings, Finding{
 			Code: "installer_drift", Severity: SeverityWarning, Harness: owner,
 			Message: fmt.Sprintf("current integration plan would %s %s", change.Action, filepath.Base(change.Path)),
-			Fix:     "Review dualmem integrate --harness " + owner + " --dry-run before applying changes.",
+			Fix:     "Review dualmem integrate --harness " + repairHarness + " --dry-run before applying changes.",
 		})
 	}
 	sortFindings(findings)
@@ -183,7 +194,7 @@ func missingIntegrationParts(home, name string) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("unknown integration harness %q", name)
 	}
-	managedHooks, err := hookDocumentManaged(hookPath, specs)
+	missingHooks, err := missingManagedHooks(hookPath, specs)
 	if err != nil {
 		return nil, err
 	}
@@ -192,13 +203,64 @@ func missingIntegrationParts(home, name string) ([]string, error) {
 		return nil, err
 	}
 	missing := make([]string, 0, 2)
-	if !managedHooks {
-		missing = append(missing, "hooks")
+	if len(missingHooks) > 0 {
+		missing = append(missing, "hooks ("+strings.Join(missingHooks, ", ")+")")
 	}
 	if !instructions.exists || !containsManagedInstructions(instructions.bytes) {
 		missing = append(missing, "instruction block")
 	}
 	return missing, nil
+}
+
+func missingManagedHooks(path string, specs []hookSpec) ([]string, error) {
+	current, err := readFileState(path)
+	if err != nil {
+		return nil, err
+	}
+	if !current.exists {
+		return hookSpecLabels(specs), nil
+	}
+	_, hooks, err := decodeHookDocument(current.bytes)
+	if err != nil {
+		return nil, err
+	}
+	missing := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		groups, err := decodeHookGroups(hooks[spec.event])
+		if err != nil {
+			return nil, err
+		}
+		found := false
+		for _, group := range groups {
+			managed, err := groupContainsManagedHook(group, spec)
+			if err != nil {
+				return nil, err
+			}
+			if managed {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing = append(missing, hookSpecLabel(spec))
+		}
+	}
+	return missing, nil
+}
+
+func hookSpecLabels(specs []hookSpec) []string {
+	labels := make([]string, len(specs))
+	for i, spec := range specs {
+		labels[i] = hookSpecLabel(spec)
+	}
+	return labels
+}
+
+func hookSpecLabel(spec hookSpec) string {
+	if spec.matcher == "" {
+		return spec.event
+	}
+	return spec.event + "/" + spec.matcher
 }
 
 func joinCapabilities(capabilities []Capability) string {
@@ -255,6 +317,7 @@ func appendHarnessConfigurationFindings(findings []Finding, home string) ([]Find
 		harness string
 		path    string
 	}{
+		{"shared", filepath.Join(home, ".config", "dualmem", "bin", "dualmem-run")},
 		{"claude", filepath.Join(home, ".claude", "settings.json")},
 		{"claude", filepath.Join(home, ".claude", "CLAUDE.md")},
 		{"codex", filepath.Join(home, ".codex", "hooks.json")},
@@ -270,7 +333,7 @@ func appendHarnessConfigurationFindings(findings []Finding, home string) ([]Find
 		if !state.exists {
 			continue
 		}
-		if literalCredentialPattern.Match(state.bytes) {
+		if containsLiteralCredential(state.bytes) {
 			findings = append(findings, Finding{
 				Code: "literal_credential", Severity: SeverityError, Harness: target.harness,
 				Message: fmt.Sprintf("credential-shaped literal found in %s", target.path),
@@ -299,6 +362,49 @@ func appendHarnessConfigurationFindings(findings []Finding, home string) ([]Find
 		})
 	}
 	return findings, nil
+}
+
+func containsLiteralCredential(raw []byte) bool {
+	for _, match := range credentialAssignmentPattern.FindAllSubmatch(raw, -1) {
+		if len(match) != 3 {
+			continue
+		}
+		name := strings.ToUpper(string(match[1]))
+		value := strings.TrimSpace(string(match[2]))
+		if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
+			value = value[1 : len(value)-1]
+		}
+		if value == "$"+name || value == "${"+name+"}" || value == "process.env."+name {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func isLinkedWorktree(ctx context.Context, directory, identityRoot string) bool {
+	output, err := exec.CommandContext(ctx, "git", "-C", directory, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return false
+	}
+	checkoutRoot := canonicalDoctorPath(strings.TrimSpace(string(output)))
+	commonRoot := canonicalDoctorPath(identityRoot)
+	return checkoutRoot != "" && commonRoot != "" && checkoutRoot != commonRoot
+}
+
+func canonicalDoctorPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		path = resolved
+	}
+	absolute, err := filepath.Abs(path)
+	if err == nil {
+		path = absolute
+	}
+	return filepath.Clean(path)
 }
 
 func containsSplitNamespaceGuidance(raw []byte) bool {
