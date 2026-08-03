@@ -108,9 +108,12 @@ func hookDocumentManaged(path string, specs []hookSpec) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		managed := managedHookGroup(spec)
 		for _, group := range groups {
-			if jsonSemanticEqual(group, managed) {
+			managed, err := groupContainsManagedHook(group, spec)
+			if err != nil {
+				return false, err
+			}
+			if managed {
 				return true, nil
 			}
 		}
@@ -132,15 +135,19 @@ func mergeHookDocument(raw []byte, specs []hookSpec, uninstall bool) ([]byte, bo
 		managed := managedHookGroup(spec)
 		filtered := make([]json.RawMessage, 0, len(groups)+1)
 		for _, group := range groups {
-			if jsonSemanticEqual(group, managed) {
-				changed = true
-				continue
+			stripped, keep, strippedManaged, err := stripManagedHook(group, spec)
+			if err != nil {
+				return nil, false, err
 			}
-			if !uninstall {
-				stripped, keep, strippedLegacy, err := stripLegacyCredentialHooks(group)
+			if strippedManaged {
+				changed = true
+			}
+			if !uninstall && keep {
+				legacyStripped, legacyKeep, strippedLegacy, err := stripLegacyCredentialHooks(stripped)
 				if err != nil {
 					return nil, false, err
 				}
+				stripped, keep = legacyStripped, legacyKeep
 				if strippedLegacy {
 					changed = true
 				}
@@ -149,7 +156,9 @@ func mergeHookDocument(raw []byte, specs []hookSpec, uninstall bool) ([]byte, bo
 				}
 				continue
 			}
-			filtered = append(filtered, group)
+			if keep {
+				filtered = append(filtered, stripped)
+			}
 		}
 		if uninstall {
 			if len(filtered) == 0 {
@@ -212,16 +221,104 @@ func decodeHookGroups(raw json.RawMessage) ([]json.RawMessage, error) {
 }
 
 func managedHookGroup(spec hookSpec) json.RawMessage {
-	hook := map[string]any{
-		"type":    "command",
-		"command": `"$HOME/.config/dualmem/bin/dualmem-run" hook --adapter ` + spec.adapter,
-		"timeout": 10,
-	}
+	hook := managedCommandHook(spec)
 	group := map[string]any{"hooks": []any{hook}}
 	if spec.matcher != "" {
 		group["matcher"] = spec.matcher
 	}
 	return mustMarshalRaw(group)
+}
+
+func managedCommandHook(spec hookSpec) json.RawMessage {
+	return mustMarshalRaw(map[string]any{
+		"type":    "command",
+		"command": `"$HOME/.config/dualmem/bin/dualmem-run" hook --adapter ` + spec.adapter,
+		"timeout": 10,
+	})
+}
+
+func groupContainsManagedHook(group json.RawMessage, spec hookSpec) (bool, error) {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(group, &object); err != nil {
+		return false, err
+	}
+	matcher, err := groupMatcher(object)
+	if err != nil || matcher != spec.matcher {
+		return false, err
+	}
+	rawHooks, exists := object["hooks"]
+	if !exists {
+		return false, nil
+	}
+	var hooks []json.RawMessage
+	if err := json.Unmarshal(rawHooks, &hooks); err != nil {
+		return false, err
+	}
+	wanted := managedCommandHook(spec)
+	for _, hook := range hooks {
+		if jsonSemanticEqual(hook, wanted) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func stripManagedHook(group json.RawMessage, spec hookSpec) (json.RawMessage, bool, bool, error) {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(group, &object); err != nil {
+		return nil, false, false, err
+	}
+	matcher, err := groupMatcher(object)
+	if err != nil || matcher != spec.matcher {
+		return group, true, false, err
+	}
+	rawHooks, exists := object["hooks"]
+	if !exists {
+		return group, true, false, nil
+	}
+	var hooks []json.RawMessage
+	if err := json.Unmarshal(rawHooks, &hooks); err != nil {
+		return nil, false, false, err
+	}
+	wanted := managedCommandHook(spec)
+	filtered := make([]json.RawMessage, 0, len(hooks))
+	removed := false
+	for _, hook := range hooks {
+		if jsonSemanticEqual(hook, wanted) {
+			removed = true
+			continue
+		}
+		filtered = append(filtered, hook)
+	}
+	if !removed {
+		return group, true, false, nil
+	}
+	if len(filtered) == 0 && groupHasOnlyHookFields(object) {
+		return nil, false, true, nil
+	}
+	object["hooks"] = mustMarshalRaw(filtered)
+	return mustMarshalRaw(object), true, true, nil
+}
+
+func groupMatcher(object map[string]json.RawMessage) (string, error) {
+	raw, exists := object["matcher"]
+	if !exists {
+		return "", nil
+	}
+	var matcher string
+	if err := json.Unmarshal(raw, &matcher); err != nil {
+		return "", err
+	}
+	return matcher, nil
+}
+
+func groupHasOnlyHookFields(object map[string]json.RawMessage) bool {
+	for key := range object {
+		if key != "matcher" && key != "hooks" {
+			return false
+		}
+	}
+	return true
 }
 
 func stripLegacyCredentialHooks(group json.RawMessage) (json.RawMessage, bool, bool, error) {

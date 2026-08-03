@@ -254,6 +254,73 @@ func TestCodexDriverTargetedUninstallKeepsCommonAssetsForManagedPi(t *testing.T)
 	}
 }
 
+func TestCodexDriverUninstallRemovesExactManagedHookAndPreservesSibling(t *testing.T) {
+	setPiPromptSupport(t, true)
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	installed, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"codex"}}, BuiltinBundle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(installed); err != nil {
+		t.Fatal(err)
+	}
+
+	hooksPath := filepath.Join(home, ".codex", "hooks.json")
+	raw, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	hooks := document["hooks"].(map[string]any)
+	groups := hooks["PostToolUse"].([]any)
+	for _, rawGroup := range groups {
+		group := rawGroup.(map[string]any)
+		if group["matcher"] != "apply_patch" {
+			continue
+		}
+		groupHooks := group["hooks"].([]any)
+		group["hooks"] = append(groupHooks, map[string]any{
+			"type": "command", "command": "printf unrelated-sibling", "timeout": float64(3),
+		})
+	}
+	modified, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hooksPath, append(modified, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	uninstall, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"codex"}, Uninstall: true}, BuiltinBundle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(uninstall); err != nil {
+		t.Fatal(err)
+	}
+	after := readHookDocument(t, hooksPath)
+	foundSibling := false
+	for _, group := range after.Hooks["PostToolUse"] {
+		for _, hook := range group.Hooks {
+			if strings.Contains(hook.Command, "--adapter codex") {
+				t.Fatal("uninstall retained the exact managed hook command in an edited group")
+			}
+			if hook.Command == "printf unrelated-sibling" {
+				foundSibling = true
+			}
+		}
+	}
+	if !foundSibling {
+		t.Fatal("uninstall removed an unrelated sibling hook")
+	}
+}
+
 func TestPiDriverOmitsUnsupportedPromptHookAndCapability(t *testing.T) {
 	setPiPromptSupport(t, false)
 	home := t.TempDir()
