@@ -39,6 +39,8 @@ type DoctorOptions struct {
 }
 
 var credentialAssignmentPattern = regexp.MustCompile(`(?i)\b(GEMINI_API_KEY|GOOGLE_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|ZAI_API_KEY)\s*(?:=|:)\s*("[^"\r\n]*"|'[^'\r\n]*'|[^\s;,&]+)`)
+var shellEnvironmentReferencePattern = regexp.MustCompile(`^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$`)
+var processEnvironmentReferencePattern = regexp.MustCompile(`^process\.env\.[A-Za-z_][A-Za-z0-9_]*$`)
 
 // Doctor inspects only local integration state. It deliberately does not
 // construct a DualMem engine, load a provider, or contact the network.
@@ -369,12 +371,11 @@ func containsLiteralCredential(raw []byte) bool {
 		if len(match) != 3 {
 			continue
 		}
-		name := strings.ToUpper(string(match[1]))
 		value := strings.TrimSpace(string(match[2]))
 		if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
 			value = value[1 : len(value)-1]
 		}
-		if value == "$"+name || value == "${"+name+"}" || value == "process.env."+name {
+		if value == "" || shellEnvironmentReferencePattern.MatchString(value) || processEnvironmentReferencePattern.MatchString(value) {
 			continue
 		}
 		return true

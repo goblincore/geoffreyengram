@@ -109,6 +109,28 @@ func TestDoctorDoesNotTreatEnvironmentReferencesAsLiteralCredentials(t *testing.
 	}
 }
 
+func TestDoctorCredentialClassificationIgnoresEmptyAndGenericEnvironmentReferences(t *testing.T) {
+	for _, input := range []string{
+		"OPENAI_API_KEY=",
+		"OPENAI_API_KEY=\"\"",
+		"OPENAI_API_KEY=''",
+		"OPENAI_API_KEY=$PROVIDER_KEY",
+		"OPENAI_API_KEY=\"$PROVIDER_KEY\"",
+		"OPENAI_API_KEY=${PROVIDER_KEY}",
+		"OPENAI_API_KEY=\"${PROVIDER_KEY}\"",
+		"OPENAI_API_KEY=process.env.PROVIDER_KEY",
+	} {
+		t.Run(input, func(t *testing.T) {
+			if containsLiteralCredential([]byte(input)) {
+				t.Fatalf("%q was classified as a static credential", input)
+			}
+		})
+	}
+	if !containsLiteralCredential([]byte("OPENAI_API_KEY='fixture-static-value'")) {
+		t.Fatal("static credential-shaped value was not detected")
+	}
+}
+
 func TestDoctorSharedDriftUsesValidRepairHarness(t *testing.T) {
 	setPiPromptSupport(t, true)
 	home := t.TempDir()
