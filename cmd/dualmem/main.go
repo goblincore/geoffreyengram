@@ -244,8 +244,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	cfg := loadConfig()
 	cmd := os.Args[1]
+	if cmd == "integrate" {
+		cmdIntegrate()
+		return
+	}
+	cfg := loadConfig()
 
 	switch cmd {
 	case "event":
@@ -333,6 +337,7 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, `dualmem — dual-path agent memory CLI
 
 Commands:
+  integrate   Install or uninstall Claude, Codex, and pi harness integrations
   event       Handle a normalized harness lifecycle event from stdin
   hook        Handle a native lifecycle hook (--adapter claude|codex)
   add         Add a memory
@@ -3007,7 +3012,6 @@ func cliGitCoChangeNeighbors(cfg CLIConfig, path string, topN int) []string {
 	return out
 }
 
-
 func cmdIndex(cfg CLIConfig) {
 	fs := flag.NewFlagSet("index", flag.ExitOnError)
 	ns := fs.String("ns", "", "Namespace")
@@ -3370,4 +3374,3 @@ func cmdConsultCompare(cfg CLIConfig, namespace, query string, budget int) {
 	fmt.Printf("Flash Lite: ~%d tokens, %.1fs | %s: ~%d tokens, %.1fs\n",
 		flashTokens, flashDur.Seconds(), synthModel, synthTokens, synthDur.Seconds())
 }
-
