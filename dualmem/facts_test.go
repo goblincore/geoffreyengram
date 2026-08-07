@@ -285,6 +285,38 @@ func TestFactSearchBlendsGlobalAndRepo(t *testing.T) {
 	}
 }
 
+func TestSearchFactsMultiWithEmbeddingAvoidsProvider(t *testing.T) {
+	engine := newFactsTestEngine(t)
+	ctx := context.Background()
+
+	if _, err := engine.AddFact(ctx, Fact{
+		Namespace: "repo",
+		Kind:      FactKindDecision,
+		Source:    FactSourceVerified,
+		Text:      "Use SQLite for local context storage.",
+	}); err != nil {
+		t.Fatalf("AddFact: %v", err)
+	}
+
+	queryEmbedding, err := engine.Embedder().Embed(ctx, "local context storage", "RETRIEVAL_QUERY")
+	if err != nil {
+		t.Fatalf("Embed query fixture: %v", err)
+	}
+	embedder := &unavailableEmbedder{dim: 64}
+	engine.embedder = embedder
+
+	hits, err := engine.searchFactsMultiWithEmbedding(ctx, "local context storage", "repo", nil, 5, queryEmbedding)
+	if err != nil {
+		t.Fatalf("searchFactsMultiWithEmbedding: %v", err)
+	}
+	if len(hits) != 1 || hits[0].Text != "Use SQLite for local context storage." {
+		t.Errorf("hits = %#v, want the stored fact", hits)
+	}
+	if embedder.calls != 0 {
+		t.Errorf("Embed calls = %d, want 0 when using a precomputed vector", embedder.calls)
+	}
+}
+
 // TestFactSearchExcludesSuperseded verifies SearchFacts never returns a
 // superseded fact, even if it would otherwise rank highly.
 func TestFactSearchExcludesSuperseded(t *testing.T) {

@@ -74,8 +74,8 @@ func TestPinnedBlock_UnavailableSemanticFallback(t *testing.T) {
 	if len(block.Diagnostics) != 1 || block.Diagnostics[0] != wantDiagnostic {
 		t.Errorf("Diagnostics = %#v, want [%q]", block.Diagnostics, wantDiagnostic)
 	}
-	if embedder.calls == 0 {
-		t.Error("specific query did not attempt semantic lookup")
+	if embedder.calls != 1 {
+		t.Errorf("Embed calls = %d, want 1 shared query embedding", embedder.calls)
 	}
 }
 

@@ -171,7 +171,12 @@ func (e *Engine) SearchFactsMulti(ctx context.Context, query, namespace string, 
 	if err != nil {
 		return nil, fmt.Errorf("dualmem: embed search query: %w", err)
 	}
+	return e.searchFactsMultiWithEmbedding(ctx, query, namespace, kinds, limit, qEmb)
+}
 
+// searchFactsMultiWithEmbedding ranks facts with a caller-supplied query
+// embedding. Callers must provide a validated, non-empty query and limit.
+func (e *Engine) searchFactsMultiWithEmbedding(ctx context.Context, query, namespace string, kinds []string, limit int, queryEmbedding []float32) ([]*Fact, error) {
 	// Always blend user-global ("") into the searched namespaces, deduped.
 	namespaces := []string{namespace, ""}
 	if namespace == "" {
@@ -185,7 +190,7 @@ func (e *Engine) SearchFactsMulti(ctx context.Context, query, namespace string, 
 		return nil, fmt.Errorf("dualmem: load facts for search: %w", err)
 	}
 
-	return rankFacts(candidates, qEmb, query, limit), nil
+	return rankFacts(candidates, queryEmbedding, query, limit), nil
 }
 
 // rankFacts scores candidates by embedding similarity blended with file-path

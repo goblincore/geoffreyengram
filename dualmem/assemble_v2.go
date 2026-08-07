@@ -252,9 +252,13 @@ type pinnedItem struct {
 func (e *Engine) queryRelevantV2(ctx context.Context, userID, query, skipCheckpointTask string, alreadyEmitted map[string]bool) ([]pinnedItem, error) {
 	var items []pinnedItem
 	var relevanceErr error
+	queryEmbedding, err := e.embedder.Embed(ctx, query, "RETRIEVAL_QUERY")
+	if err != nil {
+		return items, fmt.Errorf("dualmem: embed query: %w", err)
+	}
 
 	// Facts first — curated, self-contained, provenance-carrying.
-	if facts, err := e.SearchFacts(ctx, query, userID, "", 5); err == nil {
+	if facts, err := e.searchFactsMultiWithEmbedding(ctx, query, userID, nil, 5, queryEmbedding); err == nil {
 		for _, f := range facts {
 			if alreadyEmitted[f.ID] {
 				continue
@@ -277,7 +281,7 @@ func (e *Engine) queryRelevantV2(ctx context.Context, userID, query, skipCheckpo
 	// "LC-1928" ranks by cosine+type-boost alone and the matching checkpoint is
 	// crowded out of the top-N by generic high-importance warnings.
 	var details []DetailMemory
-	if res, err := e.DualSearch(ctx, userID, query, SearchOpts{Limit: 8, QueryText: query}); err == nil {
+	if res, err := e.DualSearch(ctx, userID, query, SearchOpts{Limit: 8, QueryEmbedding: queryEmbedding, QueryText: query}); err == nil {
 		if res != nil {
 			details = res.DetailMemories
 		}
