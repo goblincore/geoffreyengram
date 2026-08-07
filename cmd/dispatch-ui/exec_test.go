@@ -51,6 +51,70 @@ func TestParseMaxRuntime(t *testing.T) {
 	}
 }
 
+func TestCapturePlanOutputPreservesOversizedBracketedPlaintext(t *testing.T) {
+	const oversizedLength = 1024*1024 + 128
+	const fallbackLimit = 64 * 1024
+	const visibleEvent = `{"type":"assistant","message":{"content":[{"type":"text","text":"visible structured text"}]}}`
+
+	input := "[INFO] " + strings.Repeat("x", oversizedLength) + "\n" + visibleEvent + "\n"
+	var report strings.Builder
+	if err := capturePlanOutput(strings.NewReader(input), &LogBuffer{}, &report); err != nil {
+		t.Fatalf("capturePlanOutput: %v", err)
+	}
+
+	reportContent := report.String()
+	if !strings.HasPrefix(reportContent, "[INFO] ") {
+		gotPrefix := reportContent
+		if len(gotPrefix) > 32 {
+			gotPrefix = gotPrefix[:32]
+		}
+		t.Errorf("report does not preserve bracketed plaintext prefix; got prefix %q", gotPrefix)
+	}
+	firstNewline := strings.IndexByte(reportContent, '\n')
+	if firstNewline < 0 {
+		t.Fatal("report does not contain a bounded plaintext line")
+	}
+	if firstNewline+1 > fallbackLimit {
+		t.Errorf("plaintext fallback used %d bytes; want at most %d", firstNewline+1, fallbackLimit)
+	}
+	if !strings.Contains(reportContent[firstNewline+1:], "visible structured text") {
+		t.Errorf("report does not contain the structured event after oversized plaintext; got suffix %q", reportContent[firstNewline+1:])
+	}
+}
+
+func TestCapturePlanOutputDiscardsOversizedValidJSON(t *testing.T) {
+	const oversizedLength = 1024*1024 + 128
+	const visibleEvent = `{"type":"assistant","message":{"content":[{"type":"text","text":"visible structured text"}]}}`
+	padding := strings.Repeat("x", oversizedLength)
+
+	tests := []struct {
+		name string
+		line string
+	}{
+		{name: "object", line: `{"padding":"` + padding + `"}`},
+		{name: "array", line: `["` + padding + `"]`},
+		{name: "scalar", line: `"` + padding + `"`},
+		{name: "leading whitespace", line: strings.Repeat(" ", oversizedLength) + `{"type":"thinking","text":"hidden"}`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			input := tc.line + "\n" + visibleEvent + "\n"
+			var report strings.Builder
+			if err := capturePlanOutput(strings.NewReader(input), &LogBuffer{}, &report); err != nil {
+				t.Fatalf("capturePlanOutput: %v", err)
+			}
+			if got, want := report.String(), "visible structured text\n"; got != want {
+				gotPrefix := got
+				if len(gotPrefix) > 64 {
+					gotPrefix = gotPrefix[:64]
+				}
+				t.Errorf("report length = %d, prefix = %q; want %q", len(got), gotPrefix, want)
+			}
+		})
+	}
+}
+
 func TestExecutePlanReportDrainsOversizedPlaintextFallback(t *testing.T) {
 	const fallbackLimit = 64 * 1024
 	const oversizedLineLength = 2 * 1024 * 1024
