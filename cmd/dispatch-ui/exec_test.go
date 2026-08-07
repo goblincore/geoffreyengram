@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -113,6 +114,57 @@ func TestCapturePlanOutputDiscardsOversizedValidJSON(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCapturePlanOutputMatchesJSONValidNestingBoundary(t *testing.T) {
+	const standardNestingLimit = 10000
+	const oversizedPaddingLength = 1024*1024 + 128
+	const visibleEvent = `{"type":"assistant","message":{"content":[{"type":"text","text":"visible structured text"}]}}`
+
+	for _, streamed := range []bool{false, true} {
+		for _, depth := range []int{256, 257, standardNestingLimit, standardNestingLimit + 1} {
+			name := fmt.Sprintf("retained/depth_%d", depth)
+			value := "0"
+			if streamed {
+				name = fmt.Sprintf("streamed/depth_%d", depth)
+				value = `"` + strings.Repeat("x", oversizedPaddingLength) + `"`
+			}
+			t.Run(name, func(t *testing.T) {
+				line := strings.Repeat("[", depth) + value + strings.Repeat("]", depth)
+				standardValid := json.Valid([]byte(line))
+				if want := depth <= standardNestingLimit; standardValid != want {
+					t.Fatalf("encoding/json.Valid at depth %d = %v; want %v", depth, standardValid, want)
+				}
+
+				var report strings.Builder
+				input := line + "\n" + visibleEvent + "\n"
+				if err := capturePlanOutput(strings.NewReader(input), &LogBuffer{}, &report); err != nil {
+					t.Fatalf("capturePlanOutput: %v", err)
+				}
+
+				got := report.String()
+				if standardValid {
+					if want := "visible structured text\n"; got != want {
+						t.Errorf("valid JSON leaked into report: length = %d; want %q", len(got), want)
+					}
+					return
+				}
+				if !strings.HasPrefix(got, "[") {
+					t.Errorf("invalid JSON was not preserved as plaintext; got prefix %q", got[:minTestLength(len(got), 32)])
+				}
+				if !strings.HasSuffix(got, "visible structured text\n") {
+					t.Errorf("structured event after invalid JSON was not processed; report length = %d", len(got))
+				}
+			})
+		}
+	}
+}
+
+func minTestLength(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func TestExecutePlanReportDrainsOversizedPlaintextFallback(t *testing.T) {

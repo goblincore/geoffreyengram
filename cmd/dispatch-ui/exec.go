@@ -340,7 +340,9 @@ func capturePlanOutput(stdout io.Reader, lb *LogBuffer, report io.Writer) error 
 			if line != "" {
 				lb.Append(line)
 				fmt.Fprintln(report, line)
-			} else if !jsonValidator.isValid() {
+			} else if !oversized && !json.Valid([]byte(raw)) {
+				appendPlaintextReport(report, raw, &plaintextReportBytes)
+			} else if oversized && !jsonValidator.isValid() {
 				appendPlaintextReport(report, raw, &plaintextReportBytes)
 			}
 		}
@@ -373,7 +375,10 @@ func appendPlaintextReport(report io.Writer, raw string, written *int) {
 	*written += len(raw) + 1
 }
 
-const maxJSONNestingDepth = 256
+// encoding/json uses the same nesting limit when deciding whether JSON is
+// valid. Keeping the streaming validator aligned prevents classification from
+// changing merely because a line crossed maxStreamEventBytes.
+const maxJSONNestingDepth = 10000
 
 type jsonLexMode uint8
 
@@ -418,17 +423,18 @@ type jsonFrame struct {
 // jsonLineValidator validates one JSON value incrementally without retaining
 // payload text. Its fixed stack keeps memory bounded even for hostile output.
 type jsonLineValidator struct {
-	valid        bool
-	rootComplete bool
-	frames       [maxJSONNestingDepth]jsonFrame
-	depth        int
-	mode         jsonLexMode
-	stringKey    bool
-	escaped      bool
-	unicodeLeft  uint8
-	numberState  jsonNumberState
-	literal      string
-	literalIndex int
+	valid           bool
+	nestingExceeded bool
+	rootComplete    bool
+	frames          [maxJSONNestingDepth]jsonFrame
+	depth           int
+	mode            jsonLexMode
+	stringKey       bool
+	escaped         bool
+	unicodeLeft     uint8
+	numberState     jsonNumberState
+	literal         string
+	literalIndex    int
 }
 
 func newJSONLineValidator() jsonLineValidator {
@@ -454,7 +460,7 @@ func (v *jsonLineValidator) write(data []byte) {
 }
 
 func (v *jsonLineValidator) isValid() bool {
-	if !v.valid {
+	if v.nestingExceeded || !v.valid {
 		return false
 	}
 	if v.mode == jsonLexNumber {
@@ -565,6 +571,7 @@ func (v *jsonLineValidator) startValue(b byte) {
 
 func (v *jsonLineValidator) pushContainer(kind byte, state jsonFrameState) {
 	if v.depth == len(v.frames) {
+		v.nestingExceeded = true
 		v.valid = false
 		return
 	}
