@@ -11,6 +11,8 @@ import (
 	"strings"
 )
 
+var beforeHomeLeafValidationHook = func(string) {}
+
 func Plan(ctx context.Context, opts Options, bundle Bundle) (Result, error) {
 	home, pinnedHome, err := integrationHome(opts.Home)
 	if err != nil {
@@ -78,6 +80,9 @@ func Plan(ctx context.Context, opts Options, bundle Bundle) (Result, error) {
 	if err := validateChangesUnderHome(home, changes); err != nil {
 		return Result{}, err
 	}
+	if err := validateExistingDirectoryPathNoSymlinks(pinnedHome); err != nil {
+		return Result{}, err
+	}
 	return Result{Detections: detections, Changes: changes, home: home, pinnedHome: pinnedHome}, nil
 }
 
@@ -87,15 +92,12 @@ func integrationHome(home string) (string, string, error) {
 		return "", "", fmt.Errorf("resolve integration home %q: %w", home, err)
 	}
 	root = filepath.Clean(root)
-	if info, err := os.Lstat(root); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return "", "", fmt.Errorf("integration home %q is a symlink", root)
-	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return "", "", fmt.Errorf("inspect integration home %q: %w", root, err)
-	}
-	pinnedRoot, err := canonicalizeExistingAncestors(root)
+	pinnedParent, err := canonicalizeExistingAncestors(filepath.Dir(root))
 	if err != nil {
 		return "", "", err
 	}
+	pinnedRoot := filepath.Join(pinnedParent, filepath.Base(root))
+	beforeHomeLeafValidationHook(root)
 	if err := validateExistingDirectoryPathNoSymlinks(pinnedRoot); err != nil {
 		return "", "", err
 	}

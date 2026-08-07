@@ -159,6 +159,45 @@ func TestPlanPinsCanonicalHomeWhenAncestorIsSymlinked(t *testing.T) {
 	}
 }
 
+func TestPlanRejectsHomeLeafSwappedBeforeStableValidation(t *testing.T) {
+	parent := t.TempDir()
+	home := filepath.Join(parent, "home")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	escape := t.TempDir()
+	movedHome := filepath.Join(parent, "home-original")
+	originalHook := beforeHomeLeafValidationHook
+	t.Cleanup(func() { beforeHomeLeafValidationHook = originalHook })
+	beforeHomeLeafValidationHook = func(path string) {
+		if path != home {
+			return
+		}
+		if err := os.Rename(home, movedHome); err != nil {
+			t.Errorf("move selected home: %v", err)
+			return
+		}
+		if err := os.Symlink(escape, home); err != nil {
+			t.Errorf("replace selected home with symlink: %v", err)
+		}
+	}
+
+	result, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"codex"}}, BuiltinBundle())
+	if err == nil {
+		t.Fatal("Plan pinned a symlink destination after the selected home was swapped")
+	}
+	if len(result.Changes) != 0 {
+		t.Fatalf("unsafe home plan exposed %d changes", len(result.Changes))
+	}
+	entries, err := os.ReadDir(escape)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("planning touched the symlink destination: %v", entries)
+	}
+}
+
 func TestPlanTargetedUninstallUsesManagedStateNotPresence(t *testing.T) {
 	for _, test := range []struct {
 		name          string

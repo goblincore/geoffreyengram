@@ -290,6 +290,74 @@ func TestApplyDeletePreservesPathCreatedAfterQuarantine(t *testing.T) {
 	assertFile(t, target, "concurrent", 0o644)
 }
 
+func TestApplyQuarantineRenameUsesStableDestinationRoot(t *testing.T) {
+	home := t.TempDir()
+	target := filepath.Join(home, "managed")
+	if err := os.WriteFile(target, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	escape := t.TempDir()
+	outsideTarget := filepath.Join(escape, "target")
+	if err := os.WriteFile(outsideTarget, []byte("outside"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	originalHook := beforeQuarantineHook
+	t.Cleanup(func() { beforeQuarantineHook = originalHook })
+	beforeQuarantineHook = func(change Change) {
+		if change.Path == target {
+			replaceQuarantineDirectoryWithSymlink(t, home, escape)
+		}
+	}
+
+	err := Apply(Result{Changes: []Change{{
+		Path: target, Action: ActionUpdate, Mode: 0o600, Before: []byte("original"), After: []byte("updated"),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFile(t, target, "updated", 0o600)
+	assertFile(t, outsideTarget, "outside", 0o640)
+}
+
+func TestApplyRollbackUsesStableQuarantineSourceRoot(t *testing.T) {
+	home := t.TempDir()
+	target := filepath.Join(home, "managed")
+	if err := os.WriteFile(target, []byte("original"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	escape := t.TempDir()
+	outsideTarget := filepath.Join(escape, "target")
+	if err := os.WriteFile(outsideTarget, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	originalWriter := atomicWriteFile
+	t.Cleanup(func() { atomicWriteFile = originalWriter })
+	atomicWriteFile = func(writeTarget rootedTarget, data []byte, mode fs.FileMode) error {
+		if writeTarget.path == target {
+			return errors.New("injected publication failure")
+		}
+		return originalWriter(writeTarget, data, mode)
+	}
+	originalMutationHook := beforeMutationHook
+	t.Cleanup(func() { beforeMutationHook = originalMutationHook })
+	beforeMutationHook = func(change Change, stage mutationStage) {
+		if change.Path == target && stage == mutationRestore {
+			replaceQuarantineDirectoryWithSymlink(t, home, escape)
+		}
+	}
+
+	err := Apply(Result{Changes: []Change{{
+		Path: target, Action: ActionUpdate, Mode: 0o600, Before: []byte("original"), After: []byte("updated"),
+	}}})
+	if err == nil {
+		t.Fatal("Apply succeeded despite injected publication failure")
+	}
+	assertFile(t, target, "original", 0o640)
+	assertFile(t, outsideTarget, "outside", 0o600)
+}
+
 func TestApplyRejectsSymlinkTarget(t *testing.T) {
 	home := t.TempDir()
 	realPath := filepath.Join(home, "real")
@@ -617,4 +685,26 @@ func assertFile(t *testing.T, path, wantContent string, wantMode fs.FileMode) {
 	if got := info.Mode().Perm(); got != wantMode.Perm() {
 		t.Fatalf("%s mode = %04o, want %04o", path, got, wantMode.Perm())
 	}
+}
+
+func replaceQuarantineDirectoryWithSymlink(t *testing.T, parent, destination string) {
+	t.Helper()
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), ".dualmem-quarantine-") {
+			continue
+		}
+		path := filepath.Join(parent, entry.Name())
+		if err := os.Rename(path, path+"-original"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(destination, path); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	t.Fatal("missing quarantine directory")
 }

@@ -251,7 +251,7 @@ func quarantineExpectedTarget(filesystem *anchoredFilesystem, change Change, sna
 		path:          filepath.Join(filepath.Dir(change.Path), directoryName, "target"),
 	}
 	beforeQuarantineHook(change)
-	if err := rootedRename(target.parent, target.name, filepath.Join(directoryName, "target")); err != nil {
+	if err := rootedRename(target.parent, target.name, directory, "target"); err != nil {
 		quarantine.cleanupDirectory()
 		return nil, fmt.Errorf("quarantine integration target %q: %w", change.Path, err)
 	}
@@ -296,7 +296,7 @@ func (quarantine *quarantinedTarget) restoreNoClobber() (bool, error) {
 	if !info.Mode().IsRegular() {
 		return false, nil
 	}
-	if err := rootedLink(quarantine.target.parent, filepath.Join(quarantine.directoryName, "target"), quarantine.target.name); err != nil {
+	if err := rootedLink(quarantine.directory, "target", quarantine.target.parent, quarantine.target.name); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return false, nil
 		}
@@ -387,7 +387,7 @@ func writeFileNoClobber(target rootedTarget, content []byte, mode fs.FileMode) e
 		return err
 	}
 	closed = true
-	if err := rootedLink(target.parent, temporaryName, target.name); err != nil {
+	if err := rootedLink(target.parent, temporaryName, target.parent, target.name); err != nil {
 		return err
 	}
 	return nil
