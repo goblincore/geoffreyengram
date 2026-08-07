@@ -51,8 +51,10 @@ func TestParseMaxRuntime(t *testing.T) {
 	}
 }
 
-func TestExecutePlanReportCapturesBoundedPlaintextFallback(t *testing.T) {
+func TestExecutePlanReportDrainsOversizedPlaintextFallback(t *testing.T) {
 	const fallbackLimit = 64 * 1024
+	const oversizedLineLength = 2 * 1024 * 1024
+	const malformedOutput = `{"type":"assistant","message": not-json`
 
 	tmpDir := t.TempDir()
 	reportsDir := filepath.Join(tmpDir, "reports")
@@ -64,17 +66,18 @@ func TestExecutePlanReportCapturesBoundedPlaintextFallback(t *testing.T) {
 	// The report must retain that text, while preserving parsed event text and
 	// discarding unrecognized JSON events.
 	claudePath := makeScript(t, tmpDir, "claude", fmt.Sprintf(`echo "plain-text output"
-echo '{"type":"assistant","message":{"content":[{"type":"text","text":"structured report text"}]}}'
-echo '{"type":"thinking","text":"discarded JSON"}'
+echo '%s'
+echo '{"type":"tool_result","tool_use_id":"tool-1","content":"discarded tool JSON"}'
 printf '%%*s\n' %d '' | tr ' ' x
-`, fallbackLimit+1))
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"structured report text"}]}}'
+`, malformedOutput, oversizedLineLength))
 
 	// Create plan file
 	planContent := `---
 title: test plan
 status: pending
 project: ` + tmpDir + `
-max_runtime: 30s
+max_runtime: 5s
 allowed_tools: Bash
 ---
 Do some work.
@@ -129,11 +132,14 @@ Do some work.
 		if !strings.Contains(reportContent, "plain-text output") {
 			t.Errorf("report does not contain plaintext fallback; got:\n%s", reportContent)
 		}
+		if !strings.Contains(reportContent, malformedOutput) {
+			t.Errorf("report does not contain malformed non-JSON fallback; got:\n%s", reportContent)
+		}
 		if !strings.Contains(reportContent, "structured report text") {
 			t.Errorf("report does not contain structured output; got:\n%s", reportContent)
 		}
-		if strings.Contains(reportContent, "discarded JSON") {
-			t.Errorf("report contains unrecognized JSON event; got:\n%s", reportContent)
+		if strings.Contains(reportContent, "discarded tool JSON") {
+			t.Errorf("report contains unrecognized tool JSON event; got:\n%s", reportContent)
 		}
 
 		longLineStart := strings.Index(reportContent, strings.Repeat("x", 32))

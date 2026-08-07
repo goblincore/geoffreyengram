@@ -301,6 +301,80 @@ const defaultSetupTimeout = 5 * time.Minute
 // maxPlaintextReportBytes bounds non-JSON stdout kept as a report fallback.
 const maxPlaintextReportBytes = 64 * 1024
 
+// maxStreamEventBytes bounds memory retained while assembling one JSONL event.
+// Longer lines are still fully drained from stdout.
+const maxStreamEventBytes = 1024 * 1024
+
+func capturePlanOutput(stdout io.Reader, lb *LogBuffer, report io.Writer) error {
+	reader := bufio.NewReaderSize(stdout, 64*1024)
+	lineBuffer := make([]byte, 0, 64*1024)
+	plaintextReportBytes := 0
+	oversized := false
+
+	for {
+		fragment, readErr := reader.ReadSlice('\n')
+		if !oversized {
+			remaining := maxStreamEventBytes - len(lineBuffer)
+			if len(fragment) > remaining {
+				lineBuffer = append(lineBuffer, fragment[:remaining]...)
+				oversized = true
+			} else {
+				lineBuffer = append(lineBuffer, fragment...)
+			}
+		}
+
+		if readErr == bufio.ErrBufferFull {
+			continue
+		}
+
+		if len(lineBuffer) > 0 {
+			raw := strings.TrimSuffix(string(lineBuffer), "\n")
+			raw = strings.TrimSuffix(raw, "\r")
+
+			if !oversized {
+				if line := parseStreamEvent(raw); line != "" {
+					lb.Append(line)
+					fmt.Fprintln(report, line)
+				} else if !json.Valid([]byte(raw)) {
+					appendPlaintextReport(report, raw, &plaintextReportBytes)
+				}
+			} else if !looksLikeJSON(raw) {
+				appendPlaintextReport(report, raw, &plaintextReportBytes)
+			}
+		}
+
+		lineBuffer = lineBuffer[:0]
+		oversized = false
+
+		switch readErr {
+		case nil:
+			continue
+		case io.EOF:
+			return nil
+		default:
+			return readErr
+		}
+	}
+}
+
+func appendPlaintextReport(report io.Writer, raw string, written *int) {
+	if *written >= maxPlaintextReportBytes {
+		return
+	}
+
+	remaining := maxPlaintextReportBytes - *written
+	if len(raw)+1 > remaining {
+		raw = raw[:remaining-1]
+	}
+	fmt.Fprintln(report, raw)
+	*written += len(raw) + 1
+}
+
+func looksLikeJSON(raw string) bool {
+	trimmed := strings.TrimLeft(raw, " \t")
+	return strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[")
+}
+
 // resolveSetupCommand returns the provisioning command to run in a fresh
 // worktree before the agent starts. The per-task "setup:" field takes
 // precedence over the project-wide DEFAULT_SETUP_CMD. An empty result means
@@ -724,40 +798,22 @@ Save memories when you:
 		return fmt.Errorf("start command: %w", err)
 	}
 
-	// Stream lines in a goroutine. Parse events for both the UI log and report.
-	// Preserve a bounded amount of non-JSON stdout in the report as a fallback;
-	// valid but unrecognized JSON remains discarded.
-	scanDone := make(chan struct{})
+	// Stream lines in a goroutine. The reader drains arbitrarily long lines while
+	// retaining bounded buffers for event parsing and plaintext report fallback.
+	scanDone := make(chan error, 1)
 	go func() {
-		defer close(scanDone)
-		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB for large JSON lines
-		plaintextReportBytes := 0
-		for scanner.Scan() {
-			raw := scanner.Text()
-			if line := parseStreamEvent(raw); line != "" {
-				lb.Append(line)
-				fmt.Fprintln(reportFile, line)
-				continue
-			}
-			if json.Valid([]byte(raw)) || plaintextReportBytes >= maxPlaintextReportBytes {
-				continue
-			}
-
-			remaining := maxPlaintextReportBytes - plaintextReportBytes
-			if len(raw)+1 > remaining {
-				raw = raw[:remaining-1]
-			}
-			fmt.Fprintln(reportFile, raw)
-			plaintextReportBytes += len(raw) + 1
-		}
+		scanDone <- capturePlanOutput(stdout, lb, reportFile)
 	}()
 
 	// 11. Wait for process; when it exits, the pipe's write end closes and the
-	// scanner goroutine unblocks. cmd.WaitDelay ensures we don't block forever if
+	// capture goroutine unblocks. cmd.WaitDelay ensures we don't block forever if
 	// the process is stubborn.
 	waitErr := cmd.Wait()
-	<-scanDone
+	if scanErr := <-scanDone; scanErr != nil {
+		msg := fmt.Sprintf("[dispatch] stdout capture failed: %v", scanErr)
+		lb.Append(msg)
+		fmt.Fprintln(reportFile, msg)
+	}
 
 	// Determine exit code and status
 	exitCode := 0
