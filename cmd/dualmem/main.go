@@ -18,6 +18,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/goblincore/geoffreyengram/dualmem"
+	"github.com/goblincore/geoffreyengram/dualmem/harness"
 	"gopkg.in/yaml.v3"
 )
 
@@ -57,17 +59,54 @@ type CLIConfig struct {
 }
 
 func loadConfig() CLIConfig {
-	var cfg CLIConfig
-
-	// Defaults
-	cfg.Storage.Backend = "sqlite"
 	home, _ := os.UserHomeDir()
+	cfg := defaultCLIConfig(home)
+	loadUserCLIConfig(&cfg)
+
+	// Interactive commands retain the historical project-local override
+	// behavior. Automatic lifecycle commands use loadLifecycleConfig instead.
+	if data, err := os.ReadFile(".dualmem.yaml"); err == nil {
+		_ = yaml.Unmarshal(data, &cfg)
+	}
+	expandCLIConfigPaths(&cfg, home)
+	return cfg
+}
+
+func defaultCLIConfig(home string) CLIConfig {
+	var cfg CLIConfig
+	cfg.Storage.Backend = "sqlite"
 	cfg.Storage.SQLitePath = filepath.Join(home, ".local", "share", "dualmem", "memories.db")
 	cfg.Providers.EmbeddingAPIKeyEnv = "GEMINI_API_KEY"
 	cfg.Providers.EmbeddingDimension = 768
 	cfg.Pipeline.EpisodeInterval = "5m"
 	cfg.Pipeline.ArcInterval = "24h"
 	cfg.Pipeline.ProfileInterval = "168h"
+	return cfg
+}
+
+func loadLifecycleConfig() CLIConfig {
+	home, _ := os.UserHomeDir()
+	cfg := defaultCLIConfig(home)
+	loadUserCLIConfig(&cfg)
+
+	// Repository configuration is untrusted in automatic hooks. Only the
+	// project identity is accepted; storage locations, provider selection,
+	// credential environment names, endpoints, and pipeline settings remain
+	// controlled by the user's global configuration.
+	var project struct {
+		DefaultNamespace string `yaml:"default_namespace"`
+	}
+	if data, err := os.ReadFile(".dualmem.yaml"); err == nil {
+		_ = yaml.Unmarshal(data, &project)
+		if strings.TrimSpace(project.DefaultNamespace) != "" {
+			cfg.DefaultNamespace = project.DefaultNamespace
+		}
+	}
+	expandCLIConfigPaths(&cfg, home)
+	return cfg
+}
+
+func loadUserCLIConfig(cfg *CLIConfig) {
 
 	// Try loading config file (check XDG + macOS paths)
 	configDir, _ := os.UserConfigDir()
@@ -80,21 +119,15 @@ func loadConfig() CLIConfig {
 		data, err = os.ReadFile(configPath)
 	}
 	if err == nil {
-		yaml.Unmarshal(data, &cfg)
+		_ = yaml.Unmarshal(data, cfg)
 	}
+}
 
-	// Also check project-local .dualmem.yaml
-	if data, err := os.ReadFile(".dualmem.yaml"); err == nil {
-		yaml.Unmarshal(data, &cfg)
-	}
-
+func expandCLIConfigPaths(cfg *CLIConfig, home string) {
 	// Expand ~ in SQLite path (YAML doesn't expand shell vars)
 	if strings.HasPrefix(cfg.Storage.SQLitePath, "~/") {
-		home, _ := os.UserHomeDir()
 		cfg.Storage.SQLitePath = filepath.Join(home, cfg.Storage.SQLitePath[2:])
 	}
-
-	return cfg
 }
 
 // filterFlags returns only flag arguments (--flag value) from args, for flag.Parse.
@@ -130,38 +163,20 @@ func positionalArgs(args []string) []string {
 }
 
 func resolveNamespace(flagNS string, cfg CLIConfig) string {
-	if flagNS != "" {
-		return flagNS
-	}
-	if cfg.DefaultNamespace != "" {
-		return cfg.DefaultNamespace
-	}
-
-	// Auto-detect from git root, falling back to cwd basename.
-	// This prevents namespace fragmentation when running from
-	// subdirectories, worktrees, or the root directory.
 	cwd, _ := os.Getwd()
-
-	// Resolve via git common dir so worktrees share their main repo's
-	// namespace. `--show-toplevel` returns the worktree path itself
-	// (basename = worktree name), but `--git-common-dir` always points to
-	// the main repo's .git, whose parent dir is the main worktree — that's
-	// the project name we want regardless of which worktree we're in.
-	if out, err := exec.Command("git", "rev-parse", "--path-format=absolute", "--git-common-dir").Output(); err == nil {
-		commonDir := strings.TrimSpace(string(out))
-		if commonDir != "" {
-			mainRoot := filepath.Dir(commonDir)
-			if mainRoot != "" && mainRoot != "/" {
-				return "claude:" + filepath.Base(mainRoot)
-			}
-		}
+	event := harness.Event{CWD: cwd}
+	if flagNS != "" {
+		event.Project.Namespace = flagNS
+	} else if cfg.DefaultNamespace != "" {
+		event.Project.Namespace = cfg.DefaultNamespace
 	}
-
-	base := filepath.Base(cwd)
-	if base == "/" || base == "." {
+	opts := harness.DefaultResolveOptions()
+	opts.AllowDirectoryFallback = true
+	project, err := harness.ResolveProject(context.Background(), event, opts)
+	if err != nil || project.Namespace == "" {
 		return "claude:default"
 	}
-	return "claude:" + base
+	return project.Namespace
 }
 
 // parseFlagsInterspersed parses fs allowing flags to appear before OR after the
@@ -187,13 +202,45 @@ func parseFlagsInterspersed(fs *flag.FlagSet, args []string) []string {
 	}
 }
 
-func newEngine(cfg CLIConfig) (*dualmem.Engine, error) {
+type engineCapabilities struct {
+	requireEmbedding     bool
+	initializeClassifier bool
+	initializePipeline   bool
+	loadSynthesis        bool
+	loadExplorer         bool
+}
+
+var (
+	engineLocal           = engineCapabilities{}
+	engineSemantic        = engineCapabilities{requireEmbedding: true}
+	engineEmbedWrite      = engineCapabilities{requireEmbedding: true, initializePipeline: true}
+	engineClassifiedWrite = engineCapabilities{requireEmbedding: true, initializeClassifier: true, initializePipeline: true}
+	engineGenerate        = engineCapabilities{requireEmbedding: true, initializePipeline: true, loadSynthesis: true}
+	engineExplore         = engineCapabilities{loadExplorer: true}
+	engineAutopilot       = engineCapabilities{requireEmbedding: true, initializeClassifier: true, initializePipeline: true, loadSynthesis: true, loadExplorer: true}
+)
+
+func contextCapabilities(query string, legacy, index bool) engineCapabilities {
+	if legacy || index || !dualmem.IsSessionStartQuery(query) {
+		return engineSemantic
+	}
+	return engineLocal
+}
+
+func checkpointCapabilities(list bool) engineCapabilities {
+	if list {
+		return engineLocal
+	}
+	return engineEmbedWrite
+}
+
+func newEngine(cfg CLIConfig, capabilities engineCapabilities) (*dualmem.Engine, error) {
 	apiKey := os.Getenv(cfg.Providers.EmbeddingAPIKeyEnv)
 	if apiKey == "" {
 		// Fallback to GOOGLE_API_KEY
 		apiKey = os.Getenv("GOOGLE_API_KEY")
 	}
-	if apiKey == "" {
+	if apiKey == "" && (capabilities.requireEmbedding || capabilities.initializeClassifier || capabilities.initializePipeline) {
 		return nil, fmt.Errorf("no API key: set %s or GOOGLE_API_KEY", cfg.Providers.EmbeddingAPIKeyEnv)
 	}
 
@@ -205,20 +252,21 @@ func newEngine(cfg CLIConfig) (*dualmem.Engine, error) {
 
 	sectors := dualmem.CodingSectors()
 
-	// Use EmbeddingClassifier (zero extra API calls per Add, reuses embedding).
-	// Falls back to GeminiClassifier if init fails.
 	var classifier dualmem.SectorClassifier
-	ec, err := dualmem.NewEmbeddingClassifier(context.Background(), embedder, sectors)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: EmbeddingClassifier init failed, falling back to LLM classifier: %v\n", err)
-		classifier = dualmem.NewGeminiClassifier(apiKey, sectors)
-	} else {
-		classifier = ec
+	if capabilities.initializeClassifier {
+		// Use EmbeddingClassifier (zero extra API calls per Add, reuses embedding).
+		// Falls back to GeminiClassifier if init fails.
+		ec, err := dualmem.NewEmbeddingClassifier(context.Background(), embedder, sectors)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "warning: EmbeddingClassifier unavailable; falling back to LLM classifier")
+			classifier = dualmem.NewGeminiClassifier(apiKey, sectors)
+		} else {
+			classifier = ec
+		}
 	}
 
-	// Optional: stronger model for Consult/Synthesize
 	var synthesisGen dualmem.TextGenerator
-	if cfg.Providers.SynthesisProvider == "anthropic" {
+	if capabilities.loadSynthesis && cfg.Providers.SynthesisProvider == "anthropic" {
 		synthKey := os.Getenv(cfg.Providers.SynthesisAPIKeyEnv)
 		if synthKey != "" {
 			synthesisGen = dualmem.NewAnthropicSummarizer(
@@ -230,11 +278,16 @@ func newEngine(cfg CLIConfig) (*dualmem.Engine, error) {
 	}
 
 	var explorerGen dualmem.TextGenerator
-	if cfg.Providers.ExplorerProvider == "anthropic" {
+	if capabilities.loadExplorer && cfg.Providers.ExplorerProvider == "anthropic" {
 		expKey := os.Getenv(cfg.Providers.ExplorerAPIKeyEnv)
 		if expKey != "" {
 			explorerGen = dualmem.NewAnthropicSummarizer(expKey, cfg.Providers.ExplorerBaseURL, cfg.Providers.ExplorerModel)
 		}
+	}
+
+	var summarizer dualmem.SummarizerProvider
+	if capabilities.initializePipeline {
+		summarizer = dualmem.NewGeminiSummarizer(apiKey, "")
 	}
 
 	cwd, _ := os.Getwd()
@@ -242,7 +295,7 @@ func newEngine(cfg CLIConfig) (*dualmem.Engine, error) {
 		SQLitePath:            cfg.Storage.SQLitePath,
 		EmbeddingProvider:     embedder,
 		Classifier:            classifier,
-		Summarizer:            dualmem.NewGeminiSummarizer(apiKey, ""),
+		Summarizer:            summarizer,
 		SynthesisGenerator:    synthesisGen,
 		ExplorerGenerator:     explorerGen,
 		Sectors:               sectors,
@@ -261,10 +314,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	cfg := loadConfig()
 	cmd := os.Args[1]
+	if cmd == "integrate" {
+		cmdIntegrate()
+		return
+	}
+	var cfg CLIConfig
+	if cmd == "event" || cmd == "hook" {
+		cfg = loadLifecycleConfig()
+	} else {
+		cfg = loadConfig()
+	}
 
 	switch cmd {
+	case "event":
+		cmdEvent(cfg)
+	case "hook":
+		cmdHook(cfg)
 	case "add":
 		cmdAdd(cfg)
 	case "search":
@@ -346,6 +412,9 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, `dualmem — dual-path agent memory CLI
 
 Commands:
+  integrate   Install or uninstall Claude, Codex, and pi harness integrations
+  event       Handle a normalized harness lifecycle event from stdin
+  hook        Handle a native lifecycle hook (--adapter claude|codex)
   add         Add a memory
   search      Dual-path search
   context     Assemble token-budget-aware context (includes code map + diff)
@@ -425,7 +494,7 @@ func cmdAdd(cfg CLIConfig) {
 
 	namespace := resolveNamespace(*ns, cfg)
 
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineClassifiedWrite)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -481,7 +550,7 @@ func cmdSearch(cfg CLIConfig) {
 
 	namespace := resolveNamespace(*ns, cfg)
 
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineSemantic)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -554,7 +623,8 @@ func cmdContext(cfg CLIConfig) {
 
 	namespace := resolveNamespace(*ns, cfg)
 
-	engine, err := newEngine(cfg)
+	capabilities := contextCapabilities(query, *legacyMode, *indexMode)
+	engine, err := newEngine(cfg, capabilities)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -664,6 +734,7 @@ func cmdContext(cfg CLIConfig) {
 		json.NewEncoder(os.Stdout).Encode(block)
 		return
 	}
+	printContextDiagnostics(os.Stderr, block.Diagnostics)
 
 	if block.Text == "" {
 		fmt.Println("(no context available)")
@@ -676,6 +747,12 @@ func cmdContext(cfg CLIConfig) {
 		intentLabel = "default"
 	}
 	fmt.Printf("\n(%d tokens, %d sources, intent: %s)\n", block.TokenCount, len(block.Sources), intentLabel)
+}
+
+func printContextDiagnostics(w io.Writer, diagnostics []string) {
+	for _, diagnostic := range diagnostics {
+		fmt.Fprintf(w, "warning: %s\n", diagnostic)
+	}
 }
 
 func cmdShow(cfg CLIConfig) {
@@ -695,7 +772,7 @@ func cmdShow(cfg CLIConfig) {
 
 	namespace := resolveNamespace(*ns, cfg)
 
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineLocal)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -725,7 +802,7 @@ func cmdProfile(cfg CLIConfig) {
 
 	namespace := resolveNamespace(*ns, cfg)
 
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineLocal)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -774,7 +851,7 @@ func cmdStatus(cfg CLIConfig) {
 	namespace := resolveNamespace(*ns, cfg)
 
 	// Open store directly for stats
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineSemantic)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -823,7 +900,7 @@ func cmdPromote(cfg CLIConfig) {
 	}
 
 	namespace := resolveNamespace(*ns, cfg)
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineClassifiedWrite)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -863,7 +940,7 @@ func cmdDemote(cfg CLIConfig) {
 	}
 
 	namespace := resolveNamespace(*ns, cfg)
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineLocal)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -886,7 +963,11 @@ func cmdGC(cfg CLIConfig) {
 	fs.Parse(os.Args[2:])
 
 	namespace := resolveNamespace(*ns, cfg)
-	engine, err := newEngine(cfg)
+	capabilities := engineLocal
+	if *stale {
+		capabilities = engineSemantic
+	}
+	engine, err := newEngine(cfg, capabilities)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -996,7 +1077,7 @@ func cmdCheckpoint(cfg CLIConfig) {
 
 	namespace := resolveNamespace(*ns, cfg)
 
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, checkpointCapabilities(*list))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -1119,7 +1200,7 @@ func cmdHealth(cfg CLIConfig) {
 
 	namespace := resolveNamespace(*ns, cfg)
 
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineLocal)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -1256,7 +1337,7 @@ func cmdMap(cfg CLIConfig) {
 		cm.Namespace = namespace
 		_, commit := dualmem.GetGitState(rootDir)
 		cm.GitCommit = commit
-		engine, engErr := newEngine(cfg)
+		engine, engErr := newEngine(cfg, engineLocal)
 		if engErr == nil {
 			engine.StoreCodeMap(context.Background(), namespace, cm, result.Edges)
 			engine.Close()
@@ -1283,7 +1364,7 @@ func cmdMap(cfg CLIConfig) {
 
 	// New graph-based codemap
 	var store *dualmem.SQLiteStore
-	engine, engErr := newEngine(cfg)
+	engine, engErr := newEngine(cfg, engineLocal)
 	if engErr == nil {
 		defer engine.Close()
 		if s, ok := engine.GetStore().(*dualmem.SQLiteStore); ok {
@@ -1346,7 +1427,7 @@ func cmdSearchCode(cfg CLIConfig) {
 	// Experimental: graph-based search (PageRank + tag extraction)
 	if *graphMode {
 		var store *dualmem.SQLiteStore
-		engine, engErr := newEngine(cfg)
+		engine, engErr := newEngine(cfg, engineLocal)
 		if engErr == nil {
 			defer engine.Close()
 			if s, ok := engine.GetStore().(*dualmem.SQLiteStore); ok {
@@ -1497,7 +1578,7 @@ func cmdDiff(cfg CLIConfig) {
 	namespace := resolveNamespace(*ns, cfg)
 	rootDir, _ := os.Getwd()
 
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineLocal)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -1549,7 +1630,11 @@ func cmdSeed(cfg CLIConfig) {
 		rootDir, _ = os.Getwd()
 	}
 
-	engine, err := newEngine(cfg)
+	capabilities := engineGenerate
+	if *dryRun {
+		capabilities = engineLocal
+	}
+	engine, err := newEngine(cfg, capabilities)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -1609,7 +1694,11 @@ func cmdAutopilot(cfg CLIConfig) {
 
 	namespace := resolveNamespace(*ns, cfg)
 
-	engine, err := newEngine(cfg)
+	capabilities := engineAutopilot
+	if *dryRun || *stats {
+		capabilities = engineLocal
+	}
+	engine, err := newEngine(cfg, capabilities)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -1727,7 +1816,7 @@ func cmdBenchmark(cfg CLIConfig) {
 
 	namespace := resolveNamespace(*ns, cfg)
 
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineSemantic)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -1768,7 +1857,7 @@ func cmdAnticipationStats(cfg CLIConfig) {
 
 	namespace := resolveNamespace(*ns, cfg)
 
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineLocal)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -1810,7 +1899,7 @@ func cmdMigrateV2(cfg CLIConfig) {
 		os.Exit(1)
 	}
 
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineGenerate)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -1945,7 +2034,11 @@ func cmdSynthesize(cfg CLIConfig) {
 	jsonOut := fs.Bool("json", false, "JSON output")
 	fs.Parse(os.Args[2:])
 
-	engine, err := newEngine(cfg)
+	capabilities := engineGenerate
+	if *dryRun {
+		capabilities = engineLocal
+	}
+	engine, err := newEngine(cfg, capabilities)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -2037,7 +2130,7 @@ func cmdDocs(cfg CLIConfig) {
 	namespace := resolveNamespace(*ns, cfg)
 	args := positionalArgs(os.Args[2:])
 
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineLocal)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -2162,7 +2255,7 @@ func cmdFactsStats(cfg CLIConfig) {
 	jsonFlag := fs.Bool("json", false, "Emit the scorecard as JSON.")
 	fs.Parse(os.Args[3:])
 
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineLocal)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -2261,7 +2354,7 @@ func cmdDistill(cfg CLIConfig) {
 	nsFlag := distillFlags.String("ns", "", "Namespace override")
 	distillFlags.Parse(os.Args[2:])
 
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineGenerate)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -2330,7 +2423,7 @@ func cmdEntities(cfg CLIConfig) {
 	}
 	entitiesFlags.Parse(subArgs)
 
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineLocal)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -2457,7 +2550,7 @@ func cmdFacts(cfg CLIConfig) {
 		out := fs.String("out", "", "Write to <path> instead of stdout")
 		fs.Parse(subArgs)
 
-		engine, err := newEngine(cfg)
+		engine, err := newEngine(cfg, engineLocal)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -2495,7 +2588,11 @@ func cmdFacts(cfg CLIConfig) {
 			os.Exit(1)
 		}
 
-		engine, err := newEngine(cfg)
+		capabilities := engineLocal
+		if *commit {
+			capabilities = engineEmbedWrite
+		}
+		engine, err := newEngine(cfg, capabilities)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -2587,7 +2684,7 @@ func cmdCoChange(cfg CLIConfig) {
 	}
 	fs.Parse(subArgs)
 
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineLocal)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -2653,7 +2750,7 @@ func cmdCoChange(cfg CLIConfig) {
 // regenerateFileIndex updates the file index in /tmp after memory changes.
 // Best-effort: errors are silently ignored since this is an optimization.
 func regenerateFileIndex(cfg CLIConfig, namespace string) {
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineLocal)
 	if err != nil {
 		return
 	}
@@ -2694,7 +2791,7 @@ func cmdFileContext(cfg CLIConfig) {
 	}
 
 	namespace := resolveNamespace(*ns, cfg)
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineLocal)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -2811,7 +2908,7 @@ func cmdFileIndex(cfg CLIConfig) {
 	fs.Parse(os.Args[2:])
 
 	namespace := resolveNamespace(*ns, cfg)
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineLocal)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -2861,7 +2958,7 @@ func cmdRecall(cfg CLIConfig) {
 	}
 
 	namespace := resolveNamespace(*ns, cfg)
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineSemantic)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -2905,7 +3002,7 @@ func cmdPrecedent(cfg CLIConfig) {
 	}
 
 	namespace := resolveNamespace(*ns, cfg)
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineSemantic)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -3018,7 +3115,6 @@ func cliGitCoChangeNeighbors(cfg CLIConfig, path string, topN int) []string {
 	return out
 }
 
-
 func cmdIndex(cfg CLIConfig) {
 	fs := flag.NewFlagSet("index", flag.ExitOnError)
 	ns := fs.String("ns", "", "Namespace")
@@ -3030,7 +3126,7 @@ func cmdIndex(cfg CLIConfig) {
 
 	// Check cache unless --force
 	if !*force {
-		engine, err := newEngine(cfg)
+		engine, err := newEngine(cfg, engineLocal)
 		if err == nil {
 			_, currentCommit := dualmem.GetGitState(rootDir)
 			stored, _ := engine.GetStore().GetCodeMap(namespace)
@@ -3088,7 +3184,7 @@ func cmdIndex(cfg CLIConfig) {
 	result.CodeMap.Namespace = namespace
 	result.CodeMap.GitCommit = currentCommit
 
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineLocal)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating engine: %v\n", err)
 		os.Exit(1)
@@ -3197,7 +3293,7 @@ func cmdConsult(cfg CLIConfig) {
 		return
 	}
 
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineGenerate)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -3256,7 +3352,7 @@ func cmdExplore(cfg CLIConfig) {
 
 	namespace := resolveNamespace(*ns, cfg)
 
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineExplore)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -3292,7 +3388,7 @@ func cmdConsultCompare(cfg CLIConfig, namespace, query string, budget int) {
 		os.Exit(1)
 	}
 
-	engine, err := newEngine(cfg)
+	engine, err := newEngine(cfg, engineGenerate)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -3381,5 +3477,3 @@ func cmdConsultCompare(cfg CLIConfig, namespace, query string, budget int) {
 	fmt.Printf("Flash Lite: ~%d tokens, %.1fs | %s: ~%d tokens, %.1fs\n",
 		flashTokens, flashDur.Seconds(), synthModel, synthTokens, synthDur.Seconds())
 }
-
-

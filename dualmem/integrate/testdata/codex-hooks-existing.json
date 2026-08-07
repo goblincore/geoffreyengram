@@ -1,0 +1,19 @@
+{
+  "future": {
+    "enabled": true
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "exec_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "printf unrelated",
+            "timeout": 4
+          }
+        ]
+      }
+    ]
+  }
+}

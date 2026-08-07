@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "kind": "session_start",
+  "harness": "pi",
+  "cwd": "/repo",
+  "project": {},
+  "session_id": "pi-session-001",
+  "metadata": {
+    "model": "test-model"
+  },
+  "future_field": "ignored"
+}

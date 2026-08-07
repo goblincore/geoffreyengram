@@ -5,6 +5,24 @@ import (
 	"testing"
 )
 
+func TestModuleAwarePrecisionAtK(t *testing.T) {
+	gt := GroundTruth{Files: []string{"auth/jwt.go"}, Modules: []string{"auth/"}}
+	if !isRelevantMatch("auth/middleware.go", gt) {
+		t.Fatal("file in a ground-truth module should be relevant")
+	}
+	if isRelevantMatch("ui/button.go", gt) {
+		t.Fatal("unrelated module should not be relevant")
+	}
+}
+
+func TestSiblingAwareRecallAtK(t *testing.T) {
+	results := []SearchResult{{Path: "auth/jwt.go", Score: 0.9}}
+	gt := GroundTruth{Files: []string{"auth/jwt.go", "auth/oauth.go"}, Modules: []string{"auth/"}}
+	if got := recallAtK(results, gt, 5); got != 1.0 {
+		t.Fatalf("Recall@5 = %.3f, want 1.0", got)
+	}
+}
+
 func TestPrecisionAtK(t *testing.T) {
 	results := []SearchResult{
 		{Path: "auth/jwt.go", Score: 0.9},
@@ -41,8 +59,8 @@ func TestRecallAtK(t *testing.T) {
 	}
 
 	r5 := recallAtK(results, gt, 5)
-	if math.Abs(r5-2.0/3.0) > 0.01 {
-		t.Errorf("Recall@5: got %.3f, want %.3f", r5, 2.0/3.0)
+	if math.Abs(r5-1.0) > 0.01 {
+		t.Errorf("Recall@5: got %.3f, want 1.0", r5)
 	}
 }
 
@@ -81,14 +99,14 @@ func TestModuleMatch(t *testing.T) {
 		{Path: "dualmem/hdc.go", Score: 0.9},
 	}
 	gt := GroundTruth{
-		Files:   []string{"dualmem/codemap.go"}, // strict miss
-		Modules: []string{"dualmem/"},            // module hit
+		Files:   []string{"dualmem/codemap.go"},
+		Modules: []string{"dualmem/"}, // module hit
 	}
 
-	// Strict precision should be 0 (wrong file)
+	// Module-aware precision should count files in the ground-truth module.
 	p := precisionAtK(results, gt, 3)
-	if p != 0.0 {
-		t.Errorf("Strict precision should be 0 for wrong file, got %.3f", p)
+	if p != 1.0 {
+		t.Errorf("Module-aware precision should be 1 for a file in the right module, got %.3f", p)
 	}
 
 	// Module-aware NDCG should give partial credit

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,25 +52,148 @@ func TestParseMaxRuntime(t *testing.T) {
 	}
 }
 
-func TestExecutePlan(t *testing.T) {
+func TestCapturePlanOutputPreservesOversizedBracketedPlaintext(t *testing.T) {
+	const oversizedLength = 1024*1024 + 128
+	const fallbackLimit = 64 * 1024
+	const visibleEvent = `{"type":"assistant","message":{"content":[{"type":"text","text":"visible structured text"}]}}`
+
+	input := "[INFO] " + strings.Repeat("x", oversizedLength) + "\n" + visibleEvent + "\n"
+	var report strings.Builder
+	if err := capturePlanOutput(strings.NewReader(input), &LogBuffer{}, &report); err != nil {
+		t.Fatalf("capturePlanOutput: %v", err)
+	}
+
+	reportContent := report.String()
+	if !strings.HasPrefix(reportContent, "[INFO] ") {
+		gotPrefix := reportContent
+		if len(gotPrefix) > 32 {
+			gotPrefix = gotPrefix[:32]
+		}
+		t.Errorf("report does not preserve bracketed plaintext prefix; got prefix %q", gotPrefix)
+	}
+	firstNewline := strings.IndexByte(reportContent, '\n')
+	if firstNewline < 0 {
+		t.Fatal("report does not contain a bounded plaintext line")
+	}
+	if firstNewline+1 > fallbackLimit {
+		t.Errorf("plaintext fallback used %d bytes; want at most %d", firstNewline+1, fallbackLimit)
+	}
+	if !strings.Contains(reportContent[firstNewline+1:], "visible structured text") {
+		t.Errorf("report does not contain the structured event after oversized plaintext; got suffix %q", reportContent[firstNewline+1:])
+	}
+}
+
+func TestCapturePlanOutputDiscardsOversizedValidJSON(t *testing.T) {
+	const oversizedLength = 1024*1024 + 128
+	const visibleEvent = `{"type":"assistant","message":{"content":[{"type":"text","text":"visible structured text"}]}}`
+	padding := strings.Repeat("x", oversizedLength)
+
+	tests := []struct {
+		name string
+		line string
+	}{
+		{name: "object", line: `{"padding":"` + padding + `"}`},
+		{name: "array", line: `["` + padding + `"]`},
+		{name: "scalar", line: `"` + padding + `"`},
+		{name: "leading whitespace", line: strings.Repeat(" ", oversizedLength) + `{"type":"thinking","text":"hidden"}`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			input := tc.line + "\n" + visibleEvent + "\n"
+			var report strings.Builder
+			if err := capturePlanOutput(strings.NewReader(input), &LogBuffer{}, &report); err != nil {
+				t.Fatalf("capturePlanOutput: %v", err)
+			}
+			if got, want := report.String(), "visible structured text\n"; got != want {
+				gotPrefix := got
+				if len(gotPrefix) > 64 {
+					gotPrefix = gotPrefix[:64]
+				}
+				t.Errorf("report length = %d, prefix = %q; want %q", len(got), gotPrefix, want)
+			}
+		})
+	}
+}
+
+func TestCapturePlanOutputMatchesJSONValidNestingBoundary(t *testing.T) {
+	const standardNestingLimit = 10000
+	const oversizedPaddingLength = 1024*1024 + 128
+	const visibleEvent = `{"type":"assistant","message":{"content":[{"type":"text","text":"visible structured text"}]}}`
+
+	for _, streamed := range []bool{false, true} {
+		for _, depth := range []int{256, 257, standardNestingLimit, standardNestingLimit + 1} {
+			name := fmt.Sprintf("retained/depth_%d", depth)
+			value := "0"
+			if streamed {
+				name = fmt.Sprintf("streamed/depth_%d", depth)
+				value = `"` + strings.Repeat("x", oversizedPaddingLength) + `"`
+			}
+			t.Run(name, func(t *testing.T) {
+				line := strings.Repeat("[", depth) + value + strings.Repeat("]", depth)
+				standardValid := json.Valid([]byte(line))
+				if want := depth <= standardNestingLimit; standardValid != want {
+					t.Fatalf("encoding/json.Valid at depth %d = %v; want %v", depth, standardValid, want)
+				}
+
+				var report strings.Builder
+				input := line + "\n" + visibleEvent + "\n"
+				if err := capturePlanOutput(strings.NewReader(input), &LogBuffer{}, &report); err != nil {
+					t.Fatalf("capturePlanOutput: %v", err)
+				}
+
+				got := report.String()
+				if standardValid {
+					if want := "visible structured text\n"; got != want {
+						t.Errorf("valid JSON leaked into report: length = %d; want %q", len(got), want)
+					}
+					return
+				}
+				if !strings.HasPrefix(got, "[") {
+					t.Errorf("invalid JSON was not preserved as plaintext; got prefix %q", got[:minTestLength(len(got), 32)])
+				}
+				if !strings.HasSuffix(got, "visible structured text\n") {
+					t.Errorf("structured event after invalid JSON was not processed; report length = %d", len(got))
+				}
+			})
+		}
+	}
+}
+
+func minTestLength(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func TestExecutePlanReportDrainsOversizedPlaintextFallback(t *testing.T) {
+	const fallbackLimit = 64 * 1024
+	const oversizedLineLength = 2 * 1024 * 1024
+	const malformedOutput = `{"type":"assistant","message": not-json`
+
 	tmpDir := t.TempDir()
 	reportsDir := filepath.Join(tmpDir, "reports")
 	if err := os.MkdirAll(reportsDir, 0755); err != nil {
 		t.Fatalf("mkdir reports: %v", err)
 	}
 
-	// Create mock claude script
-	claudePath := makeScript(t, tmpDir, "claude", `echo "Reading files..."
-echo "Implementing..."
-echo "Tests passing!"
-`)
+	// This emulates a CLI that falls back to ordinary stdout instead of JSONL.
+	// The report must retain that text, while preserving parsed event text and
+	// discarding unrecognized JSON events.
+	claudePath := makeScript(t, tmpDir, "claude", fmt.Sprintf(`echo "plain-text output"
+echo '%s'
+echo '{"type":"tool_result","tool_use_id":"tool-1","content":"discarded tool JSON"}'
+printf '%%*s\n' %d '' | tr ' ' x
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"structured report text"}]}}'
+`, malformedOutput, oversizedLineLength))
 
 	// Create plan file
 	planContent := `---
 title: test plan
 status: pending
 project: ` + tmpDir + `
-max_runtime: 30s
+max_runtime: 5s
 allowed_tools: Bash
 ---
 Do some work.
@@ -110,14 +235,42 @@ Do some work.
 		t.Error("report field is empty")
 	}
 
-	// Verify report file exists and contains output
+	// Verify the report contains both parsed structured output and the bounded
+	// fallback for ordinary stdout, but no unrecognized JSON event.
 	if _, err := os.Stat(updated.Report); err != nil {
 		t.Errorf("report file %q does not exist: %v", updated.Report, err)
 	} else {
-		data, _ := os.ReadFile(updated.Report)
+		data, err := os.ReadFile(updated.Report)
+		if err != nil {
+			t.Fatalf("read report: %v", err)
+		}
 		reportContent := string(data)
-		if !strings.Contains(reportContent, "Tests passing!") {
-			t.Errorf("report does not contain expected output; got:\n%s", reportContent)
+		if !strings.Contains(reportContent, "plain-text output") {
+			t.Errorf("report does not contain plaintext fallback; got:\n%s", reportContent)
+		}
+		if !strings.Contains(reportContent, malformedOutput) {
+			t.Errorf("report does not contain malformed non-JSON fallback; got:\n%s", reportContent)
+		}
+		if !strings.Contains(reportContent, "structured report text") {
+			t.Errorf("report does not contain structured output; got:\n%s", reportContent)
+		}
+		if strings.Contains(reportContent, "discarded tool JSON") {
+			t.Errorf("report contains unrecognized tool JSON event; got:\n%s", reportContent)
+		}
+
+		longLineStart := strings.Index(reportContent, strings.Repeat("x", 32))
+		if longLineStart == -1 {
+			t.Fatalf("report does not contain bounded plaintext output; got:\n%s", reportContent)
+		}
+		longLine := reportContent[longLineStart:]
+		if newline := strings.IndexByte(longLine, '\n'); newline >= 0 {
+			longLine = longLine[:newline]
+		}
+		if len(longLine) > fallbackLimit {
+			t.Errorf("plaintext fallback length = %d; want at most %d", len(longLine), fallbackLimit)
+		}
+		if len(longLine) >= fallbackLimit+1 {
+			t.Errorf("plaintext fallback was not truncated; length = %d", len(longLine))
 		}
 	}
 

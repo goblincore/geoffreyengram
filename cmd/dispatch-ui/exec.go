@@ -298,6 +298,472 @@ func parseMaxRuntime(s string) time.Duration {
 // defaultSetupTimeout bounds a worktree setup command when none is configured.
 const defaultSetupTimeout = 5 * time.Minute
 
+// maxPlaintextReportBytes bounds non-JSON stdout kept as a report fallback.
+const maxPlaintextReportBytes = 64 * 1024
+
+// maxStreamEventBytes bounds memory retained while assembling one JSONL event.
+// Longer lines are still fully drained from stdout.
+const maxStreamEventBytes = 1024 * 1024
+
+func capturePlanOutput(stdout io.Reader, lb *LogBuffer, report io.Writer) error {
+	reader := bufio.NewReaderSize(stdout, 64*1024)
+	lineBuffer := make([]byte, 0, 64*1024)
+	plaintextReportBytes := 0
+	jsonValidator := newJSONLineValidator()
+	oversized := false
+
+	for {
+		fragment, readErr := reader.ReadSlice('\n')
+		jsonValidator.write(fragment)
+		if !oversized {
+			remaining := maxStreamEventBytes - len(lineBuffer)
+			if len(fragment) > remaining {
+				lineBuffer = append(lineBuffer, fragment[:remaining]...)
+				oversized = true
+			} else {
+				lineBuffer = append(lineBuffer, fragment...)
+			}
+		}
+
+		if readErr == bufio.ErrBufferFull {
+			continue
+		}
+
+		if len(lineBuffer) > 0 {
+			raw := strings.TrimSuffix(string(lineBuffer), "\n")
+			raw = strings.TrimSuffix(raw, "\r")
+
+			line := ""
+			if !oversized {
+				line = parseStreamEvent(raw)
+			}
+			if line != "" {
+				lb.Append(line)
+				fmt.Fprintln(report, line)
+			} else if !oversized && !json.Valid([]byte(raw)) {
+				appendPlaintextReport(report, raw, &plaintextReportBytes)
+			} else if oversized && !jsonValidator.isValid() {
+				appendPlaintextReport(report, raw, &plaintextReportBytes)
+			}
+		}
+
+		lineBuffer = lineBuffer[:0]
+		jsonValidator = newJSONLineValidator()
+		oversized = false
+
+		switch readErr {
+		case nil:
+			continue
+		case io.EOF:
+			return nil
+		default:
+			return readErr
+		}
+	}
+}
+
+func appendPlaintextReport(report io.Writer, raw string, written *int) {
+	if *written >= maxPlaintextReportBytes {
+		return
+	}
+
+	remaining := maxPlaintextReportBytes - *written
+	if len(raw)+1 > remaining {
+		raw = raw[:remaining-1]
+	}
+	fmt.Fprintln(report, raw)
+	*written += len(raw) + 1
+}
+
+// encoding/json uses the same nesting limit when deciding whether JSON is
+// valid. Keeping the streaming validator aligned prevents classification from
+// changing merely because a line crossed maxStreamEventBytes.
+const maxJSONNestingDepth = 10000
+
+type jsonLexMode uint8
+
+const (
+	jsonLexNormal jsonLexMode = iota
+	jsonLexString
+	jsonLexNumber
+	jsonLexLiteral
+)
+
+type jsonFrameState uint8
+
+const (
+	jsonObjectKeyOrEnd jsonFrameState = iota
+	jsonObjectKey
+	jsonObjectColon
+	jsonObjectValue
+	jsonObjectCommaOrEnd
+	jsonArrayValueOrEnd
+	jsonArrayValue
+	jsonArrayCommaOrEnd
+)
+
+type jsonNumberState uint8
+
+const (
+	jsonNumberSign jsonNumberState = iota
+	jsonNumberZero
+	jsonNumberInteger
+	jsonNumberDot
+	jsonNumberFraction
+	jsonNumberExponent
+	jsonNumberExponentSign
+	jsonNumberExponentDigits
+)
+
+type jsonFrame struct {
+	kind  byte
+	state jsonFrameState
+}
+
+// jsonLineValidator validates one JSON value incrementally without retaining
+// payload text. Its fixed stack keeps memory bounded even for hostile output.
+type jsonLineValidator struct {
+	valid           bool
+	nestingExceeded bool
+	rootComplete    bool
+	frames          [maxJSONNestingDepth]jsonFrame
+	depth           int
+	mode            jsonLexMode
+	stringKey       bool
+	escaped         bool
+	unicodeLeft     uint8
+	numberState     jsonNumberState
+	literal         string
+	literalIndex    int
+}
+
+func newJSONLineValidator() jsonLineValidator {
+	return jsonLineValidator{valid: true}
+}
+
+func (v *jsonLineValidator) write(data []byte) {
+	for _, b := range data {
+		if !v.valid {
+			return
+		}
+		switch v.mode {
+		case jsonLexNormal:
+			v.writeNormal(b)
+		case jsonLexString:
+			v.writeString(b)
+		case jsonLexNumber:
+			v.writeNumber(b)
+		case jsonLexLiteral:
+			v.writeLiteral(b)
+		}
+	}
+}
+
+func (v *jsonLineValidator) isValid() bool {
+	if v.nestingExceeded || !v.valid {
+		return false
+	}
+	if v.mode == jsonLexNumber {
+		if !v.numberCanEnd() {
+			return false
+		}
+		v.mode = jsonLexNormal
+		v.completeValue()
+	} else if v.mode != jsonLexNormal {
+		return false
+	}
+	return v.valid && v.rootComplete && v.depth == 0
+}
+
+func (v *jsonLineValidator) writeNormal(b byte) {
+	if isJSONWhitespace(b) {
+		return
+	}
+	if v.depth == 0 {
+		if v.rootComplete {
+			v.valid = false
+			return
+		}
+		v.startValue(b)
+		return
+	}
+
+	frame := &v.frames[v.depth-1]
+	switch frame.state {
+	case jsonObjectKeyOrEnd:
+		if b == '}' {
+			v.closeContainer('{')
+		} else if b == '"' {
+			v.startString(true)
+		} else {
+			v.valid = false
+		}
+	case jsonObjectKey:
+		if b == '"' {
+			v.startString(true)
+		} else {
+			v.valid = false
+		}
+	case jsonObjectColon:
+		if b == ':' {
+			frame.state = jsonObjectValue
+		} else {
+			v.valid = false
+		}
+	case jsonObjectValue:
+		v.startValue(b)
+	case jsonObjectCommaOrEnd:
+		switch b {
+		case ',':
+			frame.state = jsonObjectKey
+		case '}':
+			v.closeContainer('{')
+		default:
+			v.valid = false
+		}
+	case jsonArrayValueOrEnd:
+		if b == ']' {
+			v.closeContainer('[')
+		} else {
+			v.startValue(b)
+		}
+	case jsonArrayValue:
+		v.startValue(b)
+	case jsonArrayCommaOrEnd:
+		switch b {
+		case ',':
+			frame.state = jsonArrayValue
+		case ']':
+			v.closeContainer('[')
+		default:
+			v.valid = false
+		}
+	}
+}
+
+func (v *jsonLineValidator) startValue(b byte) {
+	switch {
+	case b == '{':
+		v.pushContainer('{', jsonObjectKeyOrEnd)
+	case b == '[':
+		v.pushContainer('[', jsonArrayValueOrEnd)
+	case b == '"':
+		v.startString(false)
+	case b == 't':
+		v.startLiteral("true")
+	case b == 'f':
+		v.startLiteral("false")
+	case b == 'n':
+		v.startLiteral("null")
+	case b == '-':
+		v.mode = jsonLexNumber
+		v.numberState = jsonNumberSign
+	case b == '0':
+		v.mode = jsonLexNumber
+		v.numberState = jsonNumberZero
+	case b >= '1' && b <= '9':
+		v.mode = jsonLexNumber
+		v.numberState = jsonNumberInteger
+	default:
+		v.valid = false
+	}
+}
+
+func (v *jsonLineValidator) pushContainer(kind byte, state jsonFrameState) {
+	if v.depth == len(v.frames) {
+		v.nestingExceeded = true
+		v.valid = false
+		return
+	}
+	v.frames[v.depth] = jsonFrame{kind: kind, state: state}
+	v.depth++
+}
+
+func (v *jsonLineValidator) closeContainer(kind byte) {
+	if v.depth == 0 || v.frames[v.depth-1].kind != kind {
+		v.valid = false
+		return
+	}
+	v.depth--
+	v.completeValue()
+}
+
+func (v *jsonLineValidator) completeValue() {
+	if v.depth == 0 {
+		if v.rootComplete {
+			v.valid = false
+			return
+		}
+		v.rootComplete = true
+		return
+	}
+
+	frame := &v.frames[v.depth-1]
+	switch frame.state {
+	case jsonObjectValue:
+		frame.state = jsonObjectCommaOrEnd
+	case jsonArrayValueOrEnd, jsonArrayValue:
+		frame.state = jsonArrayCommaOrEnd
+	default:
+		v.valid = false
+	}
+}
+
+func (v *jsonLineValidator) startString(key bool) {
+	v.mode = jsonLexString
+	v.stringKey = key
+	v.escaped = false
+	v.unicodeLeft = 0
+}
+
+func (v *jsonLineValidator) writeString(b byte) {
+	if v.unicodeLeft > 0 {
+		if !isHexDigit(b) {
+			v.valid = false
+			return
+		}
+		v.unicodeLeft--
+		return
+	}
+	if v.escaped {
+		v.escaped = false
+		if b == 'u' {
+			v.unicodeLeft = 4
+			return
+		}
+		if !strings.ContainsRune(`"\/bfnrt`, rune(b)) {
+			v.valid = false
+		}
+		return
+	}
+
+	switch {
+	case b == '\\':
+		v.escaped = true
+	case b == '"':
+		v.mode = jsonLexNormal
+		if v.stringKey {
+			if v.depth == 0 {
+				v.valid = false
+				return
+			}
+			v.frames[v.depth-1].state = jsonObjectColon
+		} else {
+			v.completeValue()
+		}
+	case b < 0x20:
+		v.valid = false
+	}
+}
+
+func (v *jsonLineValidator) startLiteral(literal string) {
+	v.mode = jsonLexLiteral
+	v.literal = literal
+	v.literalIndex = 1
+}
+
+func (v *jsonLineValidator) writeLiteral(b byte) {
+	if v.literalIndex >= len(v.literal) || b != v.literal[v.literalIndex] {
+		v.valid = false
+		return
+	}
+	v.literalIndex++
+	if v.literalIndex == len(v.literal) {
+		v.mode = jsonLexNormal
+		v.completeValue()
+	}
+}
+
+func (v *jsonLineValidator) writeNumber(b byte) {
+	switch v.numberState {
+	case jsonNumberSign:
+		if b == '0' {
+			v.numberState = jsonNumberZero
+		} else if b >= '1' && b <= '9' {
+			v.numberState = jsonNumberInteger
+		} else {
+			v.valid = false
+		}
+	case jsonNumberZero:
+		v.writeNumberSuffix(b)
+	case jsonNumberInteger:
+		if b >= '0' && b <= '9' {
+			return
+		}
+		v.writeNumberSuffix(b)
+	case jsonNumberDot:
+		if b >= '0' && b <= '9' {
+			v.numberState = jsonNumberFraction
+		} else {
+			v.valid = false
+		}
+	case jsonNumberFraction:
+		if b >= '0' && b <= '9' {
+			return
+		}
+		if b == 'e' || b == 'E' {
+			v.numberState = jsonNumberExponent
+		} else {
+			v.finishNumber(b)
+		}
+	case jsonNumberExponent:
+		if b == '+' || b == '-' {
+			v.numberState = jsonNumberExponentSign
+		} else if b >= '0' && b <= '9' {
+			v.numberState = jsonNumberExponentDigits
+		} else {
+			v.valid = false
+		}
+	case jsonNumberExponentSign:
+		if b >= '0' && b <= '9' {
+			v.numberState = jsonNumberExponentDigits
+		} else {
+			v.valid = false
+		}
+	case jsonNumberExponentDigits:
+		if b >= '0' && b <= '9' {
+			return
+		}
+		v.finishNumber(b)
+	}
+}
+
+func (v *jsonLineValidator) writeNumberSuffix(b byte) {
+	switch b {
+	case '.':
+		v.numberState = jsonNumberDot
+	case 'e', 'E':
+		v.numberState = jsonNumberExponent
+	default:
+		v.finishNumber(b)
+	}
+}
+
+func (v *jsonLineValidator) finishNumber(delimiter byte) {
+	v.mode = jsonLexNormal
+	v.completeValue()
+	if v.valid {
+		v.writeNormal(delimiter)
+	}
+}
+
+func (v *jsonLineValidator) numberCanEnd() bool {
+	switch v.numberState {
+	case jsonNumberZero, jsonNumberInteger, jsonNumberFraction, jsonNumberExponentDigits:
+		return true
+	default:
+		return false
+	}
+}
+
+func isJSONWhitespace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\r' || b == '\n'
+}
+
+func isHexDigit(b byte) bool {
+	return b >= '0' && b <= '9' || b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F'
+}
+
 // resolveSetupCommand returns the provisioning command to run in a fresh
 // worktree before the agent starts. The per-task "setup:" field takes
 // precedence over the project-wide DEFAULT_SETUP_CMD. An empty result means
@@ -721,27 +1187,22 @@ Save memories when you:
 		return fmt.Errorf("start command: %w", err)
 	}
 
-	// Stream lines in a goroutine. Parse events for both the UI log and report.
-	// Report gets human-readable parsed lines; raw JSON is only kept if no parse succeeds.
-	scanDone := make(chan struct{})
+	// Stream lines in a goroutine. The reader drains arbitrarily long lines while
+	// retaining bounded buffers for event parsing and plaintext report fallback.
+	scanDone := make(chan error, 1)
 	go func() {
-		defer close(scanDone)
-		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB for large JSON lines
-		for scanner.Scan() {
-			raw := scanner.Text()
-			if line := parseStreamEvent(raw); line != "" {
-				lb.Append(line)
-				fmt.Fprintln(reportFile, line)
-			}
-		}
+		scanDone <- capturePlanOutput(stdout, lb, reportFile)
 	}()
 
 	// 11. Wait for process; when it exits, the pipe's write end closes and the
-	// scanner goroutine unblocks. cmd.WaitDelay ensures we don't block forever if
+	// capture goroutine unblocks. cmd.WaitDelay ensures we don't block forever if
 	// the process is stubborn.
 	waitErr := cmd.Wait()
-	<-scanDone
+	if scanErr := <-scanDone; scanErr != nil {
+		msg := fmt.Sprintf("[dispatch] stdout capture failed: %v", scanErr)
+		lb.Append(msg)
+		fmt.Fprintln(reportFile, msg)
+	}
 
 	// Determine exit code and status
 	exitCode := 0

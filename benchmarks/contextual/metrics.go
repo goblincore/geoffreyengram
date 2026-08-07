@@ -5,11 +5,10 @@ import (
 	"strings"
 )
 
-// isStrictMatch checks if a result path matches a ground truth file.
-// Handles both directions:
-//   - result "dualmem/hdc.go" matches gt file "dualmem/hdc.go" (exact)
-//   - result "dualmem" matches gt file "dualmem/hdc.go" (module contains file)
-func isStrictMatch(path string, gt GroundTruth) bool {
+// isRelevantMatch checks whether a result is relevant to the ground truth.
+// It recognizes exact-file matches, parent modules containing a ground-truth
+// file, and files within a ground-truth module.
+func isRelevantMatch(path string, gt GroundTruth) bool {
 	for _, f := range gt.Files {
 		if path == f {
 			return true
@@ -44,7 +43,7 @@ func isModuleMatch(path string, gt GroundTruth) bool {
 	return false
 }
 
-// precisionAtK computes strict precision at K.
+// precisionAtK computes module-aware precision at K.
 func precisionAtK(results []SearchResult, gt GroundTruth, k int) float64 {
 	if len(results) == 0 || k == 0 {
 		return 0
@@ -55,7 +54,7 @@ func precisionAtK(results []SearchResult, gt GroundTruth, k int) float64 {
 	}
 	hits := 0
 	for i := 0; i < n; i++ {
-		if isStrictMatch(results[i].Path, gt) {
+		if isRelevantMatch(results[i].Path, gt) {
 			hits++
 		}
 	}

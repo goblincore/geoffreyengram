@@ -228,10 +228,11 @@ type ProfileSketch struct {
 
 // ContextBlock is the pre-formatted output of AssembleContext.
 type ContextBlock struct {
-	Text       string      // Pre-formatted for LLM prompt injection
-	TokenCount int         // Estimated tokens used (chars/4 heuristic)
-	Sources    []SourceRef // For attribution/debugging
-	Intent     Intent      // Detected or explicit intent used for assembly
+	Text        string      // Pre-formatted for LLM prompt injection
+	TokenCount  int         // Estimated tokens used (chars/4 heuristic)
+	Sources     []SourceRef // For attribution/debugging
+	Intent      Intent      // Detected or explicit intent used for assembly
+	Diagnostics []string    // Safe, non-fatal assembly diagnostics
 
 	// ServedFactIDs records every durable fact (v2) whose ID was rendered into
 	// Text, in emit order. Instrumentation (file-touch / hit counters, task 7)

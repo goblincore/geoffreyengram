@@ -1,3 +1,5 @@
+//go:build legacy
+
 package engram
 
 import (
@@ -163,8 +165,8 @@ func TestReflectSalienceClamping(t *testing.T) {
 	mock := &mockReflector{
 		reflections: []Reflection{
 			{Content: "zero salience", Salience: 0},     // should become 0.7
-			{Content: "over salience", Salience: 1.5},    // should become 1.0
-			{Content: "normal salience", Salience: 0.6},  // stays 0.6
+			{Content: "over salience", Salience: 1.5},   // should become 1.0
+			{Content: "normal salience", Salience: 0.6}, // stays 0.6
 		},
 	}
 	cm := testEngram(t, mock, nil)

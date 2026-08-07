@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0",
+  "kind": "file_read",
+  "harness": "pi",
+  "cwd": "/repo",
+  "project": {},
+  "session_id": "pi-session-001",
+  "files": [
+    "/repo/internal/read.go"
+  ],
+  "tool": {
+    "name": "read",
+    "phase": "pre"
+  },
+  "future_field": {
+    "ignored": true
+  }
+}

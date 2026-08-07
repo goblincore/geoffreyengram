@@ -13,12 +13,96 @@ package dualmem
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// unavailableEmbedder simulates an embedding provider that the local sandbox
+// cannot reach. Its call count protects the embedding-free session-start path.
+type unavailableEmbedder struct {
+	dim   int
+	calls int
+}
+
+func (e *unavailableEmbedder) Embed(_ context.Context, _ string, _ string) ([]float32, error) {
+	e.calls++
+	return nil, newProviderUnavailableError("gemini", "embed", errors.New("fixture DNS failure"))
+}
+
+func (e *unavailableEmbedder) Dimension() int { return e.dim }
+
+func (e *unavailableEmbedder) ModelName() string { return "unavailable-embedder" }
+
+// TestIsSessionStartQuery protects normalization and ensures semantic queries
+// cannot accidentally take the embedding-free context path.
+func TestIsSessionStartQuery(t *testing.T) {
+	for _, query := range []string{"", "session", "session start", "session context", "context", "  SESSION CONTEXT  "} {
+		if !IsSessionStartQuery(query) {
+			t.Errorf("IsSessionStartQuery(%q) = false, want true", query)
+		}
+	}
+	if IsSessionStartQuery("why does auth fail") {
+		t.Error("IsSessionStartQuery(specific query) = true, want false")
+	}
+}
+
+func TestPinnedBlock_UnavailableSemanticFallback(t *testing.T) {
+	dir := newV2Repo(t)
+	engine := newV2Engine(t, dir)
+	ctx := context.Background()
+	const namespace = "ns-unavailable"
+
+	if err := engine.SaveCheckpoint(ctx, namespace, &Checkpoint{Task: "local handoff", Status: "in_progress"}); err != nil {
+		t.Fatalf("SaveCheckpoint: %v", err)
+	}
+
+	embedder := &unavailableEmbedder{dim: 64}
+	engine.embedder = embedder
+
+	block, err := engine.Assemble(ctx, namespace, "why does semantic lookup fail", 3000, AssembleOptions{})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if !strings.Contains(block.Text, "[Checkpoint: local handoff]") {
+		t.Errorf("local checkpoint was not preserved:\n%s", block.Text)
+	}
+	wantDiagnostic := "dualmem: gemini embed unavailable: network access is required; retry with network permission"
+	if len(block.Diagnostics) != 1 || block.Diagnostics[0] != wantDiagnostic {
+		t.Errorf("Diagnostics = %#v, want [%q]", block.Diagnostics, wantDiagnostic)
+	}
+	if embedder.calls != 1 {
+		t.Errorf("Embed calls = %d, want 1 shared query embedding", embedder.calls)
+	}
+}
+
+func TestPinnedBlock_SessionContextNoProviderCall(t *testing.T) {
+	dir := newV2Repo(t)
+	engine := newV2Engine(t, dir)
+	ctx := context.Background()
+	const namespace = "ns-sentinel"
+
+	if err := engine.SaveCheckpoint(ctx, namespace, &Checkpoint{Task: "local handoff", Status: "in_progress"}); err != nil {
+		t.Fatalf("SaveCheckpoint: %v", err)
+	}
+
+	embedder := &unavailableEmbedder{dim: 64}
+	engine.embedder = embedder
+
+	block, err := engine.Assemble(ctx, namespace, "session context", 3000, AssembleOptions{})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if len(block.Diagnostics) != 0 {
+		t.Errorf("Diagnostics = %#v, want none", block.Diagnostics)
+	}
+	if embedder.calls != 0 {
+		t.Errorf("Embed calls = %d, want 0 for session context", embedder.calls)
+	}
+}
 
 // newV2Repo creates a git repo with one committed file and returns its path.
 func newV2Repo(t *testing.T) string {
@@ -352,7 +436,6 @@ func TestPinnedBlock_PreferencesUserGlobal(t *testing.T) {
 		t.Errorf("user-global preference should appear in any namespace:\n%s", block.Text)
 	}
 }
-
 
 // TestPinnedBlock_QueryRelevantSection verifies the query-aware retrieval added
 // to the v2 pinned block: a SPECIFIC query surfaces memories about that query
