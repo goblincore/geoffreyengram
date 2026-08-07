@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,18 +51,23 @@ func TestParseMaxRuntime(t *testing.T) {
 	}
 }
 
-func TestExecutePlan(t *testing.T) {
+func TestExecutePlanReportCapturesBoundedPlaintextFallback(t *testing.T) {
+	const fallbackLimit = 64 * 1024
+
 	tmpDir := t.TempDir()
 	reportsDir := filepath.Join(tmpDir, "reports")
 	if err := os.MkdirAll(reportsDir, 0755); err != nil {
 		t.Fatalf("mkdir reports: %v", err)
 	}
 
-	// Create mock claude script
-	claudePath := makeScript(t, tmpDir, "claude", `echo "Reading files..."
-echo "Implementing..."
-echo "Tests passing!"
-`)
+	// This emulates a CLI that falls back to ordinary stdout instead of JSONL.
+	// The report must retain that text, while preserving parsed event text and
+	// discarding unrecognized JSON events.
+	claudePath := makeScript(t, tmpDir, "claude", fmt.Sprintf(`echo "plain-text output"
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"structured report text"}]}}'
+echo '{"type":"thinking","text":"discarded JSON"}'
+printf '%%*s\n' %d '' | tr ' ' x
+`, fallbackLimit+1))
 
 	// Create plan file
 	planContent := `---
@@ -110,14 +116,39 @@ Do some work.
 		t.Error("report field is empty")
 	}
 
-	// Verify report file exists and contains output
+	// Verify the report contains both parsed structured output and the bounded
+	// fallback for ordinary stdout, but no unrecognized JSON event.
 	if _, err := os.Stat(updated.Report); err != nil {
 		t.Errorf("report file %q does not exist: %v", updated.Report, err)
 	} else {
-		data, _ := os.ReadFile(updated.Report)
+		data, err := os.ReadFile(updated.Report)
+		if err != nil {
+			t.Fatalf("read report: %v", err)
+		}
 		reportContent := string(data)
-		if !strings.Contains(reportContent, "Tests passing!") {
-			t.Errorf("report does not contain expected output; got:\n%s", reportContent)
+		if !strings.Contains(reportContent, "plain-text output") {
+			t.Errorf("report does not contain plaintext fallback; got:\n%s", reportContent)
+		}
+		if !strings.Contains(reportContent, "structured report text") {
+			t.Errorf("report does not contain structured output; got:\n%s", reportContent)
+		}
+		if strings.Contains(reportContent, "discarded JSON") {
+			t.Errorf("report contains unrecognized JSON event; got:\n%s", reportContent)
+		}
+
+		longLineStart := strings.Index(reportContent, strings.Repeat("x", 32))
+		if longLineStart == -1 {
+			t.Fatalf("report does not contain bounded plaintext output; got:\n%s", reportContent)
+		}
+		longLine := reportContent[longLineStart:]
+		if newline := strings.IndexByte(longLine, '\n'); newline >= 0 {
+			longLine = longLine[:newline]
+		}
+		if len(longLine) > fallbackLimit {
+			t.Errorf("plaintext fallback length = %d; want at most %d", len(longLine), fallbackLimit)
+		}
+		if len(longLine) >= fallbackLimit+1 {
+			t.Errorf("plaintext fallback was not truncated; length = %d", len(longLine))
 		}
 	}
 
