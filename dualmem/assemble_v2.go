@@ -206,11 +206,17 @@ var sessionStartSentinels = map[string]bool{
 	"context":         true,
 }
 
+// IsSessionStartQuery reports whether query is a generic session-start
+// sentinel rather than an information request.
+func IsSessionStartQuery(query string) bool {
+	return sessionStartSentinels[strings.ToLower(strings.TrimSpace(query))]
+}
+
 // isSpecificQuery reports whether query expresses a real information need
 // (as opposed to a session-start sentinel), which gates the query-aware
 // memories section in the pinned block.
 func isSpecificQuery(query string) bool {
-	return !sessionStartSentinels[strings.ToLower(strings.TrimSpace(query))]
+	return !IsSessionStartQuery(query)
 }
 
 // pinnedRelevanceFloor is the minimum blended similarity a detail memory must

@@ -2,9 +2,54 @@ package main
 
 import (
 	"flag"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
+
+// TestNewEngineLocalDoesNotRequireProviderKey protects local-only commands
+// from failing before they can open the SQLite store when no provider is
+// configured.
+func TestNewEngineLocalDoesNotRequireProviderKey(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("GOOGLE_API_KEY", "")
+
+	cfg := defaultCLIConfig(t.TempDir())
+	cfg.Storage.SQLitePath = filepath.Join(t.TempDir(), "memories.db")
+
+	engine, err := newEngine(cfg, engineLocal)
+	if err != nil {
+		t.Fatalf("newEngine local: %v", err)
+	}
+	t.Cleanup(func() { engine.Close() })
+}
+
+// TestContextCapabilities protects the distinction between the fast,
+// embedding-free session-start path and every query path that needs semantic
+// retrieval.
+func TestContextCapabilities(t *testing.T) {
+	cases := []struct {
+		name          string
+		query         string
+		legacy, index bool
+		want          engineCapabilities
+	}{
+		{name: "default query", want: engineLocal},
+		{name: "session start sentinel", query: "session start", want: engineLocal},
+		{name: "session context sentinel", query: "session context", want: engineLocal},
+		{name: "specific query", query: "why does auth fail", want: engineSemantic},
+		{name: "legacy session query", query: "session context", legacy: true, want: engineSemantic},
+		{name: "index session query", query: "session context", index: true, want: engineSemantic},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := contextCapabilities(tc.query, tc.legacy, tc.index); got != tc.want {
+				t.Errorf("contextCapabilities(%q, legacy=%t, index=%t) = %#v, want %#v", tc.query, tc.legacy, tc.index, got, tc.want)
+			}
+		})
+	}
+}
 
 // TestParseFlagsInterspersed is the regression guard for the flag-ordering
 // footgun: Go's stdlib flag.Parse stops at the first positional token, so

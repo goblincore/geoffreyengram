@@ -20,6 +20,19 @@ import (
 	"testing"
 )
 
+// TestIsSessionStartQuery protects normalization and ensures semantic queries
+// cannot accidentally take the embedding-free context path.
+func TestIsSessionStartQuery(t *testing.T) {
+	for _, query := range []string{"", "session", "session start", "session context", "context", "  SESSION CONTEXT  "} {
+		if !IsSessionStartQuery(query) {
+			t.Errorf("IsSessionStartQuery(%q) = false, want true", query)
+		}
+	}
+	if IsSessionStartQuery("why does auth fail") {
+		t.Error("IsSessionStartQuery(specific query) = true, want false")
+	}
+}
+
 // newV2Repo creates a git repo with one committed file and returns its path.
 func newV2Repo(t *testing.T) string {
 	t.Helper()
@@ -352,7 +365,6 @@ func TestPinnedBlock_PreferencesUserGlobal(t *testing.T) {
 		t.Errorf("user-global preference should appear in any namespace:\n%s", block.Text)
 	}
 }
-
 
 // TestPinnedBlock_QueryRelevantSection verifies the query-aware retrieval added
 // to the v2 pinned block: a SPECIFIC query surfaces memories about that query
