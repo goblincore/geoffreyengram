@@ -25,6 +25,11 @@ func Apply(result Result) error {
 	if err := validateAndSortChanges(result.Changes); err != nil {
 		return err
 	}
+	if result.home != "" {
+		if err := validateChangesUnderHome(result.home, result.Changes); err != nil {
+			return err
+		}
+	}
 	snapshots := make([]targetSnapshot, len(result.Changes))
 	for i := range result.Changes {
 		snapshot, err := inspectChangeState(result.Changes[i])

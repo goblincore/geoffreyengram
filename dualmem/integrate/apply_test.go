@@ -309,6 +309,35 @@ func TestApplyRejectsSymlinkTarget(t *testing.T) {
 	assertFile(t, realPath, "original", 0o600)
 }
 
+func TestApplyRejectsSymlinkedParentIntroducedAfterPlanning(t *testing.T) {
+	home := t.TempDir()
+	harnessDirectory := filepath.Join(home, ".codex")
+	if err := os.Mkdir(harnessDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(harnessDirectory, "hooks.json")
+	result, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"codex"}}, Bundle{Drivers: []Driver{
+		&fileStateDriver{name: "codex", path: target, wanted: []byte("managed")},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	escape := t.TempDir()
+	if err := os.Remove(harnessDirectory); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(escape, harnessDirectory); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(result); err == nil {
+		t.Fatal("Apply followed a parent symlink introduced after planning")
+	}
+	if _, err := os.Lstat(filepath.Join(escape, "hooks.json")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Apply wrote through the symlinked parent: %v", err)
+	}
+}
+
 func TestApplySecondPlanIsUnchanged(t *testing.T) {
 	home := t.TempDir()
 	driver := &fileStateDriver{name: "codex", path: filepath.Join(home, "config"), wanted: []byte("managed")}

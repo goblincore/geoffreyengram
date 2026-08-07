@@ -2,12 +2,20 @@ package integrate
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
 
 func Plan(ctx context.Context, opts Options, bundle Bundle) (Result, error) {
+	home, err := integrationHome(opts.Home)
+	if err != nil {
+		return Result{}, err
+	}
 	drivers, byName, err := validatedDrivers(bundle.Drivers)
 	if err != nil {
 		return Result{}, err
@@ -67,7 +75,61 @@ func Plan(ctx context.Context, opts Options, bundle Bundle) (Result, error) {
 	if err := validateAndSortChanges(changes); err != nil {
 		return Result{}, err
 	}
-	return Result{Detections: detections, Changes: changes}, nil
+	if err := validateChangesUnderHome(home, changes); err != nil {
+		return Result{}, err
+	}
+	return Result{Detections: detections, Changes: changes, home: home}, nil
+}
+
+func integrationHome(home string) (string, error) {
+	root, err := filepath.Abs(home)
+	if err != nil {
+		return "", fmt.Errorf("resolve integration home %q: %w", home, err)
+	}
+	return filepath.Clean(root), nil
+}
+
+func validateChangesUnderHome(root string, changes []Change) error {
+	for _, change := range changes {
+		if err := validatePathUnderHome(root, change.Path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validatePathUnderHome(root, target string) error {
+	absoluteTarget, err := filepath.Abs(target)
+	if err != nil {
+		return fmt.Errorf("resolve integration target %q: %w", target, err)
+	}
+	absoluteTarget = filepath.Clean(absoluteTarget)
+	relativeTarget, err := filepath.Rel(root, absoluteTarget)
+	if err != nil || relativeTarget == ".." || strings.HasPrefix(relativeTarget, ".."+string(filepath.Separator)) || filepath.IsAbs(relativeTarget) {
+		return fmt.Errorf("integration target %q is outside home %q", target, root)
+	}
+
+	path := root
+	components := []string{relativeTarget}
+	if relativeTarget != "." {
+		components = strings.Split(relativeTarget, string(filepath.Separator))
+	}
+	for _, component := range components {
+		if component != "." {
+			path = filepath.Join(path, component)
+		}
+		info, err := os.Lstat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("inspect integration target ancestor %q: %w", path, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("integration target %q traverses symlink %q", target, path)
+		}
+	}
+	return nil
 }
 
 func validatedDrivers(input []Driver) ([]Driver, map[string]Driver, error) {

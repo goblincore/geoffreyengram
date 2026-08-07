@@ -108,4 +108,5 @@ type Options struct {
 type Result struct {
 	Detections []Detection
 	Changes    []Change
+	home       string
 }

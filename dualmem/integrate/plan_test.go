@@ -100,6 +100,25 @@ func TestPlanExplicitHarnessSelectsUndetectedDriver(t *testing.T) {
 	}
 }
 
+func TestPlanRejectsSymlinkedHarnessDirectoryBeforePublishingChanges(t *testing.T) {
+	home := t.TempDir()
+	escape := t.TempDir()
+	if err := os.Symlink(escape, filepath.Join(home, ".codex")); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"codex"}}, BuiltinBundle())
+	if err == nil {
+		t.Fatal("Plan accepted a harness directory symlink")
+	}
+	if len(result.Changes) != 0 {
+		t.Fatalf("symlinked harness plan exposed %d changes", len(result.Changes))
+	}
+	if _, err := os.Lstat(filepath.Join(escape, "hooks.json")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("planning touched the symlink destination: %v", err)
+	}
+}
+
 func TestPlanTargetedUninstallUsesManagedStateNotPresence(t *testing.T) {
 	for _, test := range []struct {
 		name          string
