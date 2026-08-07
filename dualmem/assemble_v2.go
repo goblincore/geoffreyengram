@@ -41,6 +41,7 @@ package dualmem
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -106,8 +107,13 @@ func (e *Engine) assemblePinnedV2(ctx context.Context, userID, query string, tok
 	// about that question rather than just the newest handoff. Reads
 	// detail_memories (via DualSearch) and repo facts; empty/session-start
 	// queries skip it entirely (no embedding call).
+	var diagnostics []string
 	if specific {
-		for _, it := range e.queryRelevantV2(ctx, userID, query, handoffTask, emittedFacts) {
+		relevant, relevanceErr := e.queryRelevantV2(ctx, userID, query, handoffTask, emittedFacts)
+		if relevanceErr != nil {
+			diagnostics = append(diagnostics, safeRelevanceDiagnostic(relevanceErr))
+		}
+		for _, it := range relevant {
 			if !emit(it.text, it.src, it.factID) {
 				break
 			}
@@ -161,6 +167,7 @@ func (e *Engine) assemblePinnedV2(ctx context.Context, userID, query string, tok
 		TokenCount:    tokensUsed,
 		Sources:       sources,
 		ServedFactIDs: servedFactIDs,
+		Diagnostics:   diagnostics,
 	}
 	return block, nil
 }
@@ -242,8 +249,9 @@ type pinnedItem struct {
 //
 // The returned items are budget-unaware; the caller emits them in order and
 // stops when the block budget is exhausted.
-func (e *Engine) queryRelevantV2(ctx context.Context, userID, query, skipCheckpointTask string, alreadyEmitted map[string]bool) []pinnedItem {
+func (e *Engine) queryRelevantV2(ctx context.Context, userID, query, skipCheckpointTask string, alreadyEmitted map[string]bool) ([]pinnedItem, error) {
 	var items []pinnedItem
+	var relevanceErr error
 
 	// Facts first — curated, self-contained, provenance-carrying.
 	if facts, err := e.SearchFacts(ctx, query, userID, "", 5); err == nil {
@@ -257,6 +265,8 @@ func (e *Engine) queryRelevantV2(ctx context.Context, userID, query, skipCheckpo
 				factID: f.ID,
 			})
 		}
+	} else {
+		relevanceErr = err
 	}
 
 	// Detail memories — the bulk of accumulated (pre-v2) memory lives here:
@@ -267,8 +277,12 @@ func (e *Engine) queryRelevantV2(ctx context.Context, userID, query, skipCheckpo
 	// "LC-1928" ranks by cosine+type-boost alone and the matching checkpoint is
 	// crowded out of the top-N by generic high-importance warnings.
 	var details []DetailMemory
-	if res, err := e.DualSearch(ctx, userID, query, SearchOpts{Limit: 8, QueryText: query}); err == nil && res != nil {
-		details = res.DetailMemories
+	if res, err := e.DualSearch(ctx, userID, query, SearchOpts{Limit: 8, QueryText: query}); err == nil {
+		if res != nil {
+			details = res.DetailMemories
+		}
+	} else if relevanceErr == nil {
+		relevanceErr = err
 	}
 	for _, dm := range details {
 		if dm.Similarity < pinnedRelevanceFloor {
@@ -296,7 +310,17 @@ func (e *Engine) queryRelevantV2(ctx context.Context, userID, query, skipCheckpo
 			src:  SourceRef{Type: "detail", ID: dm.ID},
 		})
 	}
-	return items
+	return items, relevanceErr
+}
+
+// safeRelevanceDiagnostic preserves Task 1's provider-safe message after the
+// search layers add contextual wrapping. Other errors are returned unchanged.
+func safeRelevanceDiagnostic(err error) string {
+	var unavailable *providerUnavailableError
+	if errors.As(err, &unavailable) {
+		return unavailable.Error()
+	}
+	return err.Error()
 }
 
 // loadPreferenceFactsV2 returns user-global preference facts (namespace "",

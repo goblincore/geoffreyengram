@@ -18,6 +18,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -726,6 +727,7 @@ func cmdContext(cfg CLIConfig) {
 		json.NewEncoder(os.Stdout).Encode(block)
 		return
 	}
+	printContextDiagnostics(os.Stderr, block.Diagnostics)
 
 	if block.Text == "" {
 		fmt.Println("(no context available)")
@@ -738,6 +740,12 @@ func cmdContext(cfg CLIConfig) {
 		intentLabel = "default"
 	}
 	fmt.Printf("\n(%d tokens, %d sources, intent: %s)\n", block.TokenCount, len(block.Sources), intentLabel)
+}
+
+func printContextDiagnostics(w io.Writer, diagnostics []string) {
+	for _, diagnostic := range diagnostics {
+		fmt.Fprintf(w, "warning: %s\n", diagnostic)
+	}
 }
 
 func cmdShow(cfg CLIConfig) {

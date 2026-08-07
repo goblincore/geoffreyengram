@@ -1,11 +1,22 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"path/filepath"
 	"reflect"
 	"testing"
 )
+
+func TestPrintContextDiagnostics(t *testing.T) {
+	var output bytes.Buffer
+	printContextDiagnostics(&output, []string{"provider unavailable", "retry with network permission"})
+
+	const want = "warning: provider unavailable\nwarning: retry with network permission\n"
+	if got := output.String(); got != want {
+		t.Errorf("printContextDiagnostics() = %q, want %q", got, want)
+	}
+}
 
 // TestNewEngineLocalDoesNotRequireProviderKey protects local-only commands
 // from failing before they can open the SQLite store when no provider is
