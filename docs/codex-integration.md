@@ -40,4 +40,4 @@ The installer removes only its managed hooks and marked instructions. It also re
 
 ## Network-restricted semantic lookup
 
-Local session context, file context, checkpoints, and code search do not require provider access. Commands that compute a new semantic query embedding (`search`, `recall`, `precedent`, and query-specific `context`) require outbound access to the configured provider. In a restricted Codex command sandbox, rerun the explicit semantic command with network permission when prompted. DualMem does not bypass sandbox policy and never places provider credentials in request URLs or diagnostics.
+Local session context, file context, checkpoint listing, and code search do not require provider access. Saving a checkpoint and commands that compute a new semantic query embedding (`search`, `recall`, `precedent`, and query-specific `context`) require outbound access to the configured provider. In a restricted Codex command sandbox, rerun the explicit provider-backed command with network permission when prompted. DualMem does not bypass sandbox policy and never places provider credentials in request URLs or diagnostics.
