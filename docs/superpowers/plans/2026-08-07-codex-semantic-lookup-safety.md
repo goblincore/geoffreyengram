@@ -277,7 +277,7 @@ git commit -m "refactor: initialize DualMem providers by capability"
 
 Add an `unavailableEmbedder` in `dualmem/assemble_v2_test.go` whose `Embed` increments a call count and returns `newProviderUnavailableError("gemini", "embed", errors.New("fixture DNS failure"))`. Seed a local checkpoint, call `Assemble` with a specific query, and require the checkpoint plus exactly one diagnostic equal to Task 1's safe message. Add a sentinel test that calls `Assemble` with `"session context"`, requires zero diagnostics, and asserts the embedder call count remains zero.
 
-Extract `printContextDiagnostics(io.Writer, []string)` in `cmd/dualmem/main.go`. Add a test requiring one `warning: ` line per diagnostic and absence of an injected sentinel credential.
+Extract `printContextDiagnostics(io.Writer, []string)` in `cmd/dualmem/main.go`. Add a test requiring one exact `warning: ` line per already-sanitized diagnostic. Credential redaction remains the provider boundary's responsibility from Task 1; this formatter must not accept or rediscover credentials.
 
 - [ ] **Step 2: Run the tests and verify RED**
 
