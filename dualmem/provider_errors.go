@@ -2,8 +2,11 @@ package dualmem
 
 import (
 	"fmt"
+	"io"
 	"strings"
 )
+
+const maxProviderErrorBodyBytes = 200
 
 type providerUnavailableError struct {
 	provider  string
@@ -26,4 +29,24 @@ func redactCredential(text, credential string) string {
 		return text
 	}
 	return strings.ReplaceAll(text, credential, "[REDACTED]")
+}
+
+func providerErrorBody(body io.Reader, credential string) string {
+	data, _ := io.ReadAll(io.LimitReader(body, maxProviderErrorBodyBytes))
+	text := redactCredential(string(data), credential)
+	if credential == "" {
+		return text
+	}
+
+	maxPrefixLen := len(credential) - 1
+	if len(text) < maxPrefixLen {
+		maxPrefixLen = len(text)
+	}
+	for prefixLen := maxPrefixLen; prefixLen > 0; prefixLen-- {
+		prefix := credential[:prefixLen]
+		if strings.HasSuffix(text, prefix) {
+			return strings.TrimSuffix(text, prefix) + "[REDACTED]"
+		}
+	}
+	return text
 }

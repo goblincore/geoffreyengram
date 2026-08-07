@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -86,9 +85,7 @@ func (c *GeminiClassifier) llmClassify(ctx context.Context, content string) (str
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		bodyText := redactCredential(string(body), c.apiKey)
-		return "", fmt.Errorf("gemini classify %d: %s", resp.StatusCode, bodyText[:min(len(bodyText), 200)])
+		return "", fmt.Errorf("gemini classify %d: %s", resp.StatusCode, providerErrorBody(resp.Body, c.apiKey))
 	}
 
 	var geminiResp struct {

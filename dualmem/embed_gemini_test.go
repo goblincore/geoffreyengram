@@ -76,11 +76,13 @@ func TestGeminiEmbedderHTTPErrorRedactsReflectedCredential(t *testing.T) {
 
 func TestGeminiEmbedderHTTPErrorRedactsCredentialBeforeTruncation(t *testing.T) {
 	const secret = "fixture-secret-never-real"
+	body := strings.Repeat("x", 195) + secret + strings.Repeat("y", 1000)
+	reader := strings.NewReader(body)
 	embedder := NewGeminiEmbedder(secret, 2)
 	embedder.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusInternalServerError,
-			Body:       io.NopCloser(strings.NewReader(strings.Repeat("x", 195) + secret)),
+			Body:       io.NopCloser(reader),
 			Header:     make(http.Header),
 		}, nil
 	})}
@@ -91,5 +93,8 @@ func TestGeminiEmbedderHTTPErrorRedactsCredentialBeforeTruncation(t *testing.T) 
 	}
 	if strings.Contains(err.Error(), secret[:5]) {
 		t.Fatalf("HTTP error exposed credential prefix: %q", err)
+	}
+	if want := len(body) - 200; reader.Len() != want {
+		t.Fatalf("provider error body remaining = %d, want %d", reader.Len(), want)
 	}
 }

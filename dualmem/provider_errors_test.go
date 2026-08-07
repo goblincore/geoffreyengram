@@ -33,3 +33,21 @@ func TestRedactCredential(t *testing.T) {
 		t.Fatalf("redaction failed: %q", got)
 	}
 }
+
+func TestProviderErrorBodyIsBoundedAndRedactsTrailingCredentialPrefix(t *testing.T) {
+	const secret = "fixture-secret-never-real"
+	body := strings.Repeat("x", 195) + secret + strings.Repeat("y", 1000)
+	reader := strings.NewReader(body)
+
+	got := providerErrorBody(reader, secret)
+
+	if strings.Contains(got, secret) || strings.Contains(got, secret[:5]) {
+		t.Fatalf("provider error body exposed credential: %q", got)
+	}
+	if !strings.Contains(got, "[REDACTED]") {
+		t.Fatalf("provider error body did not redact trailing credential prefix: %q", got)
+	}
+	if want := len(body) - 200; reader.Len() != want {
+		t.Fatalf("provider error body remaining = %d, want %d", reader.Len(), want)
+	}
+}

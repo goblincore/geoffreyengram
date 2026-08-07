@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -139,9 +138,7 @@ func (s *GeminiSummarizer) generate(ctx context.Context, prompt string, maxToken
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		bodyText := redactCredential(string(body), s.apiKey)
-		return "", fmt.Errorf("dualmem: gemini summarize %d: %s", resp.StatusCode, bodyText[:min(len(bodyText), 200)])
+		return "", fmt.Errorf("dualmem: gemini summarize %d: %s", resp.StatusCode, providerErrorBody(resp.Body, s.apiKey))
 	}
 
 	var geminiResp struct {

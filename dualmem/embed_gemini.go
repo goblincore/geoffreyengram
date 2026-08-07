@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 )
@@ -89,9 +88,7 @@ func (e *GeminiEmbedder) Embed(ctx context.Context, text, taskType string) ([]fl
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		bodyText := redactCredential(string(body), e.apiKey)
-		return nil, fmt.Errorf("dualmem: gemini embed %d: %s", resp.StatusCode, bodyText[:min(len(bodyText), 200)])
+		return nil, fmt.Errorf("dualmem: gemini embed %d: %s", resp.StatusCode, providerErrorBody(resp.Body, e.apiKey))
 	}
 
 	var geminiResp struct {
