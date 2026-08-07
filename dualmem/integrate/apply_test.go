@@ -64,11 +64,11 @@ func TestApplyBackupFailurePreventsAllTargetMutations(t *testing.T) {
 	}
 	originalWriter := atomicWriteFile
 	t.Cleanup(func() { atomicWriteFile = originalWriter })
-	atomicWriteFile = func(path string, data []byte, mode fs.FileMode) error {
-		if strings.Contains(path, ".dualmem-backup-") {
+	atomicWriteFile = func(target rootedTarget, data []byte, mode fs.FileMode) error {
+		if strings.Contains(target.path, ".dualmem-backup-") {
 			return errors.New("injected backup failure")
 		}
-		return originalWriter(path, data, mode)
+		return originalWriter(target, data, mode)
 	}
 	result := Result{Changes: []Change{
 		{Path: created, Action: ActionCreate, Mode: 0o600, After: []byte("created")},
@@ -99,14 +99,14 @@ func TestApplyPublishesPrerequisitesBeforeDependentHookMigration(t *testing.T) {
 	originalWriter := atomicWriteFile
 	t.Cleanup(func() { atomicWriteFile = originalWriter })
 	var publications []string
-	atomicWriteFile = func(path string, data []byte, mode fs.FileMode) error {
-		if !strings.Contains(path, ".dualmem-backup-") {
-			publications = append(publications, path)
+	atomicWriteFile = func(target rootedTarget, data []byte, mode fs.FileMode) error {
+		if !strings.Contains(target.path, ".dualmem-backup-") {
+			publications = append(publications, target.path)
 		}
-		if path == hookPath {
+		if target.path == hookPath {
 			return errors.New("injected dependent hook failure")
 		}
-		return originalWriter(path, data, mode)
+		return originalWriter(target, data, mode)
 	}
 
 	err := Apply(Result{Changes: []Change{
@@ -145,11 +145,11 @@ func TestApplyKeepsSharedAssetsWhenUninstallingHookFails(t *testing.T) {
 
 	originalWriter := atomicWriteFile
 	t.Cleanup(func() { atomicWriteFile = originalWriter })
-	atomicWriteFile = func(path string, data []byte, mode fs.FileMode) error {
-		if path == hookPath {
+	atomicWriteFile = func(target rootedTarget, data []byte, mode fs.FileMode) error {
+		if target.path == hookPath {
 			return errors.New("injected hook uninstall failure")
 		}
-		return originalWriter(path, data, mode)
+		return originalWriter(target, data, mode)
 	}
 
 	err := Apply(Result{Changes: []Change{
@@ -173,11 +173,11 @@ func TestApplyInjectedWriteFailureLeavesOriginalIntact(t *testing.T) {
 	}
 	originalWriter := atomicWriteFile
 	t.Cleanup(func() { atomicWriteFile = originalWriter })
-	atomicWriteFile = func(path string, data []byte, mode fs.FileMode) error {
-		if path == target {
+	atomicWriteFile = func(writeTarget rootedTarget, data []byte, mode fs.FileMode) error {
+		if writeTarget.path == target {
 			return errors.New("injected write failure")
 		}
-		return originalWriter(path, data, mode)
+		return originalWriter(writeTarget, data, mode)
 	}
 
 	err := Apply(Result{Changes: []Change{{
@@ -194,13 +194,13 @@ func TestApplyCreatePreservesConcurrentPathAppearance(t *testing.T) {
 	target := filepath.Join(home, "config")
 	originalWriter := atomicWriteFile
 	t.Cleanup(func() { atomicWriteFile = originalWriter })
-	atomicWriteFile = func(path string, data []byte, mode fs.FileMode) error {
-		if path == target {
+	atomicWriteFile = func(writeTarget rootedTarget, data []byte, mode fs.FileMode) error {
+		if writeTarget.path == target {
 			if err := os.WriteFile(target, []byte("concurrent"), 0o640); err != nil {
 				return err
 			}
 		}
-		return originalWriter(path, data, mode)
+		return originalWriter(writeTarget, data, mode)
 	}
 	err := Apply(Result{Changes: []Change{{Path: target, Action: ActionCreate, Mode: 0o600, After: []byte("planned")}}})
 	if err == nil {
@@ -217,13 +217,13 @@ func TestApplyUpdatePreservesConcurrentReplacementAndOriginalBackup(t *testing.T
 	}
 	originalWriter := atomicWriteFile
 	t.Cleanup(func() { atomicWriteFile = originalWriter })
-	atomicWriteFile = func(path string, data []byte, mode fs.FileMode) error {
-		if path == target {
+	atomicWriteFile = func(writeTarget rootedTarget, data []byte, mode fs.FileMode) error {
+		if writeTarget.path == target {
 			if err := os.WriteFile(target, []byte("concurrent"), 0o644); err != nil {
 				return err
 			}
 		}
-		return originalWriter(path, data, mode)
+		return originalWriter(writeTarget, data, mode)
 	}
 	result := Result{Changes: []Change{{
 		Path: target, Action: ActionUpdate, Mode: 0o600, Before: []byte("original"), After: []byte("planned"),
@@ -335,6 +335,105 @@ func TestApplyRejectsSymlinkedParentIntroducedAfterPlanning(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(escape, "hooks.json")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("Apply wrote through the symlinked parent: %v", err)
+	}
+}
+
+func TestApplyParentSwapAtMutationBoundaryCannotEscapeHome(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		action      Action
+		stage       mutationStage
+		phase       ChangePhase
+		failPublish bool
+	}{
+		{name: "prerequisite create", action: ActionCreate, stage: mutationCreate, phase: PhasePrerequisite},
+		{name: "update backup", action: ActionUpdate, stage: mutationBackup},
+		{name: "update quarantine", action: ActionUpdate, stage: mutationQuarantine},
+		{name: "update publication", action: ActionUpdate, stage: mutationPublish},
+		{name: "update rollback", action: ActionUpdate, stage: mutationRestore, failPublish: true},
+		{name: "cleanup delete quarantine", action: ActionDelete, stage: mutationQuarantine, phase: PhaseCleanup},
+		{name: "cleanup delete discard", action: ActionDelete, stage: mutationDiscard, phase: PhaseCleanup},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			parent := filepath.Join(home, "harness")
+			if err := os.Mkdir(parent, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(parent, "managed")
+			before := []byte(nil)
+			if test.action != ActionCreate {
+				before = []byte("original")
+				if err := os.WriteFile(target, before, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			change := Change{Path: target, Action: test.action, Phase: test.phase, Mode: 0o600, Before: before, After: []byte("updated")}
+			if test.action == ActionDelete {
+				change.After = nil
+				change.DeleteProof = ownedAssetDeleteProof(before)
+			}
+			result, err := Plan(context.Background(), Options{Home: home, Harnesses: []string{"codex"}}, Bundle{Drivers: []Driver{
+				&fakeDriver{name: "codex", detection: Detection{Present: true, Managed: true}, changes: []Change{change}},
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			escape := t.TempDir()
+			outsideTarget := filepath.Join(escape, "managed")
+			if test.action != ActionCreate {
+				if err := os.WriteFile(outsideTarget, []byte("outside"), 0o640); err != nil {
+					t.Fatal(err)
+				}
+			}
+			movedParent := filepath.Join(home, "harness-original")
+			swapped := false
+			originalMutationHook := beforeMutationHook
+			t.Cleanup(func() { beforeMutationHook = originalMutationHook })
+			beforeMutationHook = func(_ Change, stage mutationStage) {
+				if swapped || stage != test.stage {
+					return
+				}
+				swapped = true
+				if err := os.Rename(parent, movedParent); err != nil {
+					t.Errorf("move parent: %v", err)
+					return
+				}
+				if err := os.Symlink(escape, parent); err != nil {
+					t.Errorf("replace parent with symlink: %v", err)
+				}
+			}
+			if test.failPublish {
+				originalWriter := atomicWriteFile
+				t.Cleanup(func() { atomicWriteFile = originalWriter })
+				atomicWriteFile = func(writeTarget rootedTarget, data []byte, mode fs.FileMode) error {
+					if writeTarget.name == filepath.Base(target) {
+						return errors.New("injected publication failure")
+					}
+					return originalWriter(writeTarget, data, mode)
+				}
+			}
+
+			_ = Apply(result)
+			if !swapped {
+				t.Fatalf("mutation stage %q was not reached", test.stage)
+			}
+			if test.action == ActionCreate {
+				if _, err := os.Lstat(outsideTarget); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("create escaped home: %v", err)
+				}
+			} else {
+				assertFile(t, outsideTarget, "outside", 0o640)
+			}
+			entries, err := os.ReadDir(escape)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) > 1 {
+				t.Fatalf("mutation created files outside home: %v", entries)
+			}
+		})
 	}
 }
 

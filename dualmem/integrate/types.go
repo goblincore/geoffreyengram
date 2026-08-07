@@ -109,4 +109,5 @@ type Result struct {
 	Detections []Detection
 	Changes    []Change
 	home       string
+	pinnedHome string
 }

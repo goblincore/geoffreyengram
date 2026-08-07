@@ -2,6 +2,8 @@ package integrate
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -11,6 +13,19 @@ import (
 )
 
 var atomicWriteFile = writeFileNoClobber
+
+type mutationStage string
+
+const (
+	mutationBackup     mutationStage = "backup"
+	mutationCreate     mutationStage = "create"
+	mutationQuarantine mutationStage = "quarantine"
+	mutationPublish    mutationStage = "publish"
+	mutationDiscard    mutationStage = "discard"
+	mutationRestore    mutationStage = "restore"
+)
+
+var beforeMutationHook = func(Change, mutationStage) {}
 
 var beforeQuarantineHook = func(Change) {}
 
@@ -25,10 +40,29 @@ func Apply(result Result) error {
 	if err := validateAndSortChanges(result.Changes); err != nil {
 		return err
 	}
-	if result.home != "" {
-		if err := validateChangesUnderHome(result.home, result.Changes); err != nil {
-			return err
+	home := result.home
+	pinnedHome := result.pinnedHome
+	if home == "" {
+		var err error
+		home, err = commonChangeHome(result.Changes)
+		if err != nil {
+			return fmt.Errorf("derive integration home: %w", err)
 		}
+		if home != "" {
+			home, pinnedHome, err = integrationHome(home)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if home == "" {
+		return nil
+	}
+	if err := validateExistingDirectoryPathNoSymlinks(pinnedHome); err != nil {
+		return err
+	}
+	if err := validateChangesUnderHome(home, result.Changes); err != nil {
+		return err
 	}
 	snapshots := make([]targetSnapshot, len(result.Changes))
 	for i := range result.Changes {
@@ -38,12 +72,17 @@ func Apply(result Result) error {
 		}
 		snapshots[i] = snapshot
 	}
+	filesystem, err := openAnchoredFilesystem(home, pinnedHome, true)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = filesystem.close() }()
 	for i := range result.Changes {
 		change := &result.Changes[i]
 		if change.Action != ActionUpdate {
 			continue
 		}
-		backupPath, err := createBackup(change.Path, change.Before)
+		backupPath, err := createBackup(filesystem, *change)
 		if err != nil {
 			return err
 		}
@@ -55,27 +94,37 @@ func Apply(result Result) error {
 		case ActionUnchanged:
 			continue
 		case ActionCreate:
-			if err := atomicWriteFile(change.Path, change.After, change.Mode); err != nil {
+			beforeMutationHook(*change, mutationCreate)
+			target, err := filesystem.target(change.Path, true)
+			if err != nil {
+				return err
+			}
+			err = atomicWriteFile(target, change.After, change.Mode)
+			target.close()
+			if err != nil {
 				return fmt.Errorf("create integration file %q: %w", change.Path, err)
 			}
 		case ActionUpdate:
-			quarantine, err := quarantineExpectedTarget(*change, snapshots[i])
+			quarantine, err := quarantineExpectedTarget(filesystem, *change, snapshots[i])
 			if err != nil {
 				return err
 			}
 			afterQuarantineHook(*change)
-			if err := atomicWriteFile(change.Path, change.After, change.Mode); err != nil {
-				return quarantine.abort(change.Path, fmt.Errorf("publish updated integration file %q: %w", change.Path, err))
+			beforeMutationHook(*change, mutationPublish)
+			if err := atomicWriteFile(quarantine.target, change.After, change.Mode); err != nil {
+				return quarantine.abort(*change, fmt.Errorf("publish updated integration file %q: %w", change.Path, err))
 			}
+			beforeMutationHook(*change, mutationDiscard)
 			if err := quarantine.discard(); err != nil {
 				return fmt.Errorf("discard replaced integration file %q: %w", quarantine.path, err)
 			}
 		case ActionDelete:
-			quarantine, err := quarantineExpectedTarget(*change, snapshots[i])
+			quarantine, err := quarantineExpectedTarget(filesystem, *change, snapshots[i])
 			if err != nil {
 				return err
 			}
 			afterQuarantineHook(*change)
+			beforeMutationHook(*change, mutationDiscard)
 			if err := quarantine.discard(); err != nil {
 				return fmt.Errorf("delete quarantined integration file %q: %w", quarantine.path, err)
 			}
@@ -175,65 +224,79 @@ func requireExactCurrent(path string, before []byte) error {
 }
 
 type quarantinedTarget struct {
-	directory string
-	path      string
+	target        rootedTarget
+	directoryName string
+	directory     *os.Root
+	path          string
 }
 
-func quarantineExpectedTarget(change Change, snapshot targetSnapshot) (*quarantinedTarget, error) {
+func quarantineExpectedTarget(filesystem *anchoredFilesystem, change Change, snapshot targetSnapshot) (*quarantinedTarget, error) {
 	if !snapshot.exists || snapshot.info == nil {
 		return nil, fmt.Errorf("integration target %q had no preflight identity", change.Path)
 	}
-	directory, err := os.MkdirTemp(filepath.Dir(change.Path), ".dualmem-quarantine-*")
+	beforeMutationHook(change, mutationQuarantine)
+	target, err := filesystem.target(change.Path, false)
 	if err != nil {
+		return nil, err
+	}
+	directoryName, directory, err := createPrivateDirectory(target.parent, ".dualmem-quarantine-")
+	if err != nil {
+		target.close()
 		return nil, fmt.Errorf("create quarantine for %q: %w", change.Path, err)
 	}
-	if err := os.Chmod(directory, 0o700); err != nil {
-		_ = os.Remove(directory)
-		return nil, fmt.Errorf("protect quarantine for %q: %w", change.Path, err)
+	quarantine := &quarantinedTarget{
+		target:        target,
+		directoryName: directoryName,
+		directory:     directory,
+		path:          filepath.Join(filepath.Dir(change.Path), directoryName, "target"),
 	}
-	quarantine := &quarantinedTarget{directory: directory, path: filepath.Join(directory, "target")}
 	beforeQuarantineHook(change)
-	if err := os.Rename(change.Path, quarantine.path); err != nil {
-		_ = os.Remove(directory)
+	if err := rootedRename(target.parent, target.name, filepath.Join(directoryName, "target")); err != nil {
+		quarantine.cleanupDirectory()
 		return nil, fmt.Errorf("quarantine integration target %q: %w", change.Path, err)
 	}
-	info, err := os.Lstat(quarantine.path)
+	info, err := directory.Lstat("target")
 	if err != nil {
-		return nil, quarantine.abort(change.Path, fmt.Errorf("inspect quarantined integration target %q: %w", change.Path, err))
+		return nil, quarantine.abort(change, fmt.Errorf("inspect quarantined integration target %q: %w", change.Path, err))
 	}
 	if !info.Mode().IsRegular() || !os.SameFile(snapshot.info, info) {
-		return nil, quarantine.abort(change.Path, fmt.Errorf("integration target %q was replaced after preflight", change.Path))
+		return nil, quarantine.abort(change, fmt.Errorf("integration target %q was replaced after preflight", change.Path))
 	}
-	current, err := os.ReadFile(quarantine.path)
+	current, err := directory.ReadFile("target")
 	if err != nil {
-		return nil, quarantine.abort(change.Path, fmt.Errorf("read quarantined integration target %q: %w", change.Path, err))
+		return nil, quarantine.abort(change, fmt.Errorf("read quarantined integration target %q: %w", change.Path, err))
 	}
 	if !bytes.Equal(current, change.Before) {
-		return nil, quarantine.abort(change.Path, fmt.Errorf("integration target %q changed after preflight", change.Path))
+		return nil, quarantine.abort(change, fmt.Errorf("integration target %q changed after preflight", change.Path))
 	}
 	return quarantine, nil
 }
 
-func (quarantine *quarantinedTarget) abort(target string, cause error) error {
-	restored, restoreErr := quarantine.restoreNoClobber(target)
+func (quarantine *quarantinedTarget) abort(change Change, cause error) error {
+	beforeMutationHook(change, mutationRestore)
+	restored, restoreErr := quarantine.restoreNoClobber()
 	if restored {
+		if restoreErr != nil {
+			quarantine.release()
+		}
 		return cause
 	}
+	quarantine.release()
 	if restoreErr != nil {
 		return fmt.Errorf("%w; displaced target preserved at %q after restore error: %v", cause, quarantine.path, restoreErr)
 	}
 	return fmt.Errorf("%w; displaced target preserved at %q", cause, quarantine.path)
 }
 
-func (quarantine *quarantinedTarget) restoreNoClobber(target string) (bool, error) {
-	info, err := os.Lstat(quarantine.path)
+func (quarantine *quarantinedTarget) restoreNoClobber() (bool, error) {
+	info, err := quarantine.directory.Lstat("target")
 	if err != nil {
 		return false, err
 	}
 	if !info.Mode().IsRegular() {
 		return false, nil
 	}
-	if err := os.Link(quarantine.path, target); err != nil {
+	if err := rootedLink(quarantine.target.parent, filepath.Join(quarantine.directoryName, "target"), quarantine.target.name); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return false, nil
 		}
@@ -246,54 +309,69 @@ func (quarantine *quarantinedTarget) restoreNoClobber(target string) (bool, erro
 }
 
 func (quarantine *quarantinedTarget) discard() error {
-	if err := os.Remove(quarantine.path); err != nil {
+	if err := quarantine.directory.Remove("target"); err != nil {
+		quarantine.release()
 		return err
 	}
 	// Once the quarantined inode is removed, the requested update/delete is
 	// complete. An empty private-directory cleanup failure must not turn that
 	// successful material operation into an abort with no recoverable inode.
-	_ = os.Remove(quarantine.directory)
+	quarantine.cleanupDirectory()
 	return nil
 }
 
-func createBackup(path string, content []byte) (string, error) {
+func (quarantine *quarantinedTarget) cleanupDirectory() {
+	_ = quarantine.directory.Close()
+	_ = quarantine.target.parent.Remove(quarantine.directoryName)
+	quarantine.target.close()
+}
+
+func (quarantine *quarantinedTarget) release() {
+	_ = quarantine.directory.Close()
+	quarantine.target.close()
+}
+
+func createBackup(filesystem *anchoredFilesystem, change Change) (string, error) {
+	beforeMutationHook(change, mutationBackup)
+	target, err := filesystem.target(change.Path, false)
+	if err != nil {
+		return "", err
+	}
+	defer target.close()
 	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
 	for sequence := 0; sequence < 100; sequence++ {
-		backupPath := fmt.Sprintf("%s.dualmem-backup-%s", path, stamp)
+		backupPath := fmt.Sprintf("%s.dualmem-backup-%s", change.Path, stamp)
 		if sequence > 0 {
 			backupPath = fmt.Sprintf("%s-%d", backupPath, sequence)
 		}
-		if _, err := os.Lstat(backupPath); err == nil {
+		backupName := filepath.Base(backupPath)
+		if _, err := target.parent.Lstat(backupName); err == nil {
 			continue
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return "", fmt.Errorf("inspect backup target %q: %w", backupPath, err)
 		}
-		if err := atomicWriteFile(backupPath, content, 0o600); errors.Is(err, fs.ErrExist) {
+		backupTarget := rootedTarget{parent: target.parent, name: backupName, path: backupPath}
+		if err := atomicWriteFile(backupTarget, change.Before, 0o600); errors.Is(err, fs.ErrExist) {
 			continue
 		} else if err != nil {
-			return "", fmt.Errorf("back up integration file %q: %w", path, err)
+			return "", fmt.Errorf("back up integration file %q: %w", change.Path, err)
 		}
 		return backupPath, nil
 	}
-	return "", fmt.Errorf("could not allocate backup path for %q", path)
+	return "", fmt.Errorf("could not allocate backup path for %q", change.Path)
 }
 
-func writeFileNoClobber(path string, content []byte, mode fs.FileMode) error {
-	directory := filepath.Dir(path)
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return err
-	}
-	temporary, err := os.CreateTemp(directory, ".dualmem-write-*")
+func writeFileNoClobber(target rootedTarget, content []byte, mode fs.FileMode) error {
+	temporaryName, temporary, err := createPrivateFile(target.parent, ".dualmem-write-")
 	if err != nil {
 		return err
 	}
-	temporaryPath := temporary.Name()
 	closed := false
 	defer func() {
 		if !closed {
 			_ = temporary.Close()
 		}
-		_ = os.Remove(temporaryPath)
+		_ = target.parent.Remove(temporaryName)
 	}()
 	if _, err := temporary.Write(content); err != nil {
 		return err
@@ -309,8 +387,52 @@ func writeFileNoClobber(path string, content []byte, mode fs.FileMode) error {
 		return err
 	}
 	closed = true
-	if err := os.Link(temporaryPath, path); err != nil {
+	if err := rootedLink(target.parent, temporaryName, target.name); err != nil {
 		return err
 	}
 	return nil
+}
+
+func createPrivateDirectory(parent *os.Root, prefix string) (string, *os.Root, error) {
+	for attempt := 0; attempt < 100; attempt++ {
+		name, err := privateName(prefix)
+		if err != nil {
+			return "", nil, err
+		}
+		if err := parent.Mkdir(name, 0o700); errors.Is(err, fs.ErrExist) {
+			continue
+		} else if err != nil {
+			return "", nil, err
+		}
+		directory, err := openStableDirectory(parent, name, false)
+		if err != nil {
+			_ = parent.Remove(name)
+			return "", nil, err
+		}
+		return name, directory, nil
+	}
+	return "", nil, fmt.Errorf("could not allocate private integration directory")
+}
+
+func createPrivateFile(parent *os.Root, prefix string) (string, *os.File, error) {
+	for attempt := 0; attempt < 100; attempt++ {
+		name, err := privateName(prefix)
+		if err != nil {
+			return "", nil, err
+		}
+		file, err := parent.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		return name, file, err
+	}
+	return "", nil, fmt.Errorf("could not allocate private integration file")
+}
+
+func privateName(prefix string) (string, error) {
+	random := make([]byte, 12)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	return prefix + hex.EncodeToString(random), nil
 }

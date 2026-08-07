@@ -12,7 +12,7 @@ import (
 )
 
 func Plan(ctx context.Context, opts Options, bundle Bundle) (Result, error) {
-	home, err := integrationHome(opts.Home)
+	home, pinnedHome, err := integrationHome(opts.Home)
 	if err != nil {
 		return Result{}, err
 	}
@@ -29,7 +29,7 @@ func Plan(ctx context.Context, opts Options, bundle Bundle) (Result, error) {
 	present := make(map[string]bool, len(drivers))
 	managed := make(map[string]bool, len(drivers))
 	for _, driver := range drivers {
-		detection, detectErr := driver.Detect(ctx, opts.Home)
+		detection, detectErr := driver.Detect(ctx, home)
 		if detectErr != nil {
 			return Result{}, fmt.Errorf("detect harness %q: %w", driver.Name(), detectErr)
 		}
@@ -52,7 +52,7 @@ func Plan(ctx context.Context, opts Options, bundle Bundle) (Result, error) {
 	var changes []Change
 	if bundle.Common != nil {
 		commonChanges, planErr := bundle.Common.PlanCommon(ctx, CommonRequest{
-			Home:               opts.Home,
+			Home:               home,
 			Uninstall:          opts.Uninstall,
 			RemainingHarnesses: remaining,
 		})
@@ -66,7 +66,7 @@ func Plan(ctx context.Context, opts Options, bundle Bundle) (Result, error) {
 		if !selected[driver.Name()] {
 			continue
 		}
-		driverChanges, planErr := driver.Plan(ctx, DriverRequest{Home: opts.Home, Uninstall: opts.Uninstall})
+		driverChanges, planErr := driver.Plan(ctx, DriverRequest{Home: home, Uninstall: opts.Uninstall})
 		if planErr != nil {
 			return Result{}, fmt.Errorf("plan harness %q: %w", driver.Name(), planErr)
 		}
@@ -78,15 +78,28 @@ func Plan(ctx context.Context, opts Options, bundle Bundle) (Result, error) {
 	if err := validateChangesUnderHome(home, changes); err != nil {
 		return Result{}, err
 	}
-	return Result{Detections: detections, Changes: changes, home: home}, nil
+	return Result{Detections: detections, Changes: changes, home: home, pinnedHome: pinnedHome}, nil
 }
 
-func integrationHome(home string) (string, error) {
+func integrationHome(home string) (string, string, error) {
 	root, err := filepath.Abs(home)
 	if err != nil {
-		return "", fmt.Errorf("resolve integration home %q: %w", home, err)
+		return "", "", fmt.Errorf("resolve integration home %q: %w", home, err)
 	}
-	return filepath.Clean(root), nil
+	root = filepath.Clean(root)
+	if info, err := os.Lstat(root); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return "", "", fmt.Errorf("integration home %q is a symlink", root)
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", "", fmt.Errorf("inspect integration home %q: %w", root, err)
+	}
+	pinnedRoot, err := canonicalizeExistingAncestors(root)
+	if err != nil {
+		return "", "", err
+	}
+	if err := validateExistingDirectoryPathNoSymlinks(pinnedRoot); err != nil {
+		return "", "", err
+	}
+	return root, pinnedRoot, nil
 }
 
 func validateChangesUnderHome(root string, changes []Change) error {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -116,6 +117,45 @@ func TestPlanRejectsSymlinkedHarnessDirectoryBeforePublishingChanges(t *testing.
 	}
 	if _, err := os.Lstat(filepath.Join(escape, "hooks.json")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("planning touched the symlink destination: %v", err)
+	}
+}
+
+func TestPlanRejectsSymlinkedHome(t *testing.T) {
+	link := filepath.Join(t.TempDir(), "home")
+	if err := os.Symlink(t.TempDir(), link); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Plan(context.Background(), Options{Home: link, Harnesses: []string{"codex"}}, BuiltinBundle())
+	if err == nil {
+		t.Fatal("Plan accepted a symlink as the selected home")
+	}
+	if len(result.Changes) != 0 {
+		t.Fatalf("unsafe home plan exposed %d changes", len(result.Changes))
+	}
+}
+
+func TestPlanPinsCanonicalHomeWhenAncestorIsSymlinked(t *testing.T) {
+	realAncestor := t.TempDir()
+	link := filepath.Join(t.TempDir(), "ancestor")
+	if err := os.Symlink(realAncestor, link); err != nil {
+		t.Fatal(err)
+	}
+	resolvedAncestor, err := filepath.EvalSymlinks(realAncestor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHome := filepath.Join(resolvedAncestor, "home")
+	result, err := Plan(context.Background(), Options{Home: filepath.Join(link, "home"), Harnesses: []string{"codex"}}, BuiltinBundle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.pinnedHome != wantHome {
+		t.Fatalf("pinned home = %q, want %q", result.pinnedHome, wantHome)
+	}
+	for _, change := range result.Changes {
+		if relative, err := filepath.Rel(result.home, change.Path); err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			t.Fatalf("change %q is not beneath selected home %q", change.Path, result.home)
+		}
 	}
 }
 
