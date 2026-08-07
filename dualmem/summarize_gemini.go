@@ -108,7 +108,7 @@ func (s *GeminiSummarizer) GenerateText(ctx context.Context, prompt string, maxT
 }
 
 func (s *GeminiSummarizer) generate(ctx context.Context, prompt string, maxTokens int) (string, error) {
-	url := "https://generativelanguage.googleapis.com/v1beta/models/" + s.model + ":generateContent?key=" + s.apiKey
+	url := "https://generativelanguage.googleapis.com/v1beta/models/" + s.model + ":generateContent"
 
 	reqBody := map[string]any{
 		"contents": []map[string]any{
@@ -130,16 +130,18 @@ func (s *GeminiSummarizer) generate(ctx context.Context, prompt string, maxToken
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", s.apiKey)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("dualmem: gemini summarize: %w", err)
+		return "", newProviderUnavailableError("gemini", "summarize", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("dualmem: gemini summarize %d: %s", resp.StatusCode, string(body[:min(len(body), 200)]))
+		bodyText := redactCredential(string(body), s.apiKey)
+		return "", fmt.Errorf("dualmem: gemini summarize %d: %s", resp.StatusCode, bodyText[:min(len(bodyText), 200)])
 	}
 
 	var geminiResp struct {

@@ -16,9 +16,9 @@ import (
 // where the user is waiting anyway. For NPC/real-time usage, use a heuristic
 // classifier or the async LLMClassifier from the engram package.
 type GeminiClassifier struct {
-	apiKey        string
-	client        *http.Client
-	sectors       *SectorConfig
+	apiKey  string
+	client  *http.Client
+	sectors *SectorConfig
 }
 
 // NewGeminiClassifier creates a synchronous LLM-based sector classifier.
@@ -45,7 +45,7 @@ func (c *GeminiClassifier) Classify(content string) string {
 }
 
 func (c *GeminiClassifier) llmClassify(ctx context.Context, content string) (string, error) {
-	url := "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=" + c.apiKey
+	url := "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent"
 
 	// Build sector list dynamically from config
 	var sectorLines []string
@@ -77,16 +77,18 @@ func (c *GeminiClassifier) llmClassify(ctx context.Context, content string) (str
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", c.apiKey)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return "", err
+		return "", newProviderUnavailableError("gemini", "classify", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("gemini classify %d: %s", resp.StatusCode, string(body[:min(len(body), 200)]))
+		bodyText := redactCredential(string(body), c.apiKey)
+		return "", fmt.Errorf("gemini classify %d: %s", resp.StatusCode, bodyText[:min(len(bodyText), 200)])
 	}
 
 	var geminiResp struct {

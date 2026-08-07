@@ -52,7 +52,7 @@ func (e *GeminiEmbedder) Embed(ctx context.Context, text, taskType string) ([]fl
 		return nil, fmt.Errorf("dualmem: no Gemini API key")
 	}
 
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:embedContent?key=%s", e.model, e.apiKey)
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:embedContent", e.model)
 
 	type part struct {
 		Text string `json:"text"`
@@ -80,16 +80,18 @@ func (e *GeminiEmbedder) Embed(ctx context.Context, text, taskType string) ([]fl
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", e.apiKey)
 
 	resp, err := e.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("dualmem: gemini embed: %w", err)
+		return nil, newProviderUnavailableError("gemini", "embed", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("dualmem: gemini embed %d: %s", resp.StatusCode, string(body[:min(len(body), 200)]))
+		bodyText := redactCredential(string(body), e.apiKey)
+		return nil, fmt.Errorf("dualmem: gemini embed %d: %s", resp.StatusCode, bodyText[:min(len(bodyText), 200)])
 	}
 
 	var geminiResp struct {
