@@ -62,6 +62,15 @@ func TestContextCapabilities(t *testing.T) {
 	}
 }
 
+func TestCheckpointCapabilities(t *testing.T) {
+	if got := checkpointCapabilities(true); got != engineLocal {
+		t.Errorf("checkpointCapabilities(list=true) = %#v, want local-only %#v", got, engineLocal)
+	}
+	if got := checkpointCapabilities(false); got != engineEmbedWrite {
+		t.Errorf("checkpointCapabilities(list=false) = %#v, want embed-write %#v", got, engineEmbedWrite)
+	}
+}
+
 // TestParseFlagsInterspersed is the regression guard for the flag-ordering
 // footgun: Go's stdlib flag.Parse stops at the first positional token, so
 // `dualmem recall "query" --ns X` used to silently drop --ns and fall back to

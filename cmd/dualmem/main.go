@@ -227,6 +227,13 @@ func contextCapabilities(query string, legacy, index bool) engineCapabilities {
 	return engineLocal
 }
 
+func checkpointCapabilities(list bool) engineCapabilities {
+	if list {
+		return engineLocal
+	}
+	return engineEmbedWrite
+}
+
 func newEngine(cfg CLIConfig, capabilities engineCapabilities) (*dualmem.Engine, error) {
 	apiKey := os.Getenv(cfg.Providers.EmbeddingAPIKeyEnv)
 	if apiKey == "" {
@@ -1070,7 +1077,7 @@ func cmdCheckpoint(cfg CLIConfig) {
 
 	namespace := resolveNamespace(*ns, cfg)
 
-	engine, err := newEngine(cfg, engineEmbedWrite)
+	engine, err := newEngine(cfg, checkpointCapabilities(*list))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
