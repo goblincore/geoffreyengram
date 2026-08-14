@@ -151,6 +151,7 @@ type createTaskRequest struct {
 	Title        string   `json:"title"`
 	Project      string   `json:"project"`
 	Model        string   `json:"model"`
+	Harness      string   `json:"harness"`
 	APIKeyEnv    string   `json:"api_key_env"`
 	BaseURL      string   `json:"base_url"`
 	Priority     int      `json:"priority"`
@@ -193,6 +194,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		Status:       "pending",
 		Project:      req.Project,
 		Model:        req.Model,
+		Harness:      req.Harness,
 		APIKeyEnv:    req.APIKeyEnv,
 		BaseURL:      req.BaseURL,
 		Branch:       req.Branch,
@@ -541,6 +543,7 @@ type configResponse struct {
 	ListenAddr    string   `json:"listen_addr"`
 	Projects      []string `json:"projects"`
 	Models        []string `json:"models"`
+	ModelsPi      []string `json:"models_pi"`
 }
 
 // handleGetConfig returns dispatch configuration info.
@@ -566,6 +569,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		ListenAddr:    s.eng.Config.ListenAddr,
 		Projects:      projects,
 		Models:        modelIDs(),
+		ModelsPi:      piModelCatalog,
 	}
 
 	writeJSON(w, http.StatusOK, resp)

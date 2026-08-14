@@ -216,8 +216,18 @@ function populateDropdowns() {
     opt.textContent = p.split('/').pop();
     projSelect.appendChild(opt);
   });
+  document.getElementById('inp-harness').onchange = populateModelOptions;
+  populateModelOptions();
+}
+
+// The claude harness uses bare model IDs (endpoint routing applied server-side);
+// pi and opencode use provider/model refs resolved by their own configs.
+function populateModelOptions() {
+  const harness = document.getElementById('inp-harness').value;
   const modelSelect = document.getElementById('inp-model');
-  (config.models || []).forEach(m => {
+  modelSelect.innerHTML = '';
+  const models = harness === 'claude' ? (config.models || []) : (config.models_pi || []);
+  models.forEach(m => {
     const opt = document.createElement('option');
     opt.value = m;
     opt.textContent = m;
@@ -267,6 +277,7 @@ async function dispatchTask() {
       title,
       project: document.getElementById('inp-project').value,
       model: document.getElementById('inp-model').value,
+      harness: document.getElementById('inp-harness').value,
       priority: parseInt(document.getElementById('inp-priority').value),
       max_runtime: document.getElementById('inp-runtime').value,
       body

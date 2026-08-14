@@ -105,3 +105,17 @@ func TestModelIDsIncludeNewModels(t *testing.T) {
 		}
 	}
 }
+
+func TestPiModelCatalogIncludesNewModels(t *testing.T) {
+	want := map[string]bool{"zai/glm-5.3": false, "kimi/k3": false}
+	for _, ref := range piModelCatalog {
+		if _, ok := want[ref]; ok {
+			want[ref] = true
+		}
+	}
+	for ref, found := range want {
+		if !found {
+			t.Errorf("piModelCatalog missing %q", ref)
+		}
+	}
+}

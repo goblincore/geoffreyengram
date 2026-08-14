@@ -21,6 +21,21 @@ var modelCatalog = []modelOption{
 	{ID: "claude-opus-4-6"},
 }
 
+// piModelCatalog lists pi-harness model refs ("provider/model[:effort]") for
+// the UI dropdown, matching providers defined in ~/.pi/agent/models.json.
+// Endpoints and auth for these live in pi's own config, not here — the
+// claude-harness routing in modelCatalog does not apply. Also used for the
+// opencode harness, which takes the same provider/model form.
+var piModelCatalog = []string{
+	"zai/glm-5.3:xhigh",
+	"zai/glm-5.3",
+	"zai/glm-5.2:xhigh",
+	"zai/glm-5.1",
+	"kimi/k3",
+	"kimi/k3:high",
+	"kimi/k3-256k",
+}
+
 // lookupModel returns the catalog entry for id, if any.
 func lookupModel(id string) (modelOption, bool) {
 	for _, m := range modelCatalog {

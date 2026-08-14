@@ -114,6 +114,15 @@ For GLM 5.3 with 1M context, set `model: glm-5.3[1m]` manually in the plan
 frontmatter along with explicit `base_url`/`api_key_env` (the `[1m]` variant
 isn't in the catalog).
 
+### Pi / OpenCode harness models
+
+The New Task form has a **Harness** selector (default: `pi`). For `pi` and
+`opencode` the model dropdown switches to `provider/model[:effort]` refs
+(`piModelCatalog` in `models.go`): `zai/glm-5.3:xhigh`, `zai/glm-5.3`,
+`zai/glm-5.2:xhigh`, `zai/glm-5.1`, `kimi/k3`, `kimi/k3:high`, `kimi/k3-256k`.
+Endpoints and API keys for these come from pi's own `~/.pi/agent/models.json`
+(`zai` and `kimi` providers), not from the dispatcher's routing catalog.
+
 ## Harness comparison (GLM 5.1)
 
 | Harness | Time | Streaming | Edit tool | Notes |
