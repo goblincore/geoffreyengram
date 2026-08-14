@@ -38,7 +38,7 @@ Drop a `.md` file into `~/.claude/dispatch/plans/` with this format:
 title: "My task title"
 status: pending
 project: /path/to/your/project
-model: glm-5.1
+model: glm-5.3           # see "Models" below; catalog models get endpoint/key routing automatically
 harness: claude          # "claude" (default), "pi", or "opencode"
 priority: 2
 max_runtime: 25m
@@ -89,9 +89,30 @@ API keys go in `~/.claude/dispatch/.env`:
 
 ```bash
 export ZAI_API_KEY="your-key"
+export KIMI_API_KEY="your-key"
 export ANTHROPIC_API_KEY="your-key"
 export GEMINI_API_KEY="your-key"
 ```
+
+## Models
+
+The executor-model dropdown is backed by a catalog in `cmd/dispatch-ui/models.go`
+that also carries per-model provider routing. When a plan doesn't set
+`base_url` / `api_key_env` in its frontmatter, the dispatcher fills them in
+from the catalog at dispatch time (model-specific routing beats
+`DEFAULT_BASE_URL` / `DEFAULT_AUTH_TOKEN_ENV`):
+
+| Model | Endpoint | API key env |
+|-------|----------|-------------|
+| `glm-5.3` | `https://api.z.ai/api/anthropic` | `ZAI_API_KEY` |
+| `glm-5.1` | `https://api.z.ai/api/anthropic` | `ZAI_API_KEY` |
+| `k3` (Kimi K3) | `https://api.kimi.com/coding` | `KIMI_API_KEY` |
+| `sonnet-4.6` | config defaults / subscription auth | — |
+| `claude-opus-4-6` | config defaults / subscription auth | — |
+
+For GLM 5.3 with 1M context, set `model: glm-5.3[1m]` manually in the plan
+frontmatter along with explicit `base_url`/`api_key_env` (the `[1m]` variant
+isn't in the catalog).
 
 ## Harness comparison (GLM 5.1)
 

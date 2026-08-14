@@ -867,28 +867,15 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 	e.logs[plan.Name] = lb
 	e.mu.Unlock()
 
-	// 3. Resolve API key: plan.APIKeyEnv → e.Config.EnvVars → os.Getenv
-	apiKeyEnv := plan.APIKeyEnv
-	if apiKeyEnv == "" {
-		apiKeyEnv = e.Config.DefaultAuthTokenEnv
-	}
-	if apiKeyEnv == "" {
-		apiKeyEnv = "ANTHROPIC_API_KEY"
-	}
+	// 3. Resolve model routing (plan frontmatter → model catalog → config
+	// defaults), then the API key from e.Config.EnvVars → os.Getenv
+	model, baseURL, apiKeyEnv := resolveRouting(plan, e.Config)
 	apiKey := e.Config.EnvVars[apiKeyEnv]
 	if apiKey == "" {
 		apiKey = os.Getenv(apiKeyEnv)
 	}
 
 	// 4. Build environment
-	baseURL := plan.BaseURL
-	if baseURL == "" {
-		baseURL = e.Config.DefaultBaseURL
-	}
-	model := plan.Model
-	if model == "" {
-		model = e.Config.DefaultModel
-	}
 
 	// If no API key is resolved, inherit parent env so CLI uses subscription auth.
 	var envPairs []string

@@ -565,7 +565,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		PlanningModel: s.eng.Config.PlanningModel,
 		ListenAddr:    s.eng.Config.ListenAddr,
 		Projects:      projects,
-		Models:        []string{"glm-5.1", "sonnet-4.6", "claude-opus-4-6"},
+		Models:        modelIDs(),
 	}
 
 	writeJSON(w, http.StatusOK, resp)
