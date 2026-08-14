@@ -950,10 +950,23 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 	// Delete stale branch if it exists
 	exec.Command("git", "-C", plan.Project, "branch", "-D", branch).Run()
 
-	// Resolve the base commit for the worktree:
-	// - If depends_on has entries, branch from the first dependency's branch
-	// - Otherwise branch from HEAD (main)
+	// Resolve the base commit for the worktree, most explicit wins:
+	// - base_branch, if set and it actually resolves
+	// - else the first dependency's branch, if depends_on has entries
+	// - else HEAD (main)
 	startPoint := "HEAD"
+	if plan.BaseBranch != "" {
+		// Verify before use. Silently falling back to HEAD produces a worktree
+		// that looks right and is missing whatever the base was meant to carry.
+		verify := exec.Command("git", "-C", plan.Project, "rev-parse", "--verify", "--quiet", plan.BaseBranch+"^{commit}")
+		if err := verify.Run(); err != nil {
+			lb.Append(fmt.Sprintf("[dispatch] WARNING: base_branch %q does not resolve in %s — falling back to HEAD",
+				plan.BaseBranch, plan.Project))
+		} else {
+			startPoint = plan.BaseBranch
+			lb.Append(fmt.Sprintf("[dispatch] branching from base_branch: %s", startPoint))
+		}
+	}
 	var depBranches []string
 	if len(plan.DependsOn) > 0 {
 		for _, dep := range plan.DependsOn {
@@ -969,8 +982,15 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 			depBranches = append(depBranches, depBranch)
 		}
 		if len(depBranches) > 0 {
-			startPoint = depBranches[0]
-			lb.Append(fmt.Sprintf("[dispatch] branching from dependency: %s", startPoint))
+			if startPoint == "HEAD" {
+				startPoint = depBranches[0]
+				lb.Append(fmt.Sprintf("[dispatch] branching from dependency: %s", startPoint))
+			} else {
+				// base_branch already won. Every dependency then has to arrive by
+				// merge instead, including the first one.
+				lb.Append(fmt.Sprintf("[dispatch] base_branch %s overrides dependency base %s",
+					startPoint, depBranches[0]))
+			}
 		}
 	}
 
@@ -981,9 +1001,15 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan *Plan) error {
 		workDir = worktreePath
 		lb.Append(fmt.Sprintf("[dispatch] created worktree at %s (branch: %s from %s)", worktreePath, branch, startPoint))
 
-		// If multiple dependencies, merge the remaining ones into the worktree
-		if len(depBranches) > 1 {
-			for _, depBranch := range depBranches[1:] {
+		// Merge in every dependency that the worktree did not branch from.
+		var toMerge []string
+		for _, depBranch := range depBranches {
+			if depBranch != startPoint {
+				toMerge = append(toMerge, depBranch)
+			}
+		}
+		if len(toMerge) > 0 {
+			for _, depBranch := range toMerge {
 				mergeCmd := exec.Command("git", "-C", worktreePath, "merge", depBranch, "--no-edit",
 					"-m", fmt.Sprintf("dispatch: merge dependency %s", depBranch))
 				if mergeOut, mergeErr := mergeCmd.CombinedOutput(); mergeErr != nil {

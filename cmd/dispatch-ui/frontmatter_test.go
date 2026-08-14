@@ -89,3 +89,65 @@ Body here.
 		t.Error("body should be preserved after field update")
 	}
 }
+
+// base_branch was accepted in plan frontmatter for months while nothing parsed
+// it, so worktrees silently came off HEAD. These two tests pin both halves of
+// that bug: it must survive the parse, and it must survive a write-back.
+func TestParsePlanFileBaseBranch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "based.md")
+	content := `---
+title: "Based plan"
+status: pending
+project: /tmp/myproject
+branch: dispatch/child
+base_branch: feature/the-base
+---
+
+Body.
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := parsePlanFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.BaseBranch != "feature/the-base" {
+		t.Errorf("BaseBranch = %q, want %q", plan.BaseBranch, "feature/the-base")
+	}
+}
+
+func TestPlanRoundTripPreservesBaseBranch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rt.md")
+	content := `---
+title: "Round trip"
+status: pending
+project: /tmp/myproject
+branch: dispatch/child
+base_branch: feature/the-base
+---
+
+Body.
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := parsePlanFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Status updates rewrite the file; the base must not be dropped en route.
+	plan.Status = "running"
+	if err := writePlanFile(plan); err != nil {
+		t.Fatal(err)
+	}
+	reread, err := parsePlanFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reread.BaseBranch != "feature/the-base" {
+		t.Errorf("BaseBranch after round trip = %q, want %q", reread.BaseBranch, "feature/the-base")
+	}
+}

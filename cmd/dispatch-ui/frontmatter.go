@@ -22,6 +22,7 @@ type Plan struct {
 	APIKeyEnv     string
 	BaseURL       string
 	Branch        string
+	BaseBranch    string // ref the worktree branches FROM; empty means HEAD
 	Priority      int
 	MaxRuntime    string
 	Created       string
@@ -100,6 +101,8 @@ func parsePlanFile(path string) (*Plan, error) {
 			plan.BaseURL = v
 		case "branch":
 			plan.Branch = v
+		case "base_branch":
+			plan.BaseBranch = v
 		case "priority":
 			n, _ := strconv.Atoi(v)
 			plan.Priority = n
@@ -266,6 +269,7 @@ func writePlanFile(p *Plan) error {
 	writeLine("api_key_env", p.APIKeyEnv)
 	writeLine("base_url", p.BaseURL)
 	writeLine("branch", p.Branch)
+	writeLine("base_branch", p.BaseBranch)
 	if p.Priority != 0 {
 		writeInt("priority", p.Priority)
 	}
