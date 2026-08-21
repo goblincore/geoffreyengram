@@ -34,6 +34,12 @@ var piModelCatalog = []string{
 	"kimi/k3",
 	"kimi/k3:high",
 	"kimi/k3-256k",
+	// OpenRouter stealth promo (free while it lasts): 1M context, mandatory
+	// reasoning. Registered for pi in ~/.pi/agent/models.json, auth via
+	// OPENROUTER_API_KEY / auth.json. ":xhigh" maps to the model's "max"
+	// effort through that file's reasoningEffortMap.
+	"openrouter/stealth/ox-alpha:xhigh",
+	"openrouter/stealth/ox-alpha",
 }
 
 // lookupModel returns the catalog entry for id, if any.
