@@ -5,6 +5,7 @@ import (
 	"flag"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -140,4 +141,76 @@ func TestParseFlagsInterspersed(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolveMemType(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		// An explicit `dualmem add` is an intentional save. Leaving the type
+		// empty dropped it below the Detail Path importance floor, so the row
+		// was routed to sketch and never became searchable.
+		{name: "empty becomes general", in: "", want: "general"},
+		{name: "whitespace becomes general", in: "   ", want: "general"},
+		{name: "explicit type preserved", in: "warning", want: "warning"},
+		{name: "explicit type trimmed", in: " decision ", want: "decision"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveMemType(tc.in); got != tc.want {
+				t.Errorf("resolveMemType(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeSectorHint(t *testing.T) {
+	valid := []string{"decision", "warning", "map", "continuity"}
+
+	t.Run("empty hint passes through with no warning", func(t *testing.T) {
+		sector, warning := normalizeSectorHint("", valid)
+		if sector != "" || warning != "" {
+			t.Errorf("got (%q, %q), want empty sector and no warning", sector, warning)
+		}
+	})
+
+	t.Run("valid hint is kept", func(t *testing.T) {
+		sector, warning := normalizeSectorHint("Warning", valid)
+		if sector != "warning" {
+			t.Errorf("sector = %q, want %q", sector, "warning")
+		}
+		if warning != "" {
+			t.Errorf("unexpected warning %q", warning)
+		}
+	})
+
+	// "procedural" and "semantic" are legacy cognitive sectors that this
+	// deployment no longer defines. They scored 0.0 on the sector bonus and
+	// silently sank the memory into the sketch path.
+	for _, legacy := range []string{"procedural", "semantic"} {
+		t.Run("legacy sector "+legacy+" is dropped and warned about", func(t *testing.T) {
+			sector, warning := normalizeSectorHint(legacy, valid)
+			if sector != "" {
+				t.Errorf("sector = %q, want %q so the classifier picks a real one", sector, "")
+			}
+			if warning == "" {
+				t.Fatalf("expected a warning naming the valid sectors")
+			}
+			for _, v := range valid {
+				if !strings.Contains(warning, v) {
+					t.Errorf("warning %q does not mention valid sector %q", warning, v)
+				}
+			}
+		})
+	}
+
+	t.Run("does not mutate the caller's slice", func(t *testing.T) {
+		in := []string{"warning", "decision"}
+		normalizeSectorHint("bogus", in)
+		if !reflect.DeepEqual(in, []string{"warning", "decision"}) {
+			t.Errorf("caller slice mutated to %v", in)
+		}
+	})
 }

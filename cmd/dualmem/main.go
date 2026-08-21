@@ -2,7 +2,7 @@
 //
 // Usage:
 //
-//	dualmem add --ns <namespace> --text "memory content" [--sector semantic] [--salience 0.8]
+//	dualmem add --ns <namespace> --text "memory content" [--type warning] [--salience 0.8]
 //	dualmem search --ns <namespace> "query" [--limit 5] [--json]
 //	dualmem context --ns <namespace> "query" [--budget 3000] [--no-graph] [--json]
 //	dualmem profile --ns <namespace> [--json]
@@ -464,11 +464,67 @@ Examples:
 
 // --- Commands ---
 
+// resolveMemType returns the type to record for an explicit CLI add.
+//
+// An empty --type is recorded as "general" rather than "". The Detail Path
+// scorer floors any typed memory at Theta+0.05, so this guarantees an explicit
+// `dualmem add` reaches the searchable Detail Path instead of being scored on
+// content alone. Untyped adds whose sector fell outside DetailBias lost the 0.3
+// sector bonus, landed under Theta, and were silently routed to the sketch
+// path, where `dualmem search` cannot see them.
+//
+// "general" is deliberately absent from supersedeThresholds, so defaulting to
+// it does not make ordinary adds supersede one another.
+func resolveMemType(flagValue string) string {
+	if trimmed := strings.TrimSpace(flagValue); trimmed != "" {
+		return trimmed
+	}
+	return "general"
+}
+
+// normalizeSectorHint validates an explicit --sector against the configured
+// sector set, returning the hint to use and a warning to show the user.
+//
+// An unrecognised hint is dropped rather than passed through: the legacy
+// cognitive sectors ("procedural", "semantic", ...) are not defined by
+// CodingSectors, so they score 0.0 on the sector bonus and bias the memory
+// away from the Detail Path. Dropping the hint lets the classifier choose a
+// real sector; the warning tells the caller their flag was ignored and why.
+func normalizeSectorHint(hint string, valid []string) (sector string, warning string) {
+	normalized := strings.ToLower(strings.TrimSpace(hint))
+	if normalized == "" {
+		return "", ""
+	}
+	for _, v := range valid {
+		if normalized == strings.ToLower(v) {
+			return normalized, ""
+		}
+	}
+	known := append([]string(nil), valid...)
+	sort.Strings(known)
+	return "", fmt.Sprintf(
+		"warning: unknown --sector %q — ignoring it and auto-classifying instead (valid sectors: %s)",
+		hint, strings.Join(known, ", "))
+}
+
+// sectorNames returns the sector names defined by a SectorConfig.
+func sectorNames(cfg *dualmem.SectorConfig) []string {
+	if cfg == nil {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.Anchors))
+	for name := range cfg.Anchors {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func cmdAdd(cfg CLIConfig) {
 	fs := flag.NewFlagSet("add", flag.ExitOnError)
 	ns := fs.String("ns", "", "Namespace")
 	text := fs.String("text", "", "Memory text (required)")
-	sector := fs.String("sector", "", "Sector hint (default: auto-classify; coding presets: decision, warning, map, continuity)")
+	sector := fs.String("sector", "", "Sector hint: decision, warning, map, continuity (default: auto-classify; anything else is ignored with a warning)")
 	salience := fs.Float64("salience", 0, "Salience override (0 = default 0.5)")
 	session := fs.String("session", "", "Session ID")
 	memType := fs.String("type", "", "Memory type: decision, warning, continuity, trace, architecture, investigation, requirement, test-strategy (default: general)")
@@ -511,12 +567,17 @@ func cmdAdd(cfg CLIConfig) {
 	}
 
 	ctx := context.Background()
+	sectorHint, sectorWarning := normalizeSectorHint(*sector, sectorNames(dualmem.CodingSectors()))
+	if sectorWarning != "" {
+		fmt.Fprintln(os.Stderr, sectorWarning)
+	}
+
 	err = engine.AddWithOptions(ctx, dualmem.MemoryInput{
 		UserMessage: *text,
-		SectorHint:  *sector,
+		SectorHint:  sectorHint,
 		Salience:    sal,
 		SessionID:   *session,
-		Type:        *memType,
+		Type:        resolveMemType(*memType),
 		Files:       filesList,
 	}, namespace)
 	if err != nil {
