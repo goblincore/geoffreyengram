@@ -61,7 +61,11 @@ func (dp *DetailPath) Insert(ctx context.Context, dm *DetailMemory, embedding []
 		if err != nil {
 			return "", err
 		}
-		if lowest != nil && lowest.ImportanceScore < dm.ImportanceScore {
+		// Use <= so a newcomer that ties the lowest still gets in, evicting the
+		// least-recently-accessed of the tied rows. With strict <, a namespace at
+		// capacity whose lowest score equalled the importance floor rejected every
+		// new memory forever — silently, since this path returns a nil error.
+		if lowest != nil && lowest.ImportanceScore <= dm.ImportanceScore {
 			demotedText = lowest.Text
 			if err := dp.store.DeleteDetail(lowest.ID); err != nil {
 				return "", err

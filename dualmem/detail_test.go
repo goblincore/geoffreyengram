@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExtractIdentifiers(t *testing.T) {
@@ -386,3 +387,97 @@ func TestDetailSearch_GraphBoostNilNoEffect(t *testing.T) {
 	}
 }
 
+
+// At capacity, a new memory whose importance ties the lowest existing one used
+// to be dropped: Insert required a strict lowest < new, so it returned the new
+// text for sketch routing and reported no error. The type floor pins large
+// numbers of memories at exactly Theta+0.05, so ties are the common case and
+// full namespaces silently stopped accepting anything new.
+func TestDetailInsert_TieAtCapacityEvictsLeastRecentlyAccessed(t *testing.T) {
+	store := newTestStore(t)
+	embedder := &mockEmbedder{dim: 64}
+	ctx := context.Background()
+	userID := "test-user-capacity"
+
+	const capacity = 3
+	const tiedScore = 0.70
+	dp := NewDetailPath(store, embedder, 0.65, capacity, nil)
+
+	// Fill to capacity with memories that all share the same importance score.
+	// "oldest" is the least recently accessed, so it is the one that should go.
+	fill := []struct {
+		id           string
+		lastAccessed time.Time
+	}{
+		{"keep-b", time.Now().Add(-1 * time.Hour)},
+		{"oldest", time.Now().Add(-72 * time.Hour)},
+		{"keep-a", time.Now().Add(-2 * time.Hour)},
+	}
+	for _, f := range fill {
+		emb, _ := embedder.Embed(ctx, f.id, "")
+		dm := &DetailMemory{
+			ID:              f.id,
+			Text:            "tied memory " + f.id,
+			Sector:          "decision",
+			Salience:        0.7,
+			ImportanceScore: tiedScore,
+			Type:            "general",
+			CreatedAt:       f.lastAccessed,
+			LastAccessedAt:  f.lastAccessed,
+		}
+		if err := store.InsertDetail(dm, emb, userID); err != nil {
+			t.Fatalf("seeding %s: %v", f.id, err)
+		}
+		// InsertDetail does not persist CreatedAt/LastAccessedAt — the columns
+		// default to datetime('now') at one-second resolution. Set them directly
+		// so the rows have the distinct timestamps that real data has.
+		stamp := f.lastAccessed.UTC().Format("2006-01-02 15:04:05")
+		if _, err := store.db.Exec(
+			`UPDATE detail_memories SET created_at = ?, last_accessed_at = ? WHERE id = ?`,
+			stamp, stamp, f.id); err != nil {
+			t.Fatalf("stamping %s: %v", f.id, err)
+		}
+	}
+
+	// A new memory with the identical score must still get in.
+	emb, _ := embedder.Embed(ctx, "newcomer", "")
+	newcomer := &DetailMemory{
+		ID:              "newcomer",
+		Text:            "tied memory newcomer",
+		Sector:          "decision",
+		Salience:        0.7,
+		ImportanceScore: tiedScore,
+		Type:            "general",
+		CreatedAt:       time.Now(),
+		LastAccessedAt:  time.Now(),
+	}
+	demoted, err := dp.Insert(ctx, newcomer, emb, userID)
+	if err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	details, err := store.GetDetailMemories(userID)
+	if err != nil {
+		t.Fatalf("GetDetailMemories: %v", err)
+	}
+	present := map[string]bool{}
+	for _, d := range details {
+		present[d.ID] = true
+	}
+
+	if !present["newcomer"] {
+		t.Errorf("newcomer was not inserted; Insert returned demoted=%q (it was routed to sketch instead)", demoted)
+	}
+	if len(details) != capacity {
+		t.Errorf("detail count = %d, want %d (capacity must be respected)", len(details), capacity)
+	}
+	if present["oldest"] {
+		t.Errorf("evicted the wrong row: least-recently-accessed 'oldest' should have been demoted, got %v", present)
+	}
+	if !present["keep-a"] || !present["keep-b"] {
+		t.Errorf("evicted a more-recently-accessed row; present = %v", present)
+	}
+	if demoted != "tied memory oldest" {
+		t.Errorf("demoted = %q, want the evicted oldest memory's text", demoted)
+	}
+}

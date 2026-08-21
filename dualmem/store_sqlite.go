@@ -705,7 +705,11 @@ func (s *SQLiteStore) GetDetailCount(userID string) (int, error) {
 func (s *SQLiteStore) GetLowestImportanceDetail(userID string) (*detailWithVector, error) {
 	row := s.db.QueryRow(`
 		SELECT id, user_id, text, embedding, importance_score, sector, entities_json, session_id, salience, created_at, last_accessed_at, access_count, type, files_json
-		FROM detail_memories WHERE user_id = ? ORDER BY importance_score ASC LIMIT 1`, userID)
+		FROM detail_memories WHERE user_id = ?
+		-- Tie-break least-recently-accessed first: the importance floor pins many
+		-- memories at exactly Theta+0.05, so ties are the common case and an
+		-- arbitrary pick made eviction non-deterministic.
+		ORDER BY importance_score ASC, last_accessed_at ASC, created_at ASC, id ASC LIMIT 1`, userID)
 
 	var d detailWithVector
 	var vecBlob []byte
